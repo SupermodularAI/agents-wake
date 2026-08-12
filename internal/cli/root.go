@@ -43,6 +43,9 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage: true,
 	}
 	cmd.SetVersionTemplate("{{.Version}}\n")
+	for _, newCmd := range commands {
+		cmd.AddCommand(newCmd())
+	}
 	return cmd
 }
 
