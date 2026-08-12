@@ -1,8 +1,12 @@
 name: CI
 
 on:
+  # Only main on push. Branch pushes are already covered by `pull_request`, and
+  # matching "**" here runs every job twice per commit — the concurrency group
+  # below cannot dedupe them because github.ref differs between the two events
+  # (refs/heads/<branch> vs refs/pull/<n>/merge).
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
 
 permissions:
