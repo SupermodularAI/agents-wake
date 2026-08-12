@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Formatting and linting are toolchain-independent, so they run once rather
+  # than per Go version. golangci-lint comes from go.tools.mod via `go tool`, so
+  # its version is pinned in one place and CI runs exactly what `make lint` runs.
+  lint:
+    name: fmt · lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          cache: true
+          # Without go.tools.sum in the key, the cache misses every run and
+          # golangci-lint is rebuilt from ~230 modules each time.
+          cache-dependency-path: |
+            go.sum
+            go.tools.sum
+
+      - name: gofmt · goimports
+        run: make fmt-check
+
+      - name: golangci-lint
+        run: make lint
+
+  test:
+    # "1.25.x" MUST match the go directive in go.mod: it is the floor we promise,
+    # and testing only `stable` would make that promise unverified. "stable"
+    # tracks the current release automatically, so this matrix does not rot.
+    name: vet · test (go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.25.x", "stable"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+
+      - name: go vet
+        run: make vet
+
+      - name: go test
+        run: make test
+
+  build:
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [darwin, linux]
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # `git describe` needs tags to produce a real version.
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          # Release artifacts are built with the current toolchain; the floor is
+          # what `test` above verifies.
+          go-version: stable
+          cache: true
+
+      # Cross-compiled from one runner because the binary is static and cgo-free
+      # (ADR-0001) — there is nothing platform-specific to link against, so a
+      # matrix of real macOS runners would buy nothing. GOOS/GOARCH are read by
+      # `go build` inside the Makefile, so this is the same command devs run.
+      - name: build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: make build
+
+      # Read from the embedded build info rather than the symbol table: the build
+      # strips symbols (-s -w), so a `go tool nm | grep _cgo_` check would find
+      # nothing on any binary and silently pass forever. Build info survives
+      # stripping and reports CGO_ENABLED as it was actually set.
+      - name: confirm the binary is cgo-free
+        run: |
+          go version -m dist/wake | grep -E '^\s+build\s+(CGO_ENABLED|GOOS|GOARCH)='
+          if ! go version -m dist/wake | grep -qE '^\s+build\s+CGO_ENABLED=0$'; then
+            echo "::error::CGO_ENABLED is not 0 — the binary is not the static artifact ADR-0001 promises"
+            exit 1
+          fi
+
+      - name: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: wake-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/wake
+          if-no-files-found: error
