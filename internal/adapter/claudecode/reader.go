@@ -22,11 +22,16 @@ type Result struct {
 	Pending   int
 }
 
-// Read streams one Claude Code transcript. repo must be the hash of a
-// previously consented root; this reader never resolves paths or calls git.
-func Read(reader io.Reader, repo record.Hash) (Result, error) {
-	if len(repo) != 32 {
-		return Result{}, errors.New("invalid repository identity")
+// Resolver maps a recorded working directory to a consented repository hash.
+// It returns false when the directory was never consented. The reader never
+// accesses the filesystem while resolving a transcript entry.
+type Resolver func(cwd string) (record.Hash, bool)
+
+// Read streams one Claude Code transcript. Only events accepted by resolve can
+// become records, so an adapter scan cannot widen project consent.
+func Read(reader io.Reader, resolve Resolver) (Result, error) {
+	if resolve == nil {
+		return Result{}, errors.New("missing repository resolver")
 	}
 
 	result := Result{}
@@ -47,7 +52,7 @@ func Read(reader io.Reader, repo record.Hash) (Result, error) {
 		for _, block := range entry.Message.Content {
 			switch block.Type {
 			case "tool_use":
-				if pendingCall, ok := entry.call(block); ok {
+				if pendingCall, ok := entry.call(block, resolve); ok {
 					pending[pendingCall.id] = pendingCall
 				}
 			case "tool_result":
@@ -56,7 +61,7 @@ func Read(reader io.Reader, repo record.Hash) (Result, error) {
 					continue
 				}
 				delete(pending, block.ToolUseID)
-				event, ok := pendingCall.complete(entry, block, repo)
+				event, ok := pendingCall.complete(entry, block)
 				if ok {
 					result.Records = append(result.Records, event)
 				}
@@ -73,6 +78,7 @@ func Read(reader io.Reader, repo record.Hash) (Result, error) {
 type transcriptEntry struct {
 	UUID                 string     `json:"uuid"`
 	SessionID            string     `json:"sessionId"`
+	CWD                  string     `json:"cwd"`
 	Timestamp            time.Time  `json:"timestamp"`
 	Version              string     `json:"version"`
 	AttributionMCPServer string     `json:"attributionMcpServer"`
@@ -105,21 +111,21 @@ func (entry transcriptEntry) valid() bool {
 }
 
 type call struct {
-	id              string
-	eventID         record.Hash
-	sessionID       record.Identifier
-	timestamp       time.Time
-	version         record.Version
-	kind            record.Kind
-	name            record.Identifier
-	packageName     record.Identifier
-	viaSkill        record.Identifier
-	model           record.Identifier
-	invoker         record.Invoker
-	attributionTool record.Identifier
+	id          string
+	eventID     record.Hash
+	sessionID   record.Identifier
+	timestamp   time.Time
+	version     record.Version
+	kind        record.Kind
+	name        record.Identifier
+	packageName record.Identifier
+	viaSkill    record.Identifier
+	model       record.Identifier
+	invoker     record.Invoker
+	repo        record.Hash
 }
 
-func (entry transcriptEntry) call(block contentBlock) (call, bool) {
+func (entry transcriptEntry) call(block contentBlock, resolve Resolver) (call, bool) {
 	id, err := record.BoundedIdentifier(block.ID)
 	if err != nil {
 		return call{}, false
@@ -132,6 +138,10 @@ func (entry transcriptEntry) call(block contentBlock) (call, bool) {
 	if err != nil {
 		return call{}, false
 	}
+	repo, consented := resolve(entry.CWD)
+	if !consented {
+		return call{}, false
+	}
 
 	derived := call{
 		id:        string(id),
@@ -141,6 +151,7 @@ func (entry transcriptEntry) call(block contentBlock) (call, bool) {
 		kind:      kindFor(name),
 		name:      name,
 		invoker:   record.InvokerModel,
+		repo:      repo,
 	}
 	if version, err := record.BoundedIdentifier(entry.Version); err == nil {
 		derived.version = record.Version(version)
@@ -151,16 +162,13 @@ func (entry transcriptEntry) call(block contentBlock) (call, bool) {
 	if skill, err := record.BoundedIdentifier(entry.AttributionSkill); err == nil {
 		derived.viaSkill = skill
 	}
-	if tool, err := record.BoundedIdentifier(entry.AttributionMCPTool); err == nil {
-		derived.attributionTool = tool
-	}
 	if packageName, ok := packageFromAttribution(entry.AttributionMCPServer); ok {
 		derived.packageName = packageName
 	}
 	return derived, true
 }
 
-func (call call) complete(entry transcriptEntry, block contentBlock, repo record.Hash) (record.Record, bool) {
+func (call call) complete(entry transcriptEntry, block contentBlock) (record.Record, bool) {
 	outcome := outcomeFor(entry, block)
 	return record.Record{
 		SchemaVersion:  record.SchemaVersion,
@@ -169,7 +177,7 @@ func (call call) complete(entry transcriptEntry, block contentBlock, repo record
 		Harness:        harness,
 		HarnessVersion: call.version,
 		SessionID:      call.sessionID,
-		Repo:           repo,
+		Repo:           call.repo,
 		Kind:           call.kind,
 		Name:           call.name,
 		Package:        call.packageName,
