@@ -668,6 +668,31 @@ func TestANonGitDirectoryIsAcceptedAsItsOwnRoot(t *testing.T) {
 	}
 }
 
+// Acceptance item 3, on the path a user actually takes. projects_test.go asserts
+// the mode writeProjects produces; this asserts that registering a repository is
+// what goes through it, since Register is the only caller a user reaches.
+func TestRegisterWritesTheTableAt0600(t *testing.T) {
+	p := testPaths(t)
+	root := mkdirAll(t, filepath.Join(tempRealDir(t), "repo"))
+
+	mustRegister(t, openRepos(t, p), root, "repo")
+
+	fi, err := os.Stat(p.ProjectsFile)
+	if err != nil {
+		t.Fatalf("stat projects.json: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("projects.json mode = %#o, want 0600", perm)
+	}
+	di, err := os.Stat(p.DataDir)
+	if err != nil {
+		t.Fatalf("stat the data root: %v", err)
+	}
+	if perm := di.Mode().Perm(); perm != 0o700 {
+		t.Errorf("data root mode = %#o, want 0700", perm)
+	}
+}
+
 // A sibling directory whose name merely starts with a consented root's name is
 // not inside it. Prefix matching on raw strings is the classic way this goes
 // wrong, and it would attribute one repository's work to another.
