@@ -505,6 +505,54 @@ func TestCaseFoldingIsDrivenByTheRecordedFlagNotTheDisk(t *testing.T) {
 	}
 }
 
+// The probe has to answer "does this filesystem fold case", not "does some other
+// name reach this directory". A sibling symlink whose name differs from the root
+// only in case reaches it on any filesystem, and recording case-insensitivity from
+// that would fold two genuinely distinct roots onto one id — the ext4 merge
+// ADR-0019 §5 refuses.
+//
+// The sibling is spelled as the probe's own re-spelling of the root, because that
+// is the only other name the probe ever looks at. On a case-insensitive filesystem
+// that name is already taken by the root itself, which is the answer rather than a
+// failure, so the test asserts whichever branch its filesystem puts it in.
+func TestCaseProbeIsNotFooledByASymlinkDifferingOnlyInCase(t *testing.T) {
+	p := testPaths(t)
+	base := tempRealDir(t)
+	root := mkdirAll(t, filepath.Join(base, "caseprobe"))
+	respelled := filepath.Join(base, "caseprobE")
+
+	linkErr := os.Symlink(root, respelled)
+	folding := errors.Is(linkErr, os.ErrExist)
+	if linkErr != nil && !folding {
+		t.Skipf("this filesystem does not support symlinks: %v", linkErr)
+	}
+
+	r := openRepos(t, p)
+	id := mustRegister(t, r, root, "repo")
+
+	table, _, err := readProjects(p.ProjectsFile)
+	if err != nil {
+		t.Fatalf("readProjects() = %v", err)
+	}
+	if len(table.Projects) != 1 {
+		t.Fatalf("the table holds %d entries, want 1", len(table.Projects))
+	}
+	if got := table.Projects[0].CaseInsensitive; got != folding {
+		t.Errorf("recorded case_insensitive = %v, want %v — the probe reported on a symlink rather than on the filesystem", got, folding)
+	}
+
+	got := mustIdentify(t, r, filepath.Join(respelled, "sub"))
+	if folding {
+		if got.ID != id || !got.Matched {
+			t.Errorf("on a case-insensitive filesystem, Identify(%q) = %+v, want id %q with Matched true", respelled, got, id)
+		}
+		return
+	}
+	if got.Matched || got.ID == id {
+		t.Errorf("Identify(%q) = %+v, want an unmatched id different from %q — an unregistered symlink is not a case-folded spelling", respelled, got, id)
+	}
+}
+
 // Constraint 16 and ADR-0019 §9: the table is append-only and a root once
 // recorded is never reassigned, which is what T071's "an already-discovered
 // repository keeps its existing identity" rests on.
@@ -1002,6 +1050,39 @@ func TestLexicalCleanNormalizesWithoutTouchingTheDisk(t *testing.T) {
 	for _, in := range []string{"", "a", "./a", "../a", "~/a"} {
 		if got, err := lexicalClean(in); err == nil {
 			t.Errorf("lexicalClean(%q) = (%q, nil), want an error", in, got)
+		}
+	}
+}
+
+// The re-spelling has to land in the final path element, because that is the
+// directory whose filesystem the probe is asking about: a mount point one element
+// up can be a different filesystem with a different answer, and the answer decides
+// whether two spellings of one root become one id or two (ADR-0019 §5). Walking up
+// is the fallback for an element with no ASCII letter to flip (/mnt/vol/2024), and
+// a path with none at all reports case-sensitive, which keeps spellings apart
+// rather than merging them.
+func TestFlipCaseOfLastElement(t *testing.T) {
+	for _, c := range []struct {
+		in    string
+		want  string
+		found bool
+	}{
+		{"/a/repo", "/a/repO", true},
+		{"/a/Repo", "/a/RepO", true},
+		{"/a/REPO", "/a/REPo", true},
+		{"/x/b-9", "/x/B-9", true},
+		{"/a", "/A", true},
+		// The final element has no letter, so the nearest ancestor that has one
+		// answers instead.
+		{"/mnt/vol/2024", "/mnt/voL/2024", true},
+		{"/mnt/2024/1/2", "/mnT/2024/1/2", true},
+		// Nothing to flip anywhere: reported as case-sensitive, unchanged.
+		{"/2024/2025", "/2024/2025", false},
+		{"/", "/", false},
+	} {
+		got, found := flipCaseOfLastElement(c.in)
+		if got != c.want || found != c.found {
+			t.Errorf("flipCaseOfLastElement(%q) = (%q, %v), want (%q, %v)", c.in, got, found, c.want, c.found)
 		}
 	}
 }
