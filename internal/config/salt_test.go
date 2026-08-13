@@ -171,8 +171,10 @@ func TestDeletingTheDataRootKeepsTheSalt(t *testing.T) {
 }
 
 // Two first runs at once — a scan and a hook firing together — must not have one
-// overwrite the other's salt. O_EXCL is what makes the loser re-read instead of
-// winning. Run with -race, this is also the only concurrent path in the package.
+// overwrite the other's salt. os.Link failing with fs.ErrExist is what makes the
+// loser re-read instead of winning: a rename would replace a salt the winner has
+// already handed out. Run with -race. The package's other concurrent path is the
+// lock Register holds over the resolution table.
 func TestConcurrentFirstRunsAgreeOnOneSalt(t *testing.T) {
 	p := testPaths(t)
 
