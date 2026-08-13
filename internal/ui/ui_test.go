@@ -40,6 +40,25 @@ func TestHandlerRendersEmptyState(t *testing.T) {
 	}
 }
 
+func TestHandlerExcludesBuiltinToolsFromPrimitiveTable(t *testing.T) {
+	source := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	ok := record.OutcomeOK
+	builtin := event("builtin", &ok)
+	builtin.Name = "Bash"
+	builtin.Kind = record.KindBuiltinTool
+	skill := event("skill", &ok)
+	skill.Name = "pr-review"
+	if _, err := source.Append([]record.Record{builtin, skill}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	response := httptest.NewRecorder()
+	Handler(source).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := response.Body.String()
+	if strings.Contains(body, ">Bash<") || !strings.Contains(body, ">pr-review<") {
+		t.Fatalf("primitive table did not filter built-ins: %s", body)
+	}
+}
+
 func event(id string, outcome *record.Outcome) record.Record {
 	return record.Record{SchemaVersion: record.SchemaVersion, EventID: record.DeriveEventID("claude-code", record.Identifier(id)), Timestamp: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC), Harness: "claude-code", SessionID: "session-1", Repo: "0123456789abcdef0123456789abcdef", Kind: record.KindSkill, Name: "review", Invoker: record.InvokerModel, Outcome: outcome}
 }

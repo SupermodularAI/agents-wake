@@ -50,6 +50,15 @@ func Ingest(paths config.Paths, claudeDir string) (int, error) {
 	return ingestHistory(repos, claudeDir, store.New(filepath.Join(paths.DataDir, eventsFile)))
 }
 
+// Rebuild discards only the derived event spool before importing consented
+// history again. Project consent, repository identities, and hooks remain.
+func Rebuild(paths config.Paths, claudeDir string) (int, error) {
+	if err := os.Remove(filepath.Join(paths.DataDir, eventsFile)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return 0, err
+	}
+	return Ingest(paths, claudeDir)
+}
+
 func addConsentedRepo(paths config.Paths, id string) error {
 	current, err := config.Load(paths)
 	if err != nil {

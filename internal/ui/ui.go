@@ -82,6 +82,9 @@ func view(summary metrics.Summary) dashboardView {
 		result.Outcomes = append(result.Outcomes, outcomeView{Name: strings.ReplaceAll(string(outcome), "_", " "), Count: number(count), Percent: fmt.Sprintf("%.1f", percent)})
 	}
 	for _, primitive := range summary.Primitives {
+		if primitive.Kind == record.KindBuiltinTool {
+			continue
+		}
 		result.Primitives = append(result.Primitives, primitiveView{Name: string(primitive.Name), Kind: strings.ReplaceAll(string(primitive.Kind), "_", " "), Harness: string(primitive.Harness), LastUsed: primitive.LastUsed.Local().Format("Jan 02 15:04"), Invocations: number(primitive.Invocations), Sessions: number(primitive.Sessions), ErrorRate: rate(primitive.ErrorRate), ErrorDetail: ratioDetail(primitive.ErrorRate)})
 	}
 	return result

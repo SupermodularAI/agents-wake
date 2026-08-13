@@ -32,10 +32,7 @@ func TestInitPreservesHooksAndImportsOnlyConsentedHistory(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(transcriptDir, "session.jsonl"), []byte(transcript), 0o600); err != nil {
 		t.Fatalf("WriteFile() transcript error = %v", err)
 	}
-	paths := config.Paths{ConfigDir: filepath.Join(t.TempDir(), "config"), DataDir: filepath.Join(t.TempDir(), "data")}
-	paths.ConfigFile = filepath.Join(paths.ConfigDir, "config.toml")
-	paths.SaltFile = filepath.Join(paths.ConfigDir, "salt.bin")
-	paths.ProjectsFile = filepath.Join(paths.DataDir, "projects.bin")
+	paths := testPaths(t)
 
 	written, err := Init(paths, root, claudeDir)
 	if err != nil {
@@ -60,6 +57,51 @@ func TestInitPreservesHooksAndImportsOnlyConsentedHistory(t *testing.T) {
 	if err != nil || second != 0 {
 		t.Fatalf("second Init() = %d, %v; want 0, nil", second, err)
 	}
+}
+
+func TestRebuildReplacesOnlyTheDerivedEventStore(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("MkdirAll() root error = %v", err)
+	}
+	claudeDir := filepath.Join(t.TempDir(), "claude")
+	transcriptDir := filepath.Join(claudeDir, "projects", "project")
+	if err := os.MkdirAll(transcriptDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll() transcript error = %v", err)
+	}
+	transcript := `{"uuid":"entry-1","sessionId":"session-1","cwd":"` + root + `","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}
+{"uuid":"entry-2","sessionId":"session-1","cwd":"` + root + `","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`
+	if err := os.WriteFile(filepath.Join(transcriptDir, "session.jsonl"), []byte(transcript), 0o600); err != nil {
+		t.Fatalf("WriteFile() transcript error = %v", err)
+	}
+	paths := testPaths(t)
+	if _, err := Init(paths, root, claudeDir); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	projectsBefore, err := os.ReadFile(paths.ProjectsFile)
+	if err != nil {
+		t.Fatalf("ReadFile() projects error = %v", err)
+	}
+	if _, rebuildErr := Rebuild(paths, claudeDir); rebuildErr != nil {
+		t.Fatalf("Rebuild() error = %v", rebuildErr)
+	}
+	projectsAfter, err := os.ReadFile(paths.ProjectsFile)
+	if err != nil || string(projectsBefore) != string(projectsAfter) {
+		t.Fatalf("Rebuild() changed consented projects: %v", err)
+	}
+	entries, err := store.New(filepath.Join(paths.DataDir, eventsFile)).Entries(0)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("rebuilt entries = %d, error = %v", len(entries), err)
+	}
+}
+
+func testPaths(t *testing.T) config.Paths {
+	t.Helper()
+	paths := config.Paths{ConfigDir: filepath.Join(t.TempDir(), "config"), DataDir: filepath.Join(t.TempDir(), "data")}
+	paths.ConfigFile = filepath.Join(paths.ConfigDir, "config.toml")
+	paths.SaltFile = filepath.Join(paths.ConfigDir, "salt.bin")
+	paths.ProjectsFile = filepath.Join(paths.DataDir, "projects.bin")
+	return paths
 }
 
 func containsCommand(raw []byte, command string) bool {
