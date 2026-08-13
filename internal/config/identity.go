@@ -22,6 +22,11 @@ var errPathNotAbsolute = errors.New("must be an absolute path")
 // directory that exists. It names no path for the same reason.
 var errRootNotADirectory = errors.New("a repository root must be a directory that exists")
 
+// errUnreadableEntry is the fail-closed refusal: an entry readProjects would drop
+// is worse than a refusal, because the registration would look successful and the
+// repository would collect nothing (plan §3.4).
+var errUnreadableEntry = errors.New("refusing to record a repository this build could not read back")
+
 // Identity is which repository an observed working directory belongs to.
 //
 // It carries an id and nothing else that could identify a repository: no path, no
@@ -48,6 +53,10 @@ type Identity struct {
 // depend on the event, not on the state of the disk when the log is scanned, or
 // re-scanning the same log would produce different ids and ADR-0004's dedup would
 // keep both.
+//
+// One *Repos is used from one goroutine at a time. Register's lock serialises
+// writers of the file, including writers in other processes, but it does not make
+// a single Repos value safe to share between goroutines.
 type Repos struct {
 	paths   Paths
 	salt    []byte
@@ -145,6 +154,12 @@ func (r *Repos) Identify(cwd string) (Identity, error) {
 //     (ADR-0019 §5) — that is what keeps the recorded roots mutually non-nested,
 //     and therefore longest-prefix resolution unique.
 //
+// Append-only holds across writers, not only within one: the table is re-read
+// under an exclusive lock and the decision is made against what is on disk, never
+// against the snapshot this Repos opened with. ADR-0019 §9 makes a second writer
+// part of the design, and an entry deleted by one is a consented repository that
+// collects nothing with no error. See withProjectsLock.
+//
 // A refused registration writes nothing.
 func (r *Repos) Register(root, label string) (string, error) {
 	if label == "" || strings.ContainsAny(label, "/"+string(filepath.Separator)) {
@@ -157,6 +172,9 @@ func (r *Repos) Register(root, label string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("a repository root %w", err)
 	}
+	// Both disk-dependent answers are taken before the lock: they are about the
+	// offered directory, not about the table, and holding a lock across them would
+	// serialise every registration behind two stats for no gain.
 	canonical, err := canonicalRoot(given)
 	if err != nil {
 		return "", err
@@ -171,32 +189,66 @@ func (r *Repos) Register(root, label string) (string, error) {
 		aliases = append(aliases, given)
 	}
 
-	// An exact match is a re-registration, not nesting: the id stands, and the
-	// only thing that may change is the set of spellings it answers to.
-	if i := slices.IndexFunc(r.table.Projects, func(e projectEntry) bool { return e.Root == canonical }); i >= 0 {
-		existing := r.table.Projects[i]
-		added := false
-		for _, alias := range aliases {
-			if alias != existing.Root && !slices.Contains(existing.Aliases, alias) {
-				existing.Aliases = append(existing.Aliases, alias)
-				added = true
+	id := ""
+	lockErr := withProjectsLock(r.paths.ProjectsFile, func() error {
+		// The re-read is the point of the lock. Deciding from r.table — a snapshot
+		// taken at OpenRepos — and then republishing the whole file would erase any
+		// entry another writer recorded since.
+		table, dropped, readErr := readProjects(r.paths.ProjectsFile)
+		if readErr != nil {
+			return readErr
+		}
+		updated, entryID, changed, decideErr := r.registration(table, canonical, aliases, label, fold)
+		if decideErr != nil {
+			return decideErr
+		}
+		if changed {
+			if writeErr := writeProjects(r.paths.ProjectsFile, updated); writeErr != nil {
+				return writeErr
 			}
 		}
-		if !added {
-			return existing.ID, nil
+		// The dropped count never goes down within a session: this write leaves out
+		// the entries the re-read refused, and making that shrinkage visible is the
+		// count's whole job (ADR-0019 §7).
+		r.table, r.dropped, id = updated, max(r.dropped, dropped), entryID
+		return nil
+	})
+	if lockErr != nil {
+		return "", lockErr
+	}
+	return id, nil
+}
+
+// registration decides what the table becomes when a consented root is offered.
+//
+// It is pure over the table it is handed — every disk-dependent answer, the
+// canonical spelling and the case-folding flag, was obtained before the lock was
+// taken — so the caller can read the table, decide, and write inside one locked
+// section. changed reports whether there is anything to write.
+func (r *Repos) registration(table projectsFile, canonical string, aliases []string, label string, fold bool) (updated projectsFile, id string, changed bool, err error) {
+	// An exact match is a re-registration, not nesting: the id stands, and the
+	// only thing that may change is the set of spellings it answers to.
+	if i := slices.IndexFunc(table.Projects, func(e projectEntry) bool { return e.Root == canonical }); i >= 0 {
+		existing := table.Projects[i]
+		added := []string{}
+		for _, alias := range aliases {
+			if alias != existing.Root && !slices.Contains(existing.Aliases, alias) {
+				added = append(added, alias)
+			}
 		}
-		updated := r.table
-		updated.Projects = slices.Clone(r.table.Projects)
-		updated.Projects[i] = existing
-		if err := writeProjects(r.paths.ProjectsFile, updated); err != nil {
-			return "", err
+		if len(added) == 0 {
+			return table, existing.ID, false, nil
 		}
-		r.table = updated
-		return existing.ID, nil
+		// Cloned before appending: the entry is a copy of the recorded one, but its
+		// alias slice still shares the recorded backing array.
+		existing.Aliases = append(slices.Clone(existing.Aliases), added...)
+		table.Projects = slices.Clone(table.Projects)
+		table.Projects[i] = existing
+		return table, existing.ID, true, nil
 	}
 
-	if nested := r.nestedWith(append([]string{canonical}, aliases...), fold); nested != nil {
-		return "", nested
+	if nested := nestedWith(table.Projects, append([]string{canonical}, aliases...), fold, -1); nested != nil {
+		return table, "", false, nested
 	}
 
 	entry := projectEntry{
@@ -207,31 +259,30 @@ func (r *Repos) Register(root, label string) (string, error) {
 		CaseInsensitive: fold,
 	}
 	if !entry.valid() {
-		// Fail closed. An entry readProjects would drop is worse than a refusal:
-		// the registration would look successful and the repository would collect
-		// nothing (plan §3.4).
-		return "", errors.New("refusing to record a repository this build could not read back")
+		return table, "", false, errUnreadableEntry
 	}
 
-	updated := r.table
-	updated.Projects = append(slices.Clone(r.table.Projects), entry)
-	if err := writeProjects(r.paths.ProjectsFile, updated); err != nil {
-		return "", err
-	}
-	r.table = updated
-	return entry.ID, nil
+	table.Projects = append(slices.Clone(table.Projects), entry)
+	return table, entry.ID, true, nil
 }
 
 // nestedWith reports the recorded entry that the offered spellings nest with, in
-// either direction, or nil when there is none.
+// either direction, or nil when there is none. The entry at index exempt — -1 for
+// none — is skipped.
 //
 // Case folding here is the union of the recorded flag and the flag just probed for
 // the new root: the two may sit on different filesystems, and the conservative
 // direction is to refuse. A missed nesting is a table with two overlapping roots,
 // where longest-prefix resolution stops being unique; a refusal is visible and the
-// user can pick which root they meant.
-func (r *Repos) nestedWith(offered []string, fold bool) *NestedRootError {
-	for _, entry := range r.table.Projects {
+// user can pick which root they meant. The cost of the union is that nestedWith
+// and Identify fold by different rules — per entry there, across both here — so a
+// registration can be refused as nested that Identify would not in fact have
+// resolved ambiguously.
+func nestedWith(entries []projectEntry, offered []string, fold bool, exempt int) *NestedRootError {
+	for i, entry := range entries {
+		if i == exempt {
+			continue
+		}
 		folded := fold || entry.CaseInsensitive
 		for _, recorded := range entry.spellings() {
 			for _, candidate := range offered {

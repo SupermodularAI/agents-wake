@@ -3,9 +3,12 @@ package config
 import (
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -534,6 +537,156 @@ func TestRegisterIsIdempotentAndKeepsTheExistingIdentity(t *testing.T) {
 	}
 	if table.Projects[0].Root != root {
 		t.Errorf("recorded root = %q, want %q", table.Projects[0].Root, root)
+	}
+}
+
+// Constraint 16 across writers, not only within one. ADR-0019 §9 makes a second
+// writer part of the design — under --all the ingest sweep registers roots while
+// init (T071) may be registering one — and both Repos values here are opened
+// before either writes, which is the interleaving two processes produce.
+//
+// Writing the whole table from the snapshot taken at open erases whatever the
+// other writer recorded in between. The cost is not cosmetic: a consented
+// repository missing from the table resolves unmatched, so once T101's consent
+// filter lands it collects nothing, with no error — the failure ADR-0019 exists
+// to prevent.
+func TestRegisterKeepsAnEntryWrittenByAnotherRepos(t *testing.T) {
+	p := testPaths(t)
+	base := tempRealDir(t)
+	alpha := mkdirAll(t, filepath.Join(base, "alpha"))
+	beta := mkdirAll(t, filepath.Join(base, "beta"))
+
+	// Both opened before either writes. Opening the second afterwards is the one
+	// interleaving that cannot fail.
+	first, second := openRepos(t, p), openRepos(t, p)
+	alphaID := mustRegister(t, first, alpha, "alpha")
+	betaID := mustRegister(t, second, beta, "beta")
+	if alphaID == betaID {
+		t.Fatalf("two different roots share the id %q", alphaID)
+	}
+
+	table, _, err := readProjects(p.ProjectsFile)
+	if err != nil {
+		t.Fatalf("readProjects() = %v", err)
+	}
+	if len(table.Projects) != 2 {
+		t.Fatalf("the table holds %d entries, want 2 — the second writer erased the first's entry", len(table.Projects))
+	}
+
+	// What the erasure actually costs, asserted on the path T101 will take.
+	fresh := openRepos(t, p)
+	for _, c := range []struct{ root, want string }{{alpha, alphaID}, {beta, betaID}} {
+		if got := mustIdentify(t, fresh, filepath.Join(c.root, "sub")); got.ID != c.want || !got.Matched {
+			t.Errorf("Identify(%q) = %+v, want id %q with Matched true", c.root, got, c.want)
+		}
+	}
+
+	// The writer that went second merged onto what was on disk, so its own table
+	// holds the other's entry too.
+	if got := mustIdentify(t, second, filepath.Join(alpha, "sub")); got.ID != alphaID || !got.Matched {
+		t.Errorf("the second writer resolves %q as %+v, want id %q with Matched true", alpha, got, alphaID)
+	}
+}
+
+// envChildRoot carries the root a child process should register. TestMain reads
+// it, so a child registers one root and exits instead of running the suite.
+const envChildRoot = "WAKE_TEST_REGISTER_ROOT"
+
+// TestMain gives this package a second entry point for the multi-process
+// registration test below. Cross-process exclusion cannot be observed from inside
+// one process, and this is the cheapest honest way to have two.
+func TestMain(m *testing.M) {
+	if root := os.Getenv(envChildRoot); root != "" {
+		os.Exit(registerInChildProcess(root))
+	}
+	os.Exit(m.Run())
+}
+
+// registerInChildProcess is the whole child: resolve the paths the parent's HOME
+// points at, register one root, exit. The parent reports whatever reaches stderr.
+func registerInChildProcess(root string) int {
+	fail := func(err error) int {
+		fmt.Fprintf(os.Stderr, "registering a root: %v\n", err)
+		return 1
+	}
+	p, err := ResolvePaths()
+	if err != nil {
+		return fail(err)
+	}
+	r, err := OpenRepos(p)
+	if err != nil {
+		return fail(err)
+	}
+	if _, err := r.Register(root, filepath.Base(root)); err != nil {
+		return fail(err)
+	}
+	return 0
+}
+
+// The same property as the test above, across real processes. It is the case that
+// matters — a hook firing during a scan, or the --all sweep running while the user
+// runs init — and the exclusion that makes it safe is per-process by nature, so
+// goroutines in one process prove nothing about it.
+//
+// The deterministic proof of the read-modify-write hole is the test above; this one
+// is the proof that the mechanism holds when the writers are not in the same
+// address space. It also exercises the salt's first-run race across processes,
+// which in-process goroutines could not: every child's id has to come out of the
+// one salt, or the ids below would not resolve.
+func TestConcurrentRegistrationsInSeparateProcessesAllSurvive(t *testing.T) {
+	p := testPaths(t)
+	base := tempRealDir(t)
+
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locating the test binary: %v", err)
+	}
+
+	const children = 4
+	roots := make([]string, children)
+	output := make([]string, children)
+	failures := make([]error, children)
+
+	var wg sync.WaitGroup
+	for i := range children {
+		roots[i] = mkdirAll(t, filepath.Join(base, fmt.Sprintf("repo-%d", i)))
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cmd := exec.Command(binary)
+			// HOME comes from testPaths, so the child resolves the same roots.
+			cmd.Env = append(os.Environ(), envChildRoot+"="+roots[i])
+			out, runErr := cmd.CombinedOutput()
+			output[i], failures[i] = string(out), runErr
+		}()
+	}
+	wg.Wait()
+
+	for i, err := range failures {
+		if err != nil {
+			t.Fatalf("child %d exited %v: %s", i, err, output[i])
+		}
+	}
+
+	table, _, err := readProjects(p.ProjectsFile)
+	if err != nil {
+		t.Fatalf("readProjects() = %v", err)
+	}
+	if len(table.Projects) != children {
+		t.Fatalf("the table holds %d entries, want %d — a registration was lost", len(table.Projects), children)
+	}
+
+	r := openRepos(t, p)
+	ids := make(map[string]bool, children)
+	for _, root := range roots {
+		got := mustIdentify(t, r, filepath.Join(root, "sub"))
+		if !got.Matched {
+			t.Errorf("Identify(%q) = %+v, want Matched true", root, got)
+		}
+		ids[got.ID] = true
+	}
+	if len(ids) != children {
+		t.Errorf("%d roots resolved to %d distinct ids; every child hashed under a different salt", children, len(ids))
 	}
 }
 
