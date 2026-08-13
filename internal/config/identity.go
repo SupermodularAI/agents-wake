@@ -150,9 +150,10 @@ func (r *Repos) Identify(cwd string) (Identity, error) {
 //     identity";
 //   - a new spelling of a recorded root appends an alias, which is additive and
 //     leaves the id, the root and the label where they are;
-//   - a root nested inside a recorded one, or containing one, is refused
-//     (ADR-0019 §5) — that is what keeps the recorded roots mutually non-nested,
-//     and therefore longest-prefix resolution unique.
+//   - a root — or a new spelling of one — nested inside a recorded root or alias,
+//     or containing one, is refused (ADR-0019 §5) in both directions. That is what
+//     keeps the recorded spellings mutually non-nested, and therefore
+//     longest-prefix resolution unique.
 //
 // Append-only holds across writers, not only within one: the table is re-read
 // under an exclusive lock and the decision is made against what is on disk, never
@@ -239,9 +240,23 @@ func (r *Repos) registration(table projectsFile, canonical string, aliases []str
 		if len(added) == 0 {
 			return table, existing.ID, false, nil
 		}
+		// An alias is a recorded spelling, so ADR-0019 §5's refusal applies to it as
+		// well: a spelling that sits inside another consented root would attribute
+		// that subtree to this repository instead of the one the user consented to
+		// for it, and the recorded spellings would stop being mutually non-nested.
+		// Only the new spellings are checked — the canonical root is already
+		// recorded and any existing alias was checked when it was appended — and this
+		// entry is exempt, because a spelling nested inside its own root resolves to
+		// the same id either way and there is nothing ambiguous to refuse.
+		if nested := nestedWith(table.Projects, added, fold, i); nested != nil {
+			return table, "", false, nested
+		}
 		// Cloned before appending: the entry is a copy of the recorded one, but its
 		// alias slice still shares the recorded backing array.
 		existing.Aliases = append(slices.Clone(existing.Aliases), added...)
+		if !existing.valid() {
+			return table, "", false, errUnreadableEntry
+		}
 		table.Projects = slices.Clone(table.Projects)
 		table.Projects[i] = existing
 		return table, existing.ID, true, nil

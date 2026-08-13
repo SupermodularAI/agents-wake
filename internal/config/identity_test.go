@@ -741,6 +741,90 @@ func TestRegisterAppendsAnAliasWithoutReassigningTheRoot(t *testing.T) {
 	}
 }
 
+// ADR-0019 §5: nesting is refused against recorded roots and aliases in both
+// directions, "so consent is still checked against every spelling a root answers
+// to". An alias is a recorded spelling, so appending one that sits inside another
+// consented root breaks the invariant refusing nesting exists to keep: the
+// recorded spellings stop being mutually non-nested, and work under that subtree
+// would be attributed to the aliased repository rather than to the one the user
+// consented to for it.
+//
+// The counter-argument is that the directory genuinely is the aliased repository.
+// The ADR wins on visibility: a refused init is something the user sees and can
+// act on, and a silent mis-attribution is not — which is this package's posture
+// everywhere else.
+func TestRegisteringAnAliasInsideAnotherConsentedRootIsRefused(t *testing.T) {
+	p := testPaths(t)
+	base := tempRealDir(t)
+	target := mkdirAll(t, filepath.Join(base, "target"))
+	other := mkdirAll(t, filepath.Join(base, "other"))
+	link := filepath.Join(other, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("this filesystem does not support symlinks: %v", err)
+	}
+
+	r := openRepos(t, p)
+	targetID := mustRegister(t, r, target, "target")
+	otherID := mustRegister(t, r, other, "other")
+	before := readFileOrFail(t, p.ProjectsFile)
+
+	// The canonical root of link is target, which is already recorded — the path
+	// that returns the existing id and appends a spelling to it.
+	id, err := r.Register(link, "via-link")
+	var nested *NestedRootError
+	if !errors.As(err, &nested) {
+		t.Fatalf("Register(%q) = (%q, %v), want a *NestedRootError", link, id, err)
+	}
+	if nested.EnclosingID != otherID {
+		t.Errorf("NestedRootError.EnclosingID = %q, want the enclosing repository %q", nested.EnclosingID, otherID)
+	}
+	if nested.Outer {
+		t.Error("NestedRootError.Outer = true, want false — the offered spelling is inside the recorded root")
+	}
+	if got := readFileOrFail(t, p.ProjectsFile); got != before {
+		t.Error("a refused registration rewrote projects.json")
+	}
+
+	// The visible half of the refusal: the subtree keeps resolving to the root that
+	// lexically contains it, so nothing is silently reattributed to target while the
+	// user is being told to pick which root they meant.
+	if got := mustIdentify(t, r, filepath.Join(link, "sub")); got.ID != otherID || !got.Matched {
+		t.Errorf("Identify(%q) = %+v, want the enclosing id %q with Matched true", link, got, otherID)
+	}
+	if got := mustIdentify(t, r, filepath.Join(target, "sub")); got.ID != targetID || !got.Matched {
+		t.Errorf("Identify(%q) = %+v, want id %q with Matched true", target, got, targetID)
+	}
+}
+
+// Fail closed on both writing paths (plan §3.4): an entry readProjects would drop
+// is worse than a refusal, because the registration would look successful and the
+// repository would collect nothing. Register cannot reach this — every spelling it
+// passes down has been through lexicalClean — which is why the check is asserted
+// at the seam where it can be.
+func TestRegistrationRefusesAnEntryItCouldNotReadBack(t *testing.T) {
+	p := testPaths(t)
+	r := openRepos(t, p)
+	recorded := projectEntry{ID: hexID('a'), Label: "repo", Root: "/repo"}
+
+	for _, c := range []struct {
+		name  string
+		table projectsFile
+	}{
+		{"a new entry", projectsFile{Version: projectsVersion}},
+		{"an alias appended to a recorded entry", projectsFile{Version: projectsVersion, Projects: []projectEntry{recorded}}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, id, changed, err := r.registration(c.table, "/repo", []string{"not-absolute"}, "repo", false)
+			if !errors.Is(err, errUnreadableEntry) {
+				t.Fatalf("registration() = (%q, %v, %v), want errUnreadableEntry", id, changed, err)
+			}
+			if changed {
+				t.Error("registration() reported a change alongside its refusal")
+			}
+		})
+	}
+}
+
 // A label is display-only and must not start looking like the path it must never
 // be (plan §3.4). The rejection does not echo it, because a label is a repository
 // name.
