@@ -200,6 +200,84 @@ func TestConcurrentFirstRunsAgreeOnOneSalt(t *testing.T) {
 			t.Fatalf("runner %d got a different salt from runner 0; a concurrent creator overwrote one", i)
 		}
 	}
+	// Seven of the eight runners lost the race; none of them may leave the salt
+	// it generated behind.
+	assertNoLeftoverSaltFiles(t, p)
+}
+
+// The other half of losing a race safely: the salt file's appearance has to be
+// atomic. A loser reads the file the moment it exists, and a wrong-length read is
+// fail-closed and permanent by design — so a file that is visible before its 32
+// bytes are in it turns a legitimate first run into errSaltWrongLength. This
+// watches the path a loser reads while a first run creates it, and asserts the
+// file is never readable in a state readSalt rejects.
+func TestTheSaltFileIsNeverVisibleAtAPartialLength(t *testing.T) {
+	// Each attempt is one narrow window; a handful of them is what makes hitting
+	// it likely rather than lucky.
+	const attempts = 50
+
+	for range attempts {
+		p := testPaths(t)
+
+		stop := make(chan struct{})
+		var (
+			wg      sync.WaitGroup
+			partial error
+		)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				_, err := readSalt(p)
+				switch {
+				case err == nil:
+					// A complete salt is on disk; there is nothing left to catch.
+					return
+				case !errors.Is(err, os.ErrNotExist):
+					// Exactly what a losing creator would have returned.
+					partial = err
+					return
+				}
+				select {
+				case <-stop:
+					return
+				default:
+				}
+			}
+		}()
+
+		salt, err := loadOrCreateSalt(p)
+		close(stop)
+		wg.Wait()
+
+		if err != nil {
+			t.Fatalf("loadOrCreateSalt() = %v", err)
+		}
+		if len(salt) != saltLen {
+			t.Fatalf("loadOrCreateSalt() returned %d bytes, want %d", len(salt), saltLen)
+		}
+		if partial != nil {
+			t.Fatalf("a concurrent reader saw the salt file mid-creation: %v", partial)
+		}
+		assertNoLeftoverSaltFiles(t, p)
+	}
+}
+
+// The salt is written somewhere else first and linked into place, so the config
+// root must not be left holding a second copy of it: a stray file with the salt
+// in it is the secret sitting where nothing would ever clean it up.
+func assertNoLeftoverSaltFiles(t *testing.T, p Paths) {
+	t.Helper()
+
+	entries, err := os.ReadDir(p.ConfigDir)
+	if err != nil {
+		t.Fatalf("reading the config root: %v", err)
+	}
+	for _, e := range entries {
+		if name := e.Name(); name != filepath.Base(p.SaltFile) && strings.HasPrefix(name, filepath.Base(p.SaltFile)) {
+			t.Errorf("the config root still holds %q; it is a copy of the salt", name)
+		}
+	}
 }
 
 // Acceptance item 10, the part this file owns: the salt is not a setting, and it

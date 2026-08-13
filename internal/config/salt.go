@@ -38,9 +38,15 @@ var errSaltWrongLength = errors.New("the salt file is the wrong length")
 // The error states lengths only — the bytes are the secret.
 //
 // It loses races safely. Two first runs at once — a scan and a hook firing
-// together — are resolved by O_EXCL: the creator that loses re-reads the winner's
-// salt rather than overwriting it. Without that, one of the two would write a
-// salt the other had already hashed with.
+// together — are resolved by the salt file appearing whole or not at all: the
+// bytes are written to a temporary file in the same directory and that file is
+// linked into place, so the losing creator re-reads the winner's complete salt
+// rather than overwriting it or catching it half-written. Creating the file first
+// and writing it second would be visible at zero bytes for as long as the write
+// takes, and a loser reading it there fails closed on a wrong length — a
+// legitimate first run reported as a corrupt one. os.Link, not os.Rename: rename
+// would replace a salt the winner has already handed out, and link fails with
+// fs.ErrExist instead, which is the signal to go and read theirs.
 func loadOrCreateSalt(p Paths) ([]byte, error) {
 	// Anything other than "not there yet" is the caller's answer: an existing
 	// salt is returned as it is, and an unreadable or wrong-length one stops
@@ -58,23 +64,48 @@ func loadOrCreateSalt(p Paths) ([]byte, error) {
 		return nil, fmt.Errorf("generating the repository-id salt: %w", err)
 	}
 
-	f, err := os.OpenFile(p.SaltFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, saltFileMode)
-	if errors.Is(err, fs.ErrExist) {
-		// Someone else created it between the read and here. Their salt is the
-		// one already hashed with, so it wins.
-		return readSalt(p)
-	}
+	f, err := os.CreateTemp(p.ConfigDir, "repo-salt-*")
 	if err != nil {
-		return nil, fmt.Errorf("creating %s: %w", p.SaltFile, err)
+		return nil, fmt.Errorf("creating a temporary file in %s: %w", p.ConfigDir, err)
 	}
+	tmp := f.Name()
 
 	if _, err := f.Write(fresh); err != nil {
 		// A partial salt file would fail every later run by design, so the
 		// failed attempt is removed rather than left to be found.
-		return nil, errors.Join(fmt.Errorf("writing %s: %w", p.SaltFile, err), f.Close(), os.Remove(p.SaltFile))
+		return nil, errors.Join(fmt.Errorf("writing %s: %w", tmp, err), f.Close(), os.Remove(tmp))
+	}
+	// CreateTemp already opens at 0600; setting it explicitly keeps the mode a
+	// stated property of this function rather than a property of the standard
+	// library's default. The link below shares this file's inode, so this is the
+	// mode repo-salt ends up with.
+	if err := f.Chmod(saltFileMode); err != nil {
+		return nil, errors.Join(fmt.Errorf("setting the mode of %s: %w", tmp, err), f.Close(), os.Remove(tmp))
 	}
 	if err := f.Close(); err != nil {
-		return nil, errors.Join(fmt.Errorf("closing %s: %w", p.SaltFile, err), os.Remove(p.SaltFile))
+		return nil, errors.Join(fmt.Errorf("closing %s: %w", tmp, err), os.Remove(tmp))
+	}
+
+	linkErr := os.Link(tmp, p.SaltFile)
+	// The temporary file goes either way: on success it is a second name for a
+	// file that now has its real one, and on failure it is a copy of the secret
+	// that nothing would ever clean up.
+	removeErr := os.Remove(tmp)
+
+	switch {
+	case errors.Is(linkErr, fs.ErrExist):
+		// Someone else published a salt between the read and here. Theirs is the
+		// one already hashed with, so it wins — and because it appeared whole,
+		// reading it back cannot see a partial file.
+		salt, readErr := readSalt(p)
+		if err := errors.Join(readErr, removeErr); err != nil {
+			return nil, err
+		}
+		return salt, nil
+	case linkErr != nil:
+		return nil, errors.Join(fmt.Errorf("creating %s: %w", p.SaltFile, linkErr), removeErr)
+	case removeErr != nil:
+		return nil, fmt.Errorf("removing %s: %w", tmp, removeErr)
 	}
 	return fresh, nil
 }
