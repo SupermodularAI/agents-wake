@@ -7,7 +7,6 @@ import (
 	"io"
 
 	"github.com/SupermodularAI/agents-wake/internal/adapter/claudecode"
-	"github.com/SupermodularAI/agents-wake/internal/record"
 	"github.com/SupermodularAI/agents-wake/internal/store"
 )
 
@@ -24,8 +23,8 @@ type Result struct {
 // ClaudeCode reads one already-authorized Claude Code transcript and persists
 // its completed records. It is the service `wake ingest` will use after init
 // establishes repository consent.
-func ClaudeCode(reader io.Reader, repo record.Hash, destination *store.Store) (Result, error) {
-	derived, err := claudecode.Read(reader, repo)
+func ClaudeCode(reader io.Reader, resolve claudecode.Resolver, destination *store.Store) (Result, error) {
+	derived, err := claudecode.Read(reader, resolve)
 	if err != nil {
 		return Result{}, err
 	}
