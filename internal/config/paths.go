@@ -39,6 +39,11 @@ const (
 	configFileName   = "config.toml"
 	saltFileName     = "repo-salt"
 	projectsFileName = "projects.json"
+	// projectsLockName is what a writer of projects.json holds while it reads,
+	// merges and republishes the table. It is a lock and nothing else: always
+	// empty, safe to delete, and it carries no path, label or id — so it is not
+	// part of Paths, which is the surface other packages see.
+	projectsLockName = "projects.lock"
 )
 
 // Paths is where every file this tool owns lives. One resolver owns the layout so
