@@ -99,6 +99,7 @@ type Record struct {
 	PackageVersion Version    `json:"package_version,omitempty"`
 	Source         *Source    `json:"source"`
 	ViaSkill       Identifier `json:"via_skill,omitempty"`
+	ViaAgent       Identifier `json:"via_agent,omitempty"`
 	Model          Identifier `json:"model,omitempty"`
 	Effort         Identifier `json:"effort,omitempty"`
 	Invoker        Invoker    `json:"invoker"`
@@ -136,7 +137,7 @@ func Validate(r Record) error {
 	if !validIdentifier(r.Harness) || !validIdentifier(r.SessionID) || !validRepoHash(r.Repo) || !validKind(r.Kind) || !validIdentifier(r.Name) || !validInvoker(r.Invoker) {
 		return errors.New("invalid required record field")
 	}
-	if !validOptionalIdentifier(r.Package) || !validOptionalIdentifier(r.ViaSkill) || !validOptionalIdentifier(r.Model) || !validOptionalIdentifier(r.Effort) || !validOptionalVersion(r.HarnessVersion) || !validOptionalVersion(r.PackageVersion) {
+	if !validOptionalIdentifier(r.Package) || !validOptionalIdentifier(r.ViaSkill) || !validOptionalIdentifier(r.ViaAgent) || !validOptionalIdentifier(r.Model) || !validOptionalIdentifier(r.Effort) || !validOptionalVersion(r.HarnessVersion) || !validOptionalVersion(r.PackageVersion) {
 		return errors.New("invalid optional record field")
 	}
 	if r.Source != nil && !validSource(*r.Source) {

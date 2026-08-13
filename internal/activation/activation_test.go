@@ -95,6 +95,56 @@ func TestRebuildReplacesOnlyTheDerivedEventStore(t *testing.T) {
 	}
 }
 
+func TestUninstallRemovesOnlyWakeHooksAndKeepsData(t *testing.T) {
+	claudeDir := filepath.Join(t.TempDir(), "claude")
+	settings := `{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"existing command"}]},{"wake":true,"hooks":[{"type":"command","command":"changed wake command"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"` + hookCommand + `"}]}]}}`
+	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(settings), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	paths := testPaths(t)
+	if err := os.MkdirAll(paths.DataDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll() data error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(paths.DataDir, "events.ndjson"), []byte("data"), 0o600); err != nil {
+		t.Fatalf("WriteFile() data error = %v", err)
+	}
+
+	removed, err := Uninstall(paths, claudeDir, false)
+	if err != nil || !removed {
+		t.Fatalf("Uninstall() = %t, %v", removed, err)
+	}
+	raw, err := os.ReadFile(filepath.Join(claudeDir, "settings.json"))
+	if err != nil || !containsCommand(raw, "existing command") || containsCommand(raw, hookCommand) || contains(string(raw), `"wake": true`) {
+		t.Fatalf("settings after uninstall = %s, error = %v", raw, err)
+	}
+	if _, statErr := os.Stat(filepath.Join(paths.DataDir, "events.ndjson")); statErr != nil {
+		t.Fatalf("Uninstall() removed data: %v", statErr)
+	}
+	second, err := Uninstall(paths, claudeDir, false)
+	if err != nil || second {
+		t.Fatalf("second Uninstall() = %t, %v", second, err)
+	}
+}
+
+func TestUninstallPurgesOnlyDataRoot(t *testing.T) {
+	paths := testPaths(t)
+	if err := os.MkdirAll(paths.DataDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(paths.DataDir, "events.ndjson"), []byte("data"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if _, err := Uninstall(paths, filepath.Join(t.TempDir(), "claude"), true); err != nil {
+		t.Fatalf("Uninstall() error = %v", err)
+	}
+	if _, err := os.Stat(paths.DataDir); !os.IsNotExist(err) {
+		t.Fatalf("data root still exists: %v", err)
+	}
+}
+
 func testPaths(t *testing.T) config.Paths {
 	t.Helper()
 	paths := config.Paths{ConfigDir: filepath.Join(t.TempDir(), "config"), DataDir: filepath.Join(t.TempDir(), "data")}

@@ -39,6 +39,21 @@ func TestAggregateOrdersPrimitiveUsage(t *testing.T) {
 	}
 }
 
+func TestAggregateKeepsInvocationProvenanceSeparate(t *testing.T) {
+	ok := record.OutcomeOK
+	direct := testRecord("direct", &ok)
+	direct.Invoker = record.InvokerUser
+	byAgent := testRecord("agent", &ok)
+	byAgent.ViaAgent = "sdlc-implement"
+	summary := Aggregate([]record.Record{direct, byAgent})
+	if len(summary.Primitives) != 2 {
+		t.Fatalf("Primitives = %+v", summary.Primitives)
+	}
+	if summary.Primitives[0].Invoker != record.InvokerModel || summary.Primitives[0].ViaAgent != "sdlc-implement" || summary.Primitives[1].Invoker != record.InvokerUser || summary.Primitives[1].ViaAgent != "" {
+		t.Fatalf("Primitives = %+v", summary.Primitives)
+	}
+}
+
 func TestRatioDoesNotHaveARateWithoutDenominator(t *testing.T) {
 	ratio := NewRatio(0, 0, 1, 1)
 	if _, ok := ratio.Percent(); ok {
