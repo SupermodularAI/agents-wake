@@ -20,8 +20,8 @@ make build
 your `PATH`. Use it directly from the checkout:
 
 ```sh
-./dist/wake init --yes
-./dist/wake serve --no-open
+./dist/wake init
+./dist/wake serve
 ```
 
 To install the version in the current checkout as `wake`:
@@ -56,7 +56,7 @@ wake init
 Enable collection after reviewing the paths:
 
 ```sh
-wake init --yes
+wake init
 ```
 
 `init` registers the current repository as consented, imports available Claude
@@ -66,7 +66,7 @@ the global Claude Code settings. Existing Claude Code hooks are preserved.
 Open the dashboard explicitly:
 
 ```sh
-wake serve --port 8080 --no-open
+wake serve
 ```
 
 Then open [http://127.0.0.1:8080](http://127.0.0.1:8080). The server binds to
@@ -81,8 +81,8 @@ instead of starting a server.
 | Command | Purpose |
 | --- | --- |
 | `wake` | Start the local dashboard in a terminal, or print deterministic text otherwise. |
-| `wake serve [--port PORT] [--no-open]` | Serve the local dashboard on `127.0.0.1`. |
-| `wake init [--yes]` | Consent the current project, install Wake-owned Claude Code triggers, and import history. |
+| `wake serve` | Serve the local dashboard on `127.0.0.1:8080`. |
+| `wake init` | Consent the current project, install Wake-owned Claude Code triggers, and import history. |
 | `wake ingest [--quiet]` | Re-scan Claude Code history for already consented projects. |
 
 ## What The Dashboard Shows

@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,7 +16,6 @@ import (
 func init() { commands = append(commands, newInitCmd) }
 
 func newInitCmd() *cobra.Command {
-	var yes bool
 	cmd := &cobra.Command{Use: "init", Short: "Enable local Claude Code collection for this project", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -37,9 +35,6 @@ func newInitCmd() *cobra.Command {
 		}
 		claudeDir := filepath.Join(home, ".claude")
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Wake will modify:\n%s\n%s\n%s\n%s\n", paths.ConfigFile, paths.ProjectsFile, filepath.Join(claudeDir, "settings.json"), filepath.Join(paths.DataDir, "events.ndjson"))
-		if !yes {
-			return errors.New("re-run with --yes to enable collection")
-		}
 		written, err := activation.Init(paths, root, claudeDir)
 		if err != nil {
 			return err
@@ -47,6 +42,5 @@ func newInitCmd() *cobra.Command {
 		_, err = fmt.Fprintf(cmd.OutOrStdout(), "Claude Code collection enabled; imported %d terminal events.\n", written)
 		return err
 	}}
-	cmd.Flags().BoolVar(&yes, "yes", false, "apply the displayed local integration")
 	return cmd
 }

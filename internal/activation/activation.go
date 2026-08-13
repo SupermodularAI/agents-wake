@@ -59,6 +59,21 @@ func Rebuild(paths config.Paths, claudeDir string) (int, error) {
 	return Ingest(paths, claudeDir)
 }
 
+// Uninstall removes only Wake's Claude Code hooks. It deliberately keeps local
+// data unless purge is requested, so removing automation never destroys history.
+func Uninstall(paths config.Paths, claudeDir string, purge bool) (bool, error) {
+	removed, err := removeHooks(claudeDir)
+	if err != nil {
+		return false, err
+	}
+	if purge {
+		if err := os.RemoveAll(paths.DataDir); err != nil {
+			return false, err
+		}
+	}
+	return removed, nil
+}
+
 func addConsentedRepo(paths config.Paths, id string) error {
 	current, err := config.Load(paths)
 	if err != nil {
@@ -160,6 +175,92 @@ func appendHook(raw json.RawMessage) (json.RawMessage, error) {
 			return json.Marshal(entries)
 		}
 	}
-	owned := json.RawMessage(`{"hooks":[{"type":"command","command":"` + hookCommand + `"}]}`)
+	owned := json.RawMessage(`{"wake":true,"hooks":[{"type":"command","command":"` + hookCommand + `"}]}`)
 	return json.Marshal(append(entries, owned))
+}
+
+func removeHooks(claudeDir string) (bool, error) {
+	path := filepath.Join(claudeDir, "settings.json")
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	settings := map[string]json.RawMessage{}
+	if json.Unmarshal(raw, &settings) != nil {
+		return false, errors.New("cannot parse Claude Code settings")
+	}
+	hooks := map[string]json.RawMessage{}
+	if rawHooks, found := settings["hooks"]; !found {
+		return false, nil
+	} else if json.Unmarshal(rawHooks, &hooks) != nil {
+		return false, errors.New("cannot parse Claude Code hooks")
+	}
+
+	removed := false
+	for event, rawGroups := range hooks {
+		groups := []json.RawMessage{}
+		if json.Unmarshal(rawGroups, &groups) != nil {
+			return false, errors.New("cannot parse Claude Code hook event")
+		}
+		kept := make([]json.RawMessage, 0, len(groups))
+		for _, group := range groups {
+			if wakeHook(group) {
+				removed = true
+				continue
+			}
+			kept = append(kept, group)
+		}
+		if len(kept) == 0 {
+			delete(hooks, event)
+			continue
+		}
+		encoded, marshalErr := json.Marshal(kept)
+		if marshalErr != nil {
+			return false, marshalErr
+		}
+		hooks[event] = encoded
+	}
+	if !removed {
+		return false, nil
+	}
+	if len(hooks) == 0 {
+		delete(settings, "hooks")
+	} else {
+		encoded, marshalErr := json.Marshal(hooks)
+		if marshalErr != nil {
+			return false, marshalErr
+		}
+		settings["hooks"] = encoded
+	}
+	encoded, marshalErr := json.MarshalIndent(settings, "", "  ")
+	if marshalErr != nil {
+		return false, marshalErr
+	}
+	if err := os.WriteFile(path, append(encoded, '\n'), 0o600); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func wakeHook(raw json.RawMessage) bool {
+	var group struct {
+		Wake  bool `json:"wake"`
+		Hooks []struct {
+			Command string `json:"command"`
+		} `json:"hooks"`
+	}
+	if json.Unmarshal(raw, &group) != nil {
+		return false
+	}
+	if group.Wake {
+		return true
+	}
+	return slices.ContainsFunc(group.Hooks, func(hook struct {
+		Command string `json:"command"`
+	}) bool {
+		return hook.Command == hookCommand
+	})
 }

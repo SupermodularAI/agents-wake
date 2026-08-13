@@ -49,6 +49,9 @@ func Read(reader io.Reader, resolve Resolver) (Result, error) {
 			result.Malformed++
 			continue
 		}
+		if event, ok := entry.attributedRun(resolve); ok {
+			result.Records = append(result.Records, event)
+		}
 		for _, block := range entry.Message.Content {
 			switch block.Type {
 			case "tool_use":
@@ -83,6 +86,7 @@ type transcriptEntry struct {
 	Version              string     `json:"version"`
 	AttributionMCPServer string     `json:"attributionMcpServer"`
 	AttributionMCPTool   string     `json:"attributionMcpTool"`
+	AttributionAgent     string     `json:"attributionAgent"`
 	AttributionSkill     string     `json:"attributionSkill"`
 	ToolDenialKind       string     `json:"toolDenialKind"`
 	ToolUseResult        toolResult `json:"toolUseResult"`
@@ -90,8 +94,9 @@ type transcriptEntry struct {
 }
 
 type message struct {
-	Model   string         `json:"model"`
-	Content []contentBlock `json:"content"`
+	Model      string         `json:"model"`
+	StopReason string         `json:"stop_reason"`
+	Content    []contentBlock `json:"content"`
 }
 
 type contentBlock struct {
@@ -106,7 +111,8 @@ type contentBlock struct {
 // input names only the allowlisted fields a primitive needs. In particular, it
 // does not retain a Skill's free-text args field while decoding the transcript.
 type input struct {
-	Skill string `json:"skill"`
+	Skill        string `json:"skill"`
+	SubagentType string `json:"subagent_type"`
 }
 
 type toolResult struct {
@@ -127,6 +133,7 @@ type call struct {
 	name        record.Identifier
 	packageName record.Identifier
 	viaSkill    record.Identifier
+	viaAgent    record.Identifier
 	model       record.Identifier
 	invoker     record.Invoker
 	repo        record.Hash
@@ -169,10 +176,62 @@ func (entry transcriptEntry) call(block contentBlock, resolve Resolver) (call, b
 	if skill, err := record.BoundedIdentifier(entry.AttributionSkill); err == nil {
 		derived.viaSkill = skill
 	}
+	if agent, err := record.BoundedIdentifier(entry.AttributionAgent); err == nil {
+		derived.viaAgent = agent
+	}
 	if packageName, ok := packageFromAttribution(entry.AttributionMCPServer); ok {
 		derived.packageName = packageName
 	}
 	return derived, true
+}
+
+// attributedRun records the terminal completion of a skill or subagent. Claude
+// Code puts those identities on every transcript entry, including entries in
+// subagent files; the final end_turn entry is the safe completion boundary.
+func (entry transcriptEntry) attributedRun(resolve Resolver) (record.Record, bool) {
+	if entry.Message.StopReason != "end_turn" {
+		return record.Record{}, false
+	}
+
+	name := entry.AttributionSkill
+	kind := record.KindSkill
+	invoker := record.InvokerUser
+	if name == "" {
+		name = entry.AttributionAgent
+		kind = record.KindSubagent
+		invoker = record.InvokerModel
+	}
+	primitive, err := record.BoundedIdentifier(name)
+	if err != nil {
+		return record.Record{}, false
+	}
+	sessionID, err := record.BoundedIdentifier(entry.SessionID)
+	if err != nil {
+		return record.Record{}, false
+	}
+	repo, consented := resolve(entry.CWD)
+	if !consented {
+		return record.Record{}, false
+	}
+
+	event := record.Record{
+		SchemaVersion: record.SchemaVersion,
+		EventID:       record.DeriveEventID(harness, record.Identifier(entry.UUID)),
+		Timestamp:     record.NormalizedTimestamp(entry.Timestamp),
+		Harness:       harness,
+		SessionID:     sessionID,
+		Repo:          repo,
+		Kind:          kind,
+		Name:          primitive,
+		Invoker:       invoker,
+	}
+	if version, err := record.BoundedIdentifier(entry.Version); err == nil {
+		event.HarnessVersion = record.Version(version)
+	}
+	if model, err := record.BoundedIdentifier(entry.Message.Model); err == nil {
+		event.Model = model
+	}
+	return event, true
 }
 
 func primitiveName(block contentBlock) (record.Identifier, error) {
@@ -196,6 +255,7 @@ func (call call) complete(entry transcriptEntry, block contentBlock) (record.Rec
 		Name:           call.name,
 		Package:        call.packageName,
 		ViaSkill:       call.viaSkill,
+		ViaAgent:       call.viaAgent,
 		Model:          call.model,
 		Invoker:        call.invoker,
 		Outcome:        outcome,

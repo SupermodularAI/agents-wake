@@ -53,6 +53,61 @@ func TestReadUsesSkillNameInsteadOfToolName(t *testing.T) {
 	}
 }
 
+func TestReadDerivesTerminalAttributedSkill(t *testing.T) {
+	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"run-sdlc","message":{"model":"sonnet","stop_reason":"end_turn"}}`
+	result, err := Read(strings.NewReader(input), resolver)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 1 {
+		t.Fatalf("Read() records = %+v", result.Records)
+	}
+	event := result.Records[0]
+	if event.Kind != record.KindSkill || event.Name != "run-sdlc" || event.Invoker != record.InvokerUser || event.Outcome != nil {
+		t.Fatalf("record = %+v", event)
+	}
+}
+
+func TestReadDerivesTerminalAttributedSubagent(t *testing.T) {
+	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionAgent":"sdlc-check-architecture","message":{"model":"sonnet","stop_reason":"end_turn"}}`
+	result, err := Read(strings.NewReader(input), resolver)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 1 {
+		t.Fatalf("Read() records = %+v", result.Records)
+	}
+	event := result.Records[0]
+	if event.Kind != record.KindSubagent || event.Name != "sdlc-check-architecture" || event.Invoker != record.InvokerModel || event.Outcome != nil {
+		t.Fatalf("record = %+v", event)
+	}
+}
+
+func TestReadRecordsAttributingAgentForPrimitiveCalls(t *testing.T) {
+	input := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionAgent":"sdlc-implement","message":{"content":[{"type":"tool_use","id":"call-1","name":"Skill","input":{"skill":"commit-message"}}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+	}, "\n")
+	result, err := Read(strings.NewReader(input), resolver)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 1 || result.Records[0].ViaAgent != "sdlc-implement" {
+		t.Fatalf("Read() = %+v", result)
+	}
+}
+
+func TestReadDoesNotEmitUnfinishedAttributedRun(t *testing.T) {
+	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionAgent":"sdlc-check-architecture","message":{"model":"sonnet","stop_reason":"tool_use"}}`
+	result, err := Read(strings.NewReader(input), resolver)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 0 {
+		t.Fatalf("Read() records = %+v", result.Records)
+	}
+}
+
 func TestReadSkipsUnconsentedRepository(t *testing.T) {
 	input := strings.Join([]string{
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/outside","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
