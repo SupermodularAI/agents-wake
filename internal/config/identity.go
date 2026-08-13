@@ -429,43 +429,71 @@ func canonicalRoot(given string) (string, error) {
 // present, and recorded in the entry; derivation reads the recorded flag and never
 // asks the disk.
 //
-// The probe re-spells one letter of the path and asks whether it names the same
-// file. It writes nothing, and a path with no ASCII letter to flip is reported as
-// case-sensitive: the conservative answer, since it keeps two spellings apart
-// rather than merging them.
+// The probe re-spells one letter of the path's final element and asks whether it
+// names the same file. It writes nothing, and a path with no ASCII letter to flip
+// is reported as case-sensitive: the conservative answer, since it keeps two
+// spellings apart rather than merging them.
 func caseInsensitive(dir string) (bool, error) {
-	original, err := os.Stat(dir)
+	original, err := os.Lstat(dir)
 	if err != nil {
 		return false, errRootNotADirectory
 	}
-	flipped, ok := flipLastASCIILetter(dir)
+	respelled, ok := flipCaseOfLastElement(dir)
 	if !ok {
 		return false, nil
 	}
+	// Lstat, not Stat: a symlink whose own name differs from dir's only in case
+	// resolves to dir on every filesystem, and following it would report a folding
+	// this filesystem does not do — merging two roots §5 keeps apart. dir is
+	// canonical, so its final element is never a symlink and the two agree on it.
+	//
 	// A re-spelling that does not resolve is the answer, not a failure: the
 	// filesystem distinguishes the two spellings. It is folded into the result
 	// rather than returned, because a probe that found out what it came to find out
 	// has not failed.
-	other, statErr := os.Stat(flipped)
+	other, statErr := os.Lstat(respelled)
 	return statErr == nil && os.SameFile(original, other), nil
 }
 
-// flipLastASCIILetter returns the path with the case of its last ASCII letter
-// flipped, and whether there was one. The last letter is used because it is
-// almost always in the final element, which is the directory whose filesystem is
-// being asked about.
-func flipLastASCIILetter(path string) (string, bool) {
+// flipCaseOfLastElement returns the path with the case of one ASCII letter in its
+// final element flipped, and whether it found one.
+//
+// The final element, not the last letter anywhere in the path: the probe is asking
+// about the filesystem holding this directory, and a path like /mnt/vol/2024 whose
+// last letter sits two elements up would answer for whatever is mounted there
+// instead — wrongly in either direction, and a wrong "case-sensitive" costs silent
+// under-collection. When the final element has no ASCII letter, the nearest
+// ancestor that has one is the closest this probe can get; a path with none at all
+// reports no re-spelling, which the caller reads as case-sensitive.
+func flipCaseOfLastElement(path string) (string, bool) {
 	b := []byte(path)
-	for i := len(b) - 1; i >= 0; i-- {
-		switch {
-		case b[i] >= 'a' && b[i] <= 'z':
-			b[i] -= 'a' - 'A'
-		case b[i] >= 'A' && b[i] <= 'Z':
-			b[i] += 'a' - 'A'
-		default:
-			continue
+	for end := len(b); end > 0; {
+		start := end
+		for start > 0 && b[start-1] != filepath.Separator {
+			start--
 		}
-		return string(b), true
+		for i := end - 1; i >= start; i-- {
+			if flipped := flipASCIILetter(b[i]); flipped != b[i] {
+				b[i] = flipped
+				return string(b), true
+			}
+		}
+		end = start
+		for end > 0 && b[end-1] == filepath.Separator {
+			end--
+		}
 	}
 	return path, false
+}
+
+// flipASCIILetter returns c in the other case, or c unchanged when it is not an
+// ASCII letter. Simple ASCII folding, for the reason hasPathPrefix gives.
+func flipASCIILetter(c byte) byte {
+	switch {
+	case c >= 'a' && c <= 'z':
+		return c - ('a' - 'A')
+	case c >= 'A' && c <= 'Z':
+		return c + ('a' - 'A')
+	}
+	return c
 }
