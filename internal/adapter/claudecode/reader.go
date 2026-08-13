@@ -100,6 +100,13 @@ type contentBlock struct {
 	Name      string `json:"name"`
 	ToolUseID string `json:"tool_use_id"`
 	IsError   *bool  `json:"is_error"`
+	Input     input  `json:"input"`
+}
+
+// input names only the allowlisted fields a primitive needs. In particular, it
+// does not retain a Skill's free-text args field while decoding the transcript.
+type input struct {
+	Skill string `json:"skill"`
 }
 
 type toolResult struct {
@@ -130,7 +137,7 @@ func (entry transcriptEntry) call(block contentBlock, resolve Resolver) (call, b
 	if err != nil {
 		return call{}, false
 	}
-	name, err := record.BoundedIdentifier(block.Name)
+	name, err := primitiveName(block)
 	if err != nil {
 		return call{}, false
 	}
@@ -148,7 +155,7 @@ func (entry transcriptEntry) call(block contentBlock, resolve Resolver) (call, b
 		eventID:   record.DeriveEventID(harness, record.Identifier(entry.UUID)),
 		sessionID: sessionID,
 		timestamp: record.NormalizedTimestamp(entry.Timestamp),
-		kind:      kindFor(name),
+		kind:      kindFor(record.Identifier(block.Name)),
 		name:      name,
 		invoker:   record.InvokerModel,
 		repo:      repo,
@@ -166,6 +173,13 @@ func (entry transcriptEntry) call(block contentBlock, resolve Resolver) (call, b
 		derived.packageName = packageName
 	}
 	return derived, true
+}
+
+func primitiveName(block contentBlock) (record.Identifier, error) {
+	if block.Name == "Skill" && block.Input.Skill != "" {
+		return record.BoundedIdentifier(block.Input.Skill)
+	}
+	return record.BoundedIdentifier(block.Name)
 }
 
 func (call call) complete(entry transcriptEntry, block contentBlock) (record.Record, bool) {
