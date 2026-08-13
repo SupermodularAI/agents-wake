@@ -50,7 +50,7 @@ func TestRegisteredCommandIsDispatchable(t *testing.T) {
 func TestRegisteredCommandAppearsInHelp(t *testing.T) {
 	withRegistered(t, "probe")
 
-	out, _ := run(t)
+	out, _ := run(t, "--help")
 	if !strings.Contains(out, "probe") {
 		t.Errorf("registered command is missing from help output:\n%s", out)
 	}
