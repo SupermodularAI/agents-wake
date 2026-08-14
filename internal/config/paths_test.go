@@ -43,6 +43,7 @@ func TestPathsResolveToTheXDGLayout(t *testing.T) {
 		{"ConfigFile", p.ConfigFile, filepath.Join(home, ".config", "wake", "config.toml")},
 		{"SaltFile", p.SaltFile, filepath.Join(home, ".config", "wake", "repo-salt")},
 		{"ProjectsFile", p.ProjectsFile, filepath.Join(home, ".local", "state", "wake", "projects.json")},
+		{"PrimitivesFile", p.PrimitivesFile, filepath.Join(home, ".local", "state", "wake", "primitives.json")},
 	} {
 		if c.got != c.want {
 			t.Errorf("%s = %q, want %q", c.name, c.got, c.want)
@@ -69,6 +70,9 @@ func TestWakeDirOverridesTheDataRootOnly(t *testing.T) {
 	}
 	if want := filepath.Join(elsewhere, "projects.json"); p.ProjectsFile != want {
 		t.Errorf("ProjectsFile = %q, want %q", p.ProjectsFile, want)
+	}
+	if want := filepath.Join(elsewhere, "primitives.json"); p.PrimitivesFile != want {
+		t.Errorf("PrimitivesFile = %q, want %q", p.PrimitivesFile, want)
 	}
 	if want := filepath.Join(home, ".config", "wake"); p.ConfigDir != want {
 		t.Errorf("ConfigDir = %q, want %q — WAKE_DIR must not move the config root", p.ConfigDir, want)
@@ -97,7 +101,7 @@ func TestNoSecondEnvOverrideIsHonoured(t *testing.T) {
 		t.Fatalf("ResolvePaths() = %v", err)
 	}
 
-	for _, got := range []string{p.ConfigDir, p.DataDir, p.ConfigFile, p.SaltFile, p.ProjectsFile} {
+	for _, got := range []string{p.ConfigDir, p.DataDir, p.ConfigFile, p.SaltFile, p.ProjectsFile, p.PrimitivesFile} {
 		if !strings.HasPrefix(got, home) {
 			t.Errorf("%q is not under HOME; an XDG_* variable was honoured", got)
 		}
@@ -161,6 +165,9 @@ func TestConfigRootAndDataRootAreSeparate(t *testing.T) {
 	if filepath.Dir(p.ProjectsFile) != p.DataDir {
 		t.Errorf("ProjectsFile is in %q, want the data root %q", filepath.Dir(p.ProjectsFile), p.DataDir)
 	}
+	if filepath.Dir(p.PrimitivesFile) != p.DataDir {
+		t.Errorf("PrimitivesFile is in %q, want the data root %q", filepath.Dir(p.PrimitivesFile), p.DataDir)
+	}
 }
 
 // Resolving where a file belongs is not the same as creating it: a missing
@@ -183,7 +190,7 @@ func TestResolvePathsCreatesNothing(t *testing.T) {
 	if len(entries) != 0 {
 		t.Errorf("ResolvePaths() created %d entries under HOME, want none", len(entries))
 	}
-	for _, path := range []string{p.ConfigDir, p.DataDir, p.ConfigFile, p.SaltFile, p.ProjectsFile} {
+	for _, path := range []string{p.ConfigDir, p.DataDir, p.ConfigFile, p.SaltFile, p.ProjectsFile, p.PrimitivesFile} {
 		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("os.Lstat(%q) = %v, want ErrNotExist — ResolvePaths must create nothing", path, err)
 		}

@@ -30,8 +30,12 @@ func newServeCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		available := inventory.ClaudeCode(home, root)
-		return ui.ListenAndServe(8080, store.New(filepath.Join(paths.DataDir, "events.ndjson")), available)
+		events := store.New(filepath.Join(paths.DataDir, "events.ndjson"))
+		primitives := inventory.New(paths.PrimitivesFile)
+		if err := primitives.Refresh(events, inventory.ClaudeCode(home, root)); err != nil {
+			return err
+		}
+		return ui.ListenAndServe(8080, events, primitives)
 	}}
 	return cmd
 }

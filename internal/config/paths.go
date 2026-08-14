@@ -36,9 +36,10 @@ var ErrDataDirNotAbsolute = errors.New(EnvDataDir + " must be an absolute path")
 // repo-salt and projects.json stays inside this package (ADR-0019 consequences);
 // a name spelled in another package would be the first crack in that.
 const (
-	configFileName   = "config.toml"
-	saltFileName     = "repo-salt"
-	projectsFileName = "projects.json"
+	configFileName     = "config.toml"
+	saltFileName       = "repo-salt"
+	projectsFileName   = "projects.json"
+	primitivesFileName = "primitives.json"
 	// projectsLockName is what a writer of projects.json holds while it reads,
 	// merges and republishes the table. It is a lock and nothing else: always
 	// empty, safe to delete, and it carries no path, label or id — so it is not
@@ -69,6 +70,9 @@ type Paths struct {
 	// ProjectsFile is the local resolution table: hashed id, consented root and
 	// label. It never travels (plan §3.4).
 	ProjectsFile string
+	// PrimitivesFile is the derived inventory of locally available primitives and
+	// their aggregate activity. It contains no paths or configuration content.
+	PrimitivesFile string
 }
 
 // ResolvePaths resolves the layout from the home directory and EnvDataDir, and
@@ -98,10 +102,11 @@ func ResolvePaths() (Paths, error) {
 	}
 
 	return Paths{
-		ConfigDir:    configDir,
-		DataDir:      dataDir,
-		ConfigFile:   filepath.Join(configDir, configFileName),
-		SaltFile:     filepath.Join(configDir, saltFileName),
-		ProjectsFile: filepath.Join(dataDir, projectsFileName),
+		ConfigDir:      configDir,
+		DataDir:        dataDir,
+		ConfigFile:     filepath.Join(configDir, configFileName),
+		SaltFile:       filepath.Join(configDir, saltFileName),
+		ProjectsFile:   filepath.Join(dataDir, projectsFileName),
+		PrimitivesFile: filepath.Join(dataDir, primitivesFileName),
 	}, nil
 }

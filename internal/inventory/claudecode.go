@@ -29,6 +29,13 @@ type Primitive struct {
 // emit a listing for every primitive kind. Unreadable or malformed sources
 // contribute nothing so a configuration problem cannot break the dashboard.
 func ClaudeCode(home, root string) []Primitive {
+	return ClaudeCodeAt(filepath.Join(home, ".claude"), root)
+}
+
+// ClaudeCodeAt discovers the primitives configured under one Claude Code
+// directory. It exists for Wake's hook path, whose configured Claude directory
+// may differ from the invoking user's home directory in tests or embedding.
+func ClaudeCodeAt(claudeDir, root string) []Primitive {
 	items := map[primitiveKey]Primitive{}
 	add := func(kind record.Kind, name string) {
 		identifier, err := record.BoundedIdentifier(name)
@@ -39,7 +46,6 @@ func ClaudeCode(home, root string) []Primitive {
 		items[primitiveKey{kind: kind, name: identifier}] = item
 	}
 
-	claudeDir := filepath.Join(home, ".claude")
 	scanListings(filepath.Join(claudeDir, "projects"), root, add)
 	for _, base := range []string{claudeDir, filepath.Join(root, ".claude")} {
 		scanPrimitives(filepath.Join(base, "skills"), "SKILL.md", record.KindSkill, add)

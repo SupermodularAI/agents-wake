@@ -20,9 +20,10 @@ var assets embed.FS
 
 var page = template.Must(template.ParseFS(assets, "dashboard.html"))
 
-// Handler serves a server-rendered dashboard. Every request reads only the
-// local event store and aggregates records before rendering HTML.
-func Handler(source *store.Store, available []inventory.Primitive) http.Handler {
+// Handler serves a server-rendered dashboard. Every request reads the event
+// spool and the latest primitive snapshot, so hook-driven refreshes appear
+// without restarting the dashboard.
+func Handler(source *store.Store, primitives *inventory.Store) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/" {
 			http.NotFound(writer, request)
@@ -37,6 +38,11 @@ func Handler(source *store.Store, available []inventory.Primitive) http.Handler 
 		for _, entry := range entries {
 			records = append(records, entry.Record)
 		}
+		available, err := primitives.Read()
+		if err != nil {
+			http.Error(writer, "cannot read local Wake primitive inventory", http.StatusInternalServerError)
+			return
+		}
 		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := page.Execute(writer, view(metrics.Aggregate(records), available)); err != nil {
 			return
@@ -45,8 +51,8 @@ func Handler(source *store.Store, available []inventory.Primitive) http.Handler 
 }
 
 // ListenAndServe binds the dashboard to loopback only.
-func ListenAndServe(port int, source *store.Store, available []inventory.Primitive) error {
-	return http.ListenAndServe("127.0.0.1:"+strconv.Itoa(port), Handler(source, available))
+func ListenAndServe(port int, source *store.Store, primitives *inventory.Store) error {
+	return http.ListenAndServe("127.0.0.1:"+strconv.Itoa(port), Handler(source, primitives))
 }
 
 type dashboardView struct {
@@ -57,12 +63,13 @@ type dashboardView struct {
 	LastObserved string
 	ErrorRate    string
 	ErrorDetail  string
-	Primitives   []primitiveView
+	Usage        []primitiveView
+	Unused       []primitiveView
 }
 
-type primitiveView struct{ Name, Kind, Harness, Invoker, Agent, Availability, LastUsed, Invocations, Sessions, ErrorRate, ErrorDetail string }
+type primitiveView struct{ Name, Kind, Harness, LastUsed, Invocations string }
 
-func view(summary metrics.Summary, available []inventory.Primitive) dashboardView {
+func view(summary metrics.Summary, available []inventory.Usage) dashboardView {
 	result := dashboardView{Empty: summary.Invocations == 0 && len(available) == 0, Invocations: number(summary.Invocations), Sessions: number(summary.Sessions), ErrorRate: rate(summary.ErrorRate), ErrorDetail: ratioDetail(summary.ErrorRate)}
 	if !summary.LastObserved.IsZero() {
 		result.Updated = "Last observed " + summary.LastObserved.Local().Format("2006-01-02 15:04")
@@ -71,32 +78,16 @@ func view(summary metrics.Summary, available []inventory.Primitive) dashboardVie
 		result.Updated = "No activity observed yet"
 		result.LastObserved = "-"
 	}
-	observed := make(map[primitiveKey]struct{})
-	for _, primitive := range summary.Primitives {
-		if primitive.Kind == record.KindBuiltinTool {
-			continue
-		}
-		observed[primitiveKey{kind: primitive.Kind, name: primitive.Name, harness: primitive.Harness}] = struct{}{}
-		agent := string(primitive.ViaAgent)
-		if agent == "" {
-			agent = "-"
-		}
-		result.Primitives = append(result.Primitives, primitiveView{Name: string(primitive.Name), Kind: strings.ReplaceAll(string(primitive.Kind), "_", " "), Harness: string(primitive.Harness), Invoker: string(primitive.Invoker), Agent: agent, Availability: "observed", LastUsed: primitive.LastUsed.Local().Format("Jan 02 15:04"), Invocations: number(primitive.Invocations), Sessions: number(primitive.Sessions), ErrorRate: rate(primitive.ErrorRate), ErrorDetail: ratioDetail(primitive.ErrorRate)})
-	}
 	for _, primitive := range available {
-		key := primitiveKey{kind: primitive.Kind, name: primitive.Name, harness: primitive.Harness}
-		if _, found := observed[key]; found {
+		view := primitiveView{Name: string(primitive.Name), Kind: strings.ReplaceAll(string(primitive.Kind), "_", " "), Harness: string(primitive.Harness), Invocations: number(primitive.Invocations)}
+		if primitive.Invocations == 0 {
+			result.Unused = append(result.Unused, view)
 			continue
 		}
-		result.Primitives = append(result.Primitives, primitiveView{Name: string(primitive.Name), Kind: strings.ReplaceAll(string(primitive.Kind), "_", " "), Harness: string(primitive.Harness), Invoker: "-", Agent: "-", Availability: "not observed", LastUsed: "-", Invocations: "0", Sessions: "0", ErrorRate: "not observed", ErrorDetail: "available; no invocation found"})
+		view.LastUsed = primitive.LastUsed.Local().Format("Jan 02 15:04")
+		result.Usage = append(result.Usage, view)
 	}
 	return result
-}
-
-type primitiveKey struct {
-	kind    record.Kind
-	name    record.Identifier
-	harness record.Identifier
 }
 
 func number(value uint64) string { return strconv.FormatUint(value, 10) }
