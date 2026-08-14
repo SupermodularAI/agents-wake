@@ -20,13 +20,17 @@ func TestHandlerRendersStoredMetrics(t *testing.T) {
 	if _, err := source.Append([]record.Record{event("one", &ok), event("two", &failed)}); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
+	primitives := inventory.New(filepath.Join(t.TempDir(), "primitives.json"))
+	if err := primitives.Refresh(source, []inventory.Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "review"}}); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
 	response := httptest.NewRecorder()
-	Handler(source, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	Handler(source, primitives).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d", response.Code)
 	}
 	body := response.Body.String()
-	for _, want := range []string{"Terminal invocations", ">2<", "50.0%", "review", "Invoked by", "model", "Local-only telemetry"} {
+	for _, want := range []string{"Terminal invocations", ">2<", "50.0%", "review", "Primitive usage", "Unused primitives", "Local-only telemetry"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard is missing %q: %s", want, body)
 		}
@@ -35,8 +39,8 @@ func TestHandlerRendersStoredMetrics(t *testing.T) {
 
 func TestHandlerRendersEmptyState(t *testing.T) {
 	response := httptest.NewRecorder()
-	Handler(store.New(filepath.Join(t.TempDir(), "events.ndjson")), nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "No terminal events yet") {
+	Handler(store.New(filepath.Join(t.TempDir(), "events.ndjson")), inventory.New(filepath.Join(t.TempDir(), "primitives.json"))).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "No primitive inventory or terminal events yet") {
 		t.Fatalf("empty dashboard = %d: %s", response.Code, response.Body.String())
 	}
 }
@@ -52,8 +56,12 @@ func TestHandlerExcludesBuiltinToolsFromPrimitiveTable(t *testing.T) {
 	if _, err := source.Append([]record.Record{builtin, skill}); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
+	primitives := inventory.New(filepath.Join(t.TempDir(), "primitives.json"))
+	if err := primitives.Refresh(source, []inventory.Primitive{{Harness: "claude-code", Kind: record.KindBuiltinTool, Name: "Bash"}, {Harness: "claude-code", Kind: record.KindSkill, Name: "pr-review"}}); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
 	response := httptest.NewRecorder()
-	Handler(source, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	Handler(source, primitives).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
 	body := response.Body.String()
 	if strings.Contains(body, ">Bash<") || !strings.Contains(body, ">pr-review<") {
 		t.Fatalf("primitive table did not filter built-ins: %s", body)
@@ -63,9 +71,14 @@ func TestHandlerExcludesBuiltinToolsFromPrimitiveTable(t *testing.T) {
 func TestHandlerShowsAvailablePrimitivesWithoutUsage(t *testing.T) {
 	response := httptest.NewRecorder()
 	available := []inventory.Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "available-skill"}}
-	Handler(store.New(filepath.Join(t.TempDir(), "events.ndjson")), available).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	source := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	primitives := inventory.New(filepath.Join(t.TempDir(), "primitives.json"))
+	if err := primitives.Refresh(source, available); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	Handler(source, primitives).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
 	body := response.Body.String()
-	for _, want := range []string{">available-skill<", "not observed", "available; no invocation found"} {
+	for _, want := range []string{">available-skill<", "Unused primitives", "without any recorded activity"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard is missing %q: %s", want, body)
 		}

@@ -4,6 +4,7 @@ package activation
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/SupermodularAI/agents-wake/internal/config"
 	"github.com/SupermodularAI/agents-wake/internal/ingest"
+	"github.com/SupermodularAI/agents-wake/internal/inventory"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 	"github.com/SupermodularAI/agents-wake/internal/store"
 )
@@ -32,13 +34,20 @@ func Init(paths config.Paths, root, claudeDir string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if err := addConsentedRepo(paths, id); err != nil {
+	err = addConsentedRepo(paths, id)
+	if err != nil {
 		return 0, err
 	}
-	if err := installHooks(claudeDir); err != nil {
+	err = installHooks(claudeDir)
+	if err != nil {
 		return 0, err
 	}
-	return ingestHistory(repos, claudeDir, store.New(filepath.Join(paths.DataDir, eventsFile)))
+	events := store.New(filepath.Join(paths.DataDir, eventsFile))
+	written, err := ingestHistory(repos, claudeDir, events)
+	if err != nil {
+		return written, err
+	}
+	return written, refreshInventory(paths, claudeDir, root, events)
 }
 
 // Ingest imports available transcripts for consented repositories only.
@@ -47,13 +56,25 @@ func Ingest(paths config.Paths, claudeDir string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return ingestHistory(repos, claudeDir, store.New(filepath.Join(paths.DataDir, eventsFile)))
+	root, err := os.Getwd()
+	if err != nil {
+		return 0, fmt.Errorf("resolving current directory: %w", err)
+	}
+	events := store.New(filepath.Join(paths.DataDir, eventsFile))
+	written, err := ingestHistory(repos, claudeDir, events)
+	if err != nil {
+		return written, err
+	}
+	return written, refreshInventory(paths, claudeDir, root, events)
 }
 
 // Rebuild discards only the derived event spool before importing consented
 // history again. Project consent, repository identities, and hooks remain.
 func Rebuild(paths config.Paths, claudeDir string) (int, error) {
 	if err := os.Remove(filepath.Join(paths.DataDir, eventsFile)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return 0, err
+	}
+	if err := os.Remove(paths.PrimitivesFile); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return 0, err
 	}
 	return Ingest(paths, claudeDir)
@@ -114,6 +135,10 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 		return written, nil
 	}
 	return written, err
+}
+
+func refreshInventory(paths config.Paths, claudeDir, root string, events *store.Store) error {
+	return inventory.New(paths.PrimitivesFile).Refresh(events, inventory.ClaudeCodeAt(claudeDir, root))
 }
 
 func installHooks(claudeDir string) error {
