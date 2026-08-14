@@ -1,0 +1,21 @@
+# Internal development docs — phase breakdown, tickets, working notes.
+# Not part of the public repo.
+docs/internal/
+
+# Go
+/dist/
+*.test
+*.out
+
+# Agent harness config. Skills are tracked in .agent/skills/ and surfaced
+# through the .claude/skills symlink, which stays local.
+.claude/
+.agent/
+AGENTS.md
+AGENTS.template.md
+CLAUDE.md
+
+# Local
+.DS_Store
+.env
+.env.*
