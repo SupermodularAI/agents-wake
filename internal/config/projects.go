@@ -132,7 +132,20 @@ func validRoot(path string) bool {
 // Entries that fail validation are dropped and counted. The count is returned so
 // doctor can report it, since a silently shrinking table is the failure mode this
 // design cannot otherwise see.
+//
+// The file's type and mode are checked before it is opened, for a different reason
+// than the salt's: this table is not a secret, but it decides which repository an
+// event belongs to. A symlink standing in for it points resolution — and the next
+// republication — somewhere else, and a mode looser than 0600 means anyone else on
+// the machine can rewrite that decision. The refusal names the file's role and
+// never the file (plan §4.2).
 func readProjects(path string) (projectsFile, int, error) {
+	if err := checkSensitiveFile(path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return projectsFile{Version: projectsVersion}, 0, nil
+		}
+		return projectsFile{}, 0, fmt.Errorf("the project table %w", err)
+	}
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return projectsFile{Version: projectsVersion}, 0, nil

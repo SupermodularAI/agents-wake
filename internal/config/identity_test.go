@@ -72,6 +72,19 @@ func hexID(b byte) string {
 	return strings.Repeat(string(b), idHexLen)
 }
 
+// derivedID returns the id the salt under p derives for root.
+//
+// A hand-written table has to carry real ids to test anything but the refusal: the
+// table is verified against the salt, so an entry whose id is not the one its root
+// derives stops resolving. A test about longest-prefix matching or case folding
+// would otherwise be asserting that a refused entry does not resolve, which it does
+// not test and which another test covers. Calling this also creates the salt, so the
+// ids and the later OpenRepos agree.
+func derivedID(t *testing.T, p Paths, root string) string {
+	t.Helper()
+	return openRepos(t, p).hashRoot(root)
+}
+
 // Acceptance item 11, second half, and ADR-0019 §8: 128 bits as 32 lowercase hex
 // characters. T003 validates the same shape downstream, so two spellings of one
 // id would be two ids there.
@@ -149,7 +162,7 @@ func TestSubdirectoryHashesIdenticallyToTheRoot(t *testing.T) {
 // roots one inside the other.
 func TestResolutionPicksTheLongestMatchingRoot(t *testing.T) {
 	p := testPaths(t)
-	outer, inner := hexID('a'), hexID('b')
+	outer, inner := derivedID(t, p, "/a"), derivedID(t, p, "/a/b")
 	writeProjectsJSON(t, p, `{
   "version": 1,
   "projects": [
@@ -479,7 +492,7 @@ func TestCaseFoldingIsDrivenByTheRecordedFlagNotTheDisk(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			p := testPaths(t)
-			id := hexID('a')
+			id := derivedID(t, p, "/Repo/Path")
 			writeProjectsJSON(t, p, `{
   "version": 1,
   "projects": [
@@ -1028,7 +1041,7 @@ func TestDroppedEntriesIsReported(t *testing.T) {
 	writeProjectsJSON(t, p, `{
   "version": 1,
   "projects": [
-    {"id": "`+hexID('a')+`", "label": "good", "root": "/a"},
+    {"id": "`+derivedID(t, p, "/a")+`", "label": "good", "root": "/a"},
     {"id": "nothex", "label": "bad", "root": "/b"},
     {"id": "`+hexID('c')+`", "label": "bad", "root": "relative"}
   ]

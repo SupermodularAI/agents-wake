@@ -37,7 +37,11 @@ var errSaltWrongLength = errors.New("the salt file is the wrong length")
 // It fails closed on a file it does not understand. A salt of the wrong length is
 // a truncated write or somebody else's file; using it would produce ids nothing
 // else agrees with, and replacing it would silently re-identify every repository.
-// The error states lengths only — the bytes are the secret.
+// The error states lengths only — the bytes are the secret. The same refusal
+// covers a file it is not willing to read at all: a symlink standing in for the
+// salt is a redirection, and a mode looser than 0600 means the key to every id
+// already delivered is readable by someone else. Refusing is the answer in both
+// cases, and refusing without naming the file or its contents.
 //
 // It loses races safely. Two first runs at once — a scan and a hook firing
 // together — are resolved by the salt file appearing whole or not at all: the
@@ -129,7 +133,20 @@ func loadOrCreateSalt(p Paths) ([]byte, error) {
 
 // readSalt reads an existing salt file. A missing file is reported as
 // fs.ErrNotExist so the caller can tell "not yet" from "wrong".
+//
+// The file's type and mode are checked before it is opened. The salt is the one
+// secret this tool holds — it is what makes a repository id one-way — so a file
+// that is a symlink, is not a regular file, or is reachable by anyone other than
+// its owner is one this build refuses rather than one it reads and carries on with.
+// The role is a fixed literal here and the fault carries no path, so the message
+// names neither the file nor a byte of it (plan §4.2).
 func readSalt(p Paths) ([]byte, error) {
+	if err := checkSensitiveFile(p.SaltFile); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("the repository-id salt %w", err)
+	}
 	salt, err := os.ReadFile(p.SaltFile)
 	if err != nil {
 		// Not wrapped with a message: fs.ErrNotExist is the control-flow
