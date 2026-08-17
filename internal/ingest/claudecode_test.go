@@ -2,6 +2,8 @@ package ingest
 
 import (
 	"bytes"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,6 +84,33 @@ func TestClaudeCodePersistsBothToolCallsFromOneSourceEntry(t *testing.T) {
 	}
 	if lines != 2 {
 		t.Fatalf("events.ndjson holds %d lines, want 2: %s", lines, after)
+	}
+}
+
+func TestClaudeCodeCountsARefusedSubagentCallWithoutWritingIt(t *testing.T) {
+	input := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Task"}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+	}, "\n")
+	spool := filepath.Join(t.TempDir(), "events.ndjson")
+	destination := store.New(spool)
+	repo := record.Hash("0123456789abcdef0123456789abcdef")
+	resolve := func(cwd string) (record.Hash, bool) { return repo, cwd == "/repo" }
+
+	result, err := ClaudeCode(strings.NewReader(input), resolve, names, destination)
+	if err != nil {
+		t.Fatalf("ClaudeCode() error = %v", err)
+	}
+	if result.Refused != 1 {
+		t.Errorf("Refused = %d, want 1: the reader's refusal has to reach the caller", result.Refused)
+	}
+	// The refusal is its own fail-closed point: not a record the store dropped, not
+	// an unusable line, and nothing parsed or written.
+	if result.Written != 0 || result.Parsed != 0 || result.Malformed != 0 || result.Dropped != 0 {
+		t.Errorf("ClaudeCode() = %+v, want nothing parsed, written or dropped", result)
+	}
+	if _, statErr := os.Stat(spool); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Errorf("Stat(spool) error = %v, want the spool never created", statErr)
 	}
 }
 

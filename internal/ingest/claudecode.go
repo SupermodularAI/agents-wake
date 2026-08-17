@@ -16,6 +16,11 @@ type Result struct {
 	Parsed    int
 	Malformed int
 	Pending   int
+	// Refused is the reader's count of calls whose primitive name failed
+	// validation. It stays separate from Dropped, which is the store's count of
+	// records refused at write time: the two are different fail-closed points and
+	// merging them would invent the reason taxonomy doctor (T029) owns.
+	Refused   int
 	Written   int
 	Duplicate int
 	Dropped   int
@@ -40,6 +45,7 @@ func ClaudeCode(reader io.Reader, resolve claudecode.Resolver, names record.Name
 		Parsed:    len(derived.Records),
 		Malformed: derived.Malformed,
 		Pending:   derived.Pending,
+		Refused:   derived.Refused,
 		Written:   written.Written,
 		Duplicate: written.Duplicate,
 		Dropped:   written.Dropped,
