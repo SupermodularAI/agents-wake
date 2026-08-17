@@ -3,6 +3,7 @@ package jsonl
 import (
 	"errors"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -83,6 +84,28 @@ func TestLinesCountsAnUnterminatedOversizedTail(t *testing.T) {
 		t.Errorf("skipped = %d, want 1", skipped)
 	}
 	assertLines(t, got, "ok")
+}
+
+func TestLinesCountsAnUnterminatedOversizedTailEndingOnABufferBoundary(t *testing.T) {
+	// A tail whose length is an exact multiple of readBuffer is consumed entirely
+	// by the last buffer-full chunk, so the final read returns an empty slice at
+	// EOF. The discarded line has to be counted from the oversized flag; counting
+	// it from the bytes still in hand reports no blindness at all.
+	for _, size := range []int{readBuffer, 2 * readBuffer} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			input := "ok\n" + strings.Repeat("x", size)
+
+			got, skipped, err := collect(strings.NewReader(input), 8)
+
+			if err != nil {
+				t.Fatalf("Lines() error = %v", err)
+			}
+			if skipped != 1 {
+				t.Errorf("skipped = %d, want 1", skipped)
+			}
+			assertLines(t, got, "ok")
+		})
+	}
 }
 
 func TestLinesNeverDeliversAFragmentOfAnOversizedLine(t *testing.T) {
