@@ -202,11 +202,20 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 			return nil
 		}
 		scan.ParseErrors += result.Malformed
-		if result.Parsed == 0 {
+		// A call the reader could not name is collection that was lost: the primitive
+		// was invoked, the line was perfectly readable, and no number carries it.
+		// Counted here so doctor can say so — a harness renaming the field a
+		// primitive's identity lives in would otherwise stop collection in silence
+		// while doctor still reported "collecting" (plan §3.3, §12).
+		scan.RefusedCalls += result.Refused
+		if result.Parsed == 0 && result.Refused == 0 {
 			// Read successfully and yielded no terminal event — most often because
 			// its working directory belongs to no consented repository, sometimes
 			// because every call in it is still unterminated (ADR-0015). Either way
 			// it is a clean zero, not a failure, and the two must not share a counter.
+			// A transcript whose every call was refused is deliberately not one of
+			// those: doctor reports Skipped as an honest zero, and that transcript is
+			// the opposite of one.
 			scan.Skipped++
 		}
 		scan.EventsWritten += result.Written
