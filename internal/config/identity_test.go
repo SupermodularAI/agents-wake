@@ -1136,3 +1136,41 @@ func boolText(b bool) string {
 	}
 	return "false"
 }
+
+func TestNameKeyIsAStableSubkeyOfTheSaltAndNotTheSalt(t *testing.T) {
+	paths := testPaths(t)
+	repos, err := OpenRepos(paths)
+	if err != nil {
+		t.Fatalf("OpenRepos() error = %v", err)
+	}
+
+	key := repos.NameKey()
+	if len(key) == 0 {
+		t.Fatal("NameKey() returned no key")
+	}
+	salt, err := os.ReadFile(paths.SaltFile)
+	if err != nil {
+		t.Fatalf("reading the salt: %v", err)
+	}
+	// Handing out the salt itself would let the record layer compute or confirm a
+	// repository id. The subkey is domain-separated so it cannot.
+	if string(key) == string(salt) {
+		t.Fatal("NameKey() returned the per-machine salt")
+	}
+
+	reopened, err := OpenRepos(paths)
+	if err != nil {
+		t.Fatalf("second OpenRepos() error = %v", err)
+	}
+	if string(reopened.NameKey()) != string(key) {
+		t.Fatal("NameKey() is not stable across opens of the same salt")
+	}
+
+	other, err := OpenRepos(testPaths(t))
+	if err != nil {
+		t.Fatalf("OpenRepos() on a second machine state error = %v", err)
+	}
+	if string(other.NameKey()) == string(key) {
+		t.Fatal("NameKey() does not depend on the salt")
+	}
+}

@@ -313,6 +313,35 @@ func nestedWith(entries []projectEntry, offered []string, fold bool, exempt int)
 	return nil
 }
 
+// nameKeyDomain separates the derived-name subkey from every other use of the
+// salt. Two keyed values over one key with no domain label are one substitution
+// away from being confused for each other; the label costs nothing and the version
+// suffix leaves room to re-key names without re-identifying repositories.
+const nameKeyDomain = "wake/derived-name/v1"
+
+// NameKey returns the key a persisted scope digest is derived under
+// (record.NewNamer, ADR-0020).
+//
+// It is a subkey of the per-machine salt, by the same construction and for the
+// same reason as hashRoot: a scoped primitive reference carries a repository path
+// fragment, and an unsalted hash of a path is not one-way, so the digest that
+// reaches the spool has to be keyed.
+//
+// A subkey rather than the salt itself, because the salt is what makes the
+// repository id one-way (ADR-0019 §3): a key that leaves this package cannot then
+// be used to compute or confirm an id. Deriving it needs no disk — the salt is
+// already loaded — so this holds ADR-0019 §1's rule that derivation never touches
+// the filesystem.
+func (r *Repos) NameKey() []byte {
+	mac := hmac.New(sha256.New, r.salt)
+	// Checked for the reason hashRoot gives: a short write would key names to a
+	// digest nothing else agrees with.
+	if _, err := mac.Write([]byte(nameKeyDomain)); err != nil {
+		panic("deriving the derived-name key: " + err.Error())
+	}
+	return mac.Sum(nil)
+}
+
 // hashRoot is the repository id: HMAC-SHA256 of the root under the per-machine
 // salt, hex-encoded and truncated to idHexLen characters (ADR-0019 §3, §8).
 //
