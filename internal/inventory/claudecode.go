@@ -26,42 +26,74 @@ type Primitive struct {
 
 // ClaudeCode prefers primitives Claude Code listed in sessions for root, then
 // supplements them from configured directories because Claude Code does not
-// emit a listing for every primitive kind. Unreadable or malformed sources
-// contribute nothing so a configuration problem cannot break the dashboard.
+// emit a listing for every primitive kind.
+//
+// Deprecated within this change: T107 Task 8 removes it once every caller passes a Scope.
 func ClaudeCode(home, root string) []Primitive {
 	return ClaudeCodeAt(filepath.Join(home, ".claude"), root)
 }
 
 // ClaudeCodeAt discovers the primitives configured under one Claude Code
-// directory. It exists for Wake's hook path, whose configured Claude directory
-// may differ from the invoking user's home directory in tests or embedding.
+// directory, treating root as consented.
+//
+// Deprecated within this change: T107 Task 8 removes it once every caller passes a Scope.
 func ClaudeCodeAt(claudeDir, root string) []Primitive {
+	return ClaudeCodeInScope(Scope{ClaudeDir: claudeDir, Root: root, Project: ProjectConsented})
+}
+
+// ClaudeCodeInScope discovers the primitives one invocation is allowed to see.
+//
+// Global discovery and project-local discovery are separate calls, and the second
+// runs only for a consented working directory: a value read out of an
+// unconsented project must never reach the persisted inventory (ADR-0010,
+// ADR-0019 §2). Unreadable or malformed sources contribute nothing, so a
+// configuration problem cannot break the dashboard.
+func ClaudeCodeInScope(scope Scope) []Primitive {
 	items := map[primitiveKey]Primitive{}
 	add := func(kind record.Kind, name string) {
-		identifier, err := record.BoundedIdentifier(name)
+		identifier, err := record.DerivedName(name)
 		if err != nil {
 			return
 		}
-		item := Primitive{Harness: claudeCode, Kind: kind, Name: identifier}
-		items[primitiveKey{kind: kind, name: identifier}] = item
+		items[primitiveKey{kind: kind, name: identifier}] = Primitive{Harness: claudeCode, Kind: kind, Name: identifier}
 	}
 
-	scanListings(filepath.Join(claudeDir, "projects"), root, add)
-	for _, base := range []string{claudeDir, filepath.Join(root, ".claude")} {
-		scanPrimitives(filepath.Join(base, "skills"), "SKILL.md", record.KindSkill, add)
-		scanPrimitives(filepath.Join(base, "agents"), "", record.KindSubagent, add)
-		scanPrimitives(filepath.Join(base, "commands"), "", record.KindCommand, add)
+	claudeCodeGlobal(scope.ClaudeDir, add)
+	if scope.allowsProject() {
+		claudeCodeProject(scope.ClaudeDir, scope.Root, add)
 	}
+	return sortedPrimitives(items)
+}
+
+// claudeCodeGlobal scans the harness's own directory and its installed plugins.
+// It never reads a working directory, so it needs no consent answer.
+func claudeCodeGlobal(claudeDir string, add func(record.Kind, string)) {
+	scanPrimitives(filepath.Join(claudeDir, "skills"), "SKILL.md", record.KindSkill, add)
+	scanPrimitives(filepath.Join(claudeDir, "agents"), "", record.KindSubagent, add)
+	scanPrimitives(filepath.Join(claudeDir, "commands"), "", record.KindCommand, add)
 	for _, installPath := range installedPluginPaths(filepath.Join(claudeDir, "plugins", "installed_plugins.json")) {
 		scanPrimitives(filepath.Join(installPath, "skills"), "SKILL.md", record.KindSkill, add)
 		scanPrimitives(filepath.Join(installPath, "agents"), "", record.KindSubagent, add)
 		scanPrimitives(filepath.Join(installPath, "commands"), "", record.KindCommand, add)
 		scanMCP(filepath.Join(installPath, ".mcp.json"), add)
 	}
-	for _, settings := range []string{filepath.Join(claudeDir, "settings.json"), filepath.Join(root, ".claude", "settings.json"), filepath.Join(root, ".mcp.json")} {
-		scanMCP(settings, add)
-	}
+	scanMCP(filepath.Join(claudeDir, "settings.json"), add)
+}
 
+// claudeCodeProject scans one consented working directory. Every source it reads
+// belongs to that directory — including the harness's session listings, which are
+// filtered to it — so the caller must have resolved consent first.
+func claudeCodeProject(claudeDir, root string, add func(record.Kind, string)) {
+	scanListings(filepath.Join(claudeDir, "projects"), root, add)
+	scanPrimitives(filepath.Join(root, ".claude", "skills"), "SKILL.md", record.KindSkill, add)
+	scanPrimitives(filepath.Join(root, ".claude", "agents"), "", record.KindSubagent, add)
+	scanPrimitives(filepath.Join(root, ".claude", "commands"), "", record.KindCommand, add)
+	scanMCP(filepath.Join(root, ".claude", "settings.json"), add)
+	scanMCP(filepath.Join(root, ".mcp.json"), add)
+}
+
+// sortedPrimitives returns the deduplicated items in a deterministic order.
+func sortedPrimitives(items map[primitiveKey]Primitive) []Primitive {
 	result := make([]Primitive, 0, len(items))
 	for _, item := range items {
 		result = append(result, item)
@@ -198,6 +230,9 @@ func readListings(reader io.Reader, root string, add func(record.Kind, string)) 
 	}
 }
 
+// underRoot is a subtree filter inside an already-consented project, not a
+// consent check: consent is resolved by config.Repos.Identify before this
+// package is called (ADR-0019 §1).
 func underRoot(cwd, root string) bool {
 	return cwd == root || strings.HasPrefix(cwd, root+string(filepath.Separator))
 }
