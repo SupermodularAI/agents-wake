@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -247,11 +248,36 @@ func TestInitRejectsAnUnsupportedInstallationBeforeWritingAnything(t *testing.T)
 				return testExecutable(t)
 			},
 		},
+		// The five shapes the settings document's own decoding refuses. Each is
+		// decidable from claudeDir alone, so each belongs before the first write —
+		// and invalid JSON and null are two of the shapes the ticket names, not
+		// exotic ones.
+		{
+			name:    "a settings file that is not valid JSON",
+			arrange: settingsContent(`{not json`),
+		},
+		{
+			name:    "a settings file holding the JSON literal null",
+			arrange: settingsContent(`null`),
+		},
+		{
+			name:    "a settings file holding an array",
+			arrange: settingsContent(`[]`),
+		},
+		{
+			name:    "a hooks setting that is not an object",
+			arrange: settingsContent(`{"hooks": []}`),
+		},
+		{
+			name:    "a hook event that is not an array",
+			arrange: settingsContent(`{"hooks": {"SessionStart": {}}}`),
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			paths := testPaths(t)
 			claudeDir, root := inventoryFixture(t)
 			executable := c.arrange(t, claudeDir)
+			before := settingsSnapshot(t, settingsPath(claudeDir))
 
 			if _, err := Init(paths, root, claudeDir, executable); err == nil {
 				t.Fatal("Init() error = nil, want a refusal for an installation that cannot host Wake's trigger")
@@ -267,16 +293,57 @@ func TestInitRejectsAnUnsupportedInstallationBeforeWritingAnything(t *testing.T)
 					t.Errorf("os.Lstat(%q) = %v, want ErrNotExist — a refused init must write nothing", path, err)
 				}
 			}
-			// Both stats, because the two ways a settings file could have been
-			// published look different: one replaces the path itself, the other
-			// writes through a link to a target that did not exist.
-			for name, stat := range map[string]func(string) (fs.FileInfo, error){"Lstat": os.Lstat, "Stat": os.Stat} {
-				if info, err := stat(settingsPath(claudeDir)); err == nil && info.Mode().IsRegular() {
-					t.Errorf("os.%s(settings.json) reports a regular file — a refused init published settings it had refused to edit", name)
-				}
+			if after := settingsSnapshot(t, settingsPath(claudeDir)); after != before {
+				t.Errorf("settings.json = %s, want %s — a refused init must leave the settings file as it found it", after, before)
 			}
 		})
 	}
+}
+
+// settingsContent arranges a settings file holding exactly content, for the cases
+// whose refusal is the document's shape rather than the installation's.
+func settingsContent(content string) func(t *testing.T, claudeDir string) string {
+	return func(t *testing.T, claudeDir string) string {
+		if err := os.WriteFile(settingsPath(claudeDir), []byte(content), 0o600); err != nil {
+			t.Fatalf("WriteFile() error = %v", err)
+		}
+		return testExecutable(t)
+	}
+}
+
+// settingsSnapshot describes the settings path closely enough that any publication
+// changes it, so a refused init can be asserted to have left it alone rather than
+// merely to have left it non-regular.
+//
+// Both levels, because the two ways a settings file could have been published look
+// different: one replaces the path itself, the other writes through a link to a
+// target that did not exist.
+func settingsSnapshot(t *testing.T, path string) string {
+	t.Helper()
+	at := "absent"
+	switch info, err := os.Lstat(path); {
+	case errors.Is(err, fs.ErrNotExist):
+	case err != nil:
+		t.Fatalf("os.Lstat(settings.json) error = %v", err)
+	case info.Mode()&fs.ModeSymlink != 0:
+		target, readErr := os.Readlink(path)
+		if readErr != nil {
+			t.Fatalf("os.Readlink(settings.json) error = %v", readErr)
+		}
+		at = "a symbolic link to " + target
+	default:
+		at = "a " + info.Mode().String()
+	}
+
+	resolves := "nothing"
+	switch content, err := os.ReadFile(path); {
+	case errors.Is(err, fs.ErrNotExist):
+	case err != nil:
+		resolves = "no readable file"
+	default:
+		resolves = strconv.Quote(string(content))
+	}
+	return at + " resolving to " + resolves
 }
 
 // Two processes editing settings.json at once must leave a file that parses and
