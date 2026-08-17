@@ -139,6 +139,41 @@ func TestScanCountersDistinguishAnUnreadableSourceFromACleanZero(t *testing.T) {
 		}
 	})
 
+	// A transcript Wake read completely and refused every primitive in is not a
+	// clean zero: the numbers are missing everything that transcript held, and
+	// nobody knows how much. This is the shape a Claude Code field rename takes —
+	// every Task call still there, none of them nameable — so it must not arrive as
+	// a skipped transcript, which doctor reports as an honest zero.
+	t.Run("a transcript whose every primitive name was refused", func(t *testing.T) {
+		paths := testPaths(t)
+		claudeDir, root := inventoryFixture(t)
+		if err := os.WriteFile(transcriptOf(claudeDir), []byte(strings.Join([]string{
+			`{"uuid":"entry-1","sessionId":"session-1","cwd":"` + root + `","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Task"}]}}`,
+			`{"uuid":"entry-2","sessionId":"session-1","cwd":"` + root + `","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+		}, "\n")), 0o600); err != nil {
+			t.Fatalf("WriteFile() error = %v", err)
+		}
+		if _, err := Init(paths, root, claudeDir, testExecutable(t)); err != nil {
+			t.Fatalf("Init() error = %v", err)
+		}
+
+		scan := scanCounters(t, paths)
+		if scan.RefusedCalls != 1 {
+			t.Errorf("RefusedCalls = %d, want 1 — a call this build could not name is collection it lost", scan.RefusedCalls)
+		}
+		if scan.Skipped != 0 {
+			t.Errorf("Skipped = %d, want 0 — an all-refused transcript is not an honest zero", scan.Skipped)
+		}
+		// It is still not a parse failure: the lines were readable, so the drift
+		// signal that means "unusable line" stays untouched.
+		if scan.ParseErrors != 0 || scan.Unreadable != 0 {
+			t.Errorf("ParseErrors = %d, Unreadable = %d; want 0 and 0", scan.ParseErrors, scan.Unreadable)
+		}
+		if scan.EventsWritten != 0 {
+			t.Errorf("EventsWritten = %d, want 0", scan.EventsWritten)
+		}
+	})
+
 	// A machine with no Claude Code history at all is a clean zero, not an
 	// unreadable source. filepath.WalkDir reports the root's own stat error through
 	// the callback, so "the directory is not there" arrives by the same route as

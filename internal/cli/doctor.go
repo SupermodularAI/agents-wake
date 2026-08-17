@@ -91,6 +91,7 @@ func writeDiagnosis(out io.Writer, paths config.Paths, claudeDir string) error {
 		{"skipped transcripts", report.Scan.Skipped},
 		{"events written", report.Scan.EventsWritten},
 		{"refused project entries", report.Scan.RefusedProjects},
+		{"refused calls", report.Scan.RefusedCalls},
 	} {
 		if _, err := fmt.Fprintf(out, "%s: %d\n", line.key, line.value); err != nil {
 			return err
@@ -125,6 +126,13 @@ func scanTime(report health.Report, readErr error) string {
 // first scan, and the remedy (`wake init` in the repository) is undiscoverable if
 // doctor calls the situation a complete count of zero.
 //
+// A refused call belongs in it for the same reason, and it is the arm that catches
+// format drift: a primitive Wake found but could not name was invoked, and the
+// numbers below are missing that invocation. Inferring a name would be worse than
+// losing it (plan §3.3), so the drop is correct and reporting it is what keeps the
+// drop honest — a harness renaming the field a primitive's identity lives in stops
+// collection for that whole kind, and this is the only line that says so.
+//
 // Skipped is deliberately not in it. A transcript whose working directory belongs to
 // no consented repository was read completely and collected nothing because consent
 // says so, and an unterminated call is a number that is not final yet rather than
@@ -144,7 +152,7 @@ func integrationState(report health.Report, readErr, hookErr error) string {
 		return "hooks unreadable"
 	case report.Scan.At.IsZero():
 		return "never scanned"
-	case report.Scan.Unreadable > 0 || report.Scan.ParseErrors > 0 || report.Scan.RefusedProjects > 0:
+	case report.Scan.Unreadable > 0 || report.Scan.ParseErrors > 0 || report.Scan.RefusedProjects > 0 || report.Scan.RefusedCalls > 0:
 		return "collects nothing"
 	case report.Scan.EventsWritten == 0:
 		return "collects zero"
