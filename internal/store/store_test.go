@@ -339,6 +339,52 @@ func TestConcurrentAppendsOnOneStoreValueDoNotDuplicate(t *testing.T) {
 	}
 }
 
+// The index must cover the whole spool after every Append: the refresh reads only
+// the bytes from indexedTo to end-of-file, so an offset equal to the file size is
+// the proof that the next Append re-decodes nothing (T120).
+func TestAppendIndexesTheSpoolTailOnlyOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.ndjson")
+	store := New(path)
+
+	if _, err := store.Append([]record.Record{testRecord("one"), testRecord("two")}); err != nil {
+		t.Fatalf("first Append() error = %v", err)
+	}
+	assertIndexCoversSpool(t, store, path, 2)
+
+	if _, err := store.Append([]record.Record{testRecord("three")}); err != nil {
+		t.Fatalf("second Append() error = %v", err)
+	}
+	assertIndexCoversSpool(t, store, path, 3)
+
+	// A line another writer appended is picked up by the tail refresh, not by a
+	// second full decode: the offset still ends at the file size afterwards.
+	encoded, err := record.Marshal(testRecord("four"))
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	appendRaw(t, path, string(encoded)+"\n")
+
+	result, err := store.Append([]record.Record{testRecord("four")})
+	if err != nil || result.Duplicate != 1 || result.Written != 0 {
+		t.Fatalf("third Append() = %+v, %v; want one duplicate", result, err)
+	}
+	assertIndexCoversSpool(t, store, path, 4)
+}
+
+func assertIndexCoversSpool(t *testing.T, store *Store, path string, wantIDs int) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	if store.indexedTo != info.Size() {
+		t.Errorf("indexedTo = %d, want the spool size %d — the next Append would re-decode", store.indexedTo, info.Size())
+	}
+	if len(store.index) != wantIDs {
+		t.Errorf("index size = %d, want %d", len(store.index), wantIDs)
+	}
+}
+
 func appendRaw(t *testing.T, path, content string) {
 	t.Helper()
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
@@ -363,26 +409,35 @@ func benchRecord(index int) record.Record {
 
 // BenchmarkAppendIntoLargeSpool is the measurement T120's acceptance asks for: one
 // Append of a single record into a spool that already holds thousands. Before the
-// incremental index it decodes the whole spool every iteration; after, it decodes
+// incremental index it decoded the whole spool every iteration; after, it decodes
 // only what another writer appended since — normally nothing.
+//
+// It runs at two spool sizes on purpose. Absolute ns/op is dominated by a fixed
+// per-append floor this ticket does not touch (the lock file, three opens and an
+// fsync — ~4 ms on the machine this was written on), so the figure that shows the
+// defect is fixed is how the cost moves with the stored event count: roughly linear
+// in it before, flat after.
 func BenchmarkAppendIntoLargeSpool(b *testing.B) {
-	const seeded = 5000
-	path := filepath.Join(b.TempDir(), "events.ndjson")
-	store := New(path)
-	seed := make([]record.Record, 0, seeded)
-	for index := range seeded {
-		seed = append(seed, benchRecord(index))
-	}
-	if _, err := store.Append(seed); err != nil {
-		b.Fatalf("seed Append() error = %v", err)
-	}
+	for _, seeded := range []int{5000, 20000} {
+		b.Run(strconv.Itoa(seeded)+"-events", func(b *testing.B) {
+			path := filepath.Join(b.TempDir(), "events.ndjson")
+			store := New(path)
+			seed := make([]record.Record, 0, seeded)
+			for index := range seeded {
+				seed = append(seed, benchRecord(index))
+			}
+			if _, err := store.Append(seed); err != nil {
+				b.Fatalf("seed Append() error = %v", err)
+			}
 
-	index := 0
-	for b.Loop() {
-		if _, err := store.Append([]record.Record{benchRecord(seeded + index)}); err != nil {
-			b.Fatalf("Append() error = %v", err)
-		}
-		index++
+			index := 0
+			for b.Loop() {
+				if _, err := store.Append([]record.Record{benchRecord(seeded + index)}); err != nil {
+					b.Fatalf("Append() error = %v", err)
+				}
+				index++
+			}
+		})
 	}
 }
 
