@@ -2,10 +2,12 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -517,7 +519,190 @@ func TestSetTouchesOnlyTheConfigRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading the config root: %v", err)
 	}
-	if len(entries) != 1 || entries[0].Name() != filepath.Base(p.ConfigFile) {
-		t.Errorf("the config root holds %v, want only config.toml", entries)
+	// config.lock as well as config.toml: Set serialises its read-modify-write
+	// against a second writer, and the lock is a separate always-empty file
+	// because opening config.toml with O_CREATE would leave a zero-length file
+	// behind on a crash. Both belong to the config root and neither is in the
+	// data root, which is the property this test is about.
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	slices.Sort(names)
+	want := []string{filepath.Base(p.ConfigFile), configLockName}
+	slices.Sort(want)
+	if !slices.Equal(names, want) {
+		t.Errorf("the config root holds %v, want %v", names, want)
+	}
+}
+
+// Acceptance: two concurrent writes of different keys must both survive. Set is a
+// read-decode-modify-encode-write, so without serialisation the writer that
+// decoded first republishes a table that never had the other's key in it, and the
+// loss is silent — both calls return success.
+func TestSetPreservesAnUnrelatedKeyWrittenConcurrently(t *testing.T) {
+	p := testPaths(t)
+
+	writes := map[string]string{
+		"store.retention_raw":     "90d",
+		"store.rollup_after":      "7d",
+		"ui.default_window":       "14d",
+		"session.idle_timeout":    "45m",
+		"scan.stale_call_timeout": "12h",
+		"scan.harnesses":          "claude-code",
+		"scan.repos":              "abc",
+	}
+
+	var writers sync.WaitGroup
+	failures := make(chan error, len(writes))
+	for name, value := range writes {
+		writers.Add(1)
+		go func() {
+			defer writers.Done()
+			if _, err := Set(p, name, value); err != nil {
+				failures <- fmt.Errorf("Set(%q, %q) = %w", name, value, err)
+			}
+		}()
+	}
+	writers.Wait()
+	close(failures)
+	for err := range failures {
+		t.Fatal(err)
+	}
+
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load() = %v", err)
+	}
+	for name, want := range writes {
+		got, err := c.Get(name)
+		if err != nil {
+			t.Errorf("Get(%q) = %v", name, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("Get(%q) = %q, want %q — a concurrent Set erased it", name, got, want)
+		}
+	}
+}
+
+// Acceptance: the same property for a list, where the hole is wider. Reading the
+// list and setting it back are two calls, so two `wake init` runs in two
+// repositories each write a list missing the other's id.
+func TestAddToListKeepsItemsAddedConcurrently(t *testing.T) {
+	p := testPaths(t)
+
+	const adders = 8
+	ids := make([]string, adders)
+	for i := range ids {
+		ids[i] = strings.Repeat(fmt.Sprintf("%x", i), idHexLen)
+	}
+
+	var writers sync.WaitGroup
+	failures := make(chan error, adders)
+	for _, id := range ids {
+		writers.Add(1)
+		go func() {
+			defer writers.Done()
+			if _, err := AddToList(p, "scan.repos", id); err != nil {
+				failures <- fmt.Errorf("AddToList(%q) = %w", id, err)
+			}
+		}()
+	}
+	writers.Wait()
+	close(failures)
+	for err := range failures {
+		t.Fatal(err)
+	}
+
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load() = %v", err)
+	}
+	list, err := c.StringList("scan.repos")
+	if err != nil {
+		t.Fatalf("StringList() = %v", err)
+	}
+	for _, id := range ids {
+		if !slices.Contains(list, id) {
+			t.Errorf("scan.repos = %v, missing %q — a concurrent add erased it", list, id)
+		}
+	}
+}
+
+// Re-running `wake init` in a repository already consented to must not record it
+// twice: the list is what the scan filter iterates, and a duplicate would be a
+// second pass over the same repository.
+func TestAddToListIsIdempotent(t *testing.T) {
+	p := testPaths(t)
+
+	for attempt := range 2 {
+		if _, err := AddToList(p, "scan.repos", "alpha"); err != nil {
+			t.Fatalf("AddToList() attempt %d = %v", attempt, err)
+		}
+	}
+
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load() = %v", err)
+	}
+	list, err := c.StringList("scan.repos")
+	if err != nil {
+		t.Fatalf("StringList() = %v", err)
+	}
+	if len(list) != 1 || list[0] != "alpha" {
+		t.Errorf("scan.repos = %v, want exactly one \"alpha\"", list)
+	}
+}
+
+func TestAddToListRejectsANonListKey(t *testing.T) {
+	p := testPaths(t)
+
+	if _, err := AddToList(p, "ui.default_window", "7d"); err == nil {
+		t.Fatal("AddToList() error = nil, want a rejection for a non-list key")
+	}
+
+	assertConfigNotCreated(t, p)
+}
+
+// A comma is the list separator, so an item containing one would come back as two
+// members on the next read — a repository id that resolves to nothing, twice.
+func TestAddToListRejectsAnItemContainingAComma(t *testing.T) {
+	p := testPaths(t)
+
+	if _, err := AddToList(p, "scan.repos", "alpha,beta"); err == nil {
+		t.Fatal("AddToList() error = nil, want a rejection for an item containing a comma")
+	}
+
+	assertConfigNotCreated(t, p)
+}
+
+// Three state files, three locks, three distinct paths. A shared lock would make
+// a hook-triggered scan wait on a `wake init` writing config.toml, which is the
+// serialisation the split exists to avoid.
+func TestConfigLockIsNotTheProjectsLock(t *testing.T) {
+	p := testPaths(t)
+
+	locks := []string{
+		filepath.Join(p.ConfigDir, configLockName),
+		filepath.Join(p.ConfigDir, claudeSettingsLockName),
+		filepath.Join(filepath.Dir(p.ProjectsFile), projectsLockName),
+	}
+	for i, left := range locks {
+		for _, right := range locks[i+1:] {
+			if left == right {
+				t.Errorf("two locks resolve to the same file %q; a writer of one would block a writer of the other", left)
+			}
+		}
+	}
+}
+
+// assertConfigNotCreated fails when a rejected write left a config file behind. A
+// rejected name or value writes nothing at all.
+func assertConfigNotCreated(t *testing.T, p Paths) {
+	t.Helper()
+
+	if _, err := os.Lstat(p.ConfigFile); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("os.Lstat(%q) = %v, want ErrNotExist — a rejected write must create nothing", p.ConfigFile, err)
 	}
 }

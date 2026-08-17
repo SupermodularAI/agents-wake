@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/SupermodularAI/agents-wake/internal/config"
+	"github.com/SupermodularAI/agents-wake/internal/health"
 	"github.com/SupermodularAI/agents-wake/internal/inventory"
 	"github.com/SupermodularAI/agents-wake/internal/store"
 )
@@ -34,8 +35,13 @@ func TestInitPreservesHooksAndImportsOnlyConsentedHistory(t *testing.T) {
 		t.Fatalf("WriteFile() transcript error = %v", err)
 	}
 	paths := testPaths(t)
+	executable := testExecutable(t)
+	command, err := hookCommandFor(executable)
+	if err != nil {
+		t.Fatalf("hookCommandFor() error = %v", err)
+	}
 
-	written, err := Init(paths, root, claudeDir)
+	written, err := Init(paths, root, claudeDir, executable)
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -51,10 +57,10 @@ func TestInitPreservesHooksAndImportsOnlyConsentedHistory(t *testing.T) {
 	if err != nil || json.Unmarshal(raw, &persisted) != nil {
 		t.Fatalf("reading settings failed: %v", err)
 	}
-	if string(raw) == settings || !containsCommand(raw, "existing command") || !containsCommand(raw, hookCommand) {
+	if string(raw) == settings || !containsCommand(raw, "existing command") || !containsCommand(raw, command) {
 		t.Fatalf("settings lost existing or Wake hook: %s", raw)
 	}
-	second, err := Init(paths, root, claudeDir)
+	second, err := Init(paths, root, claudeDir, executable)
 	if err != nil || second != 0 {
 		t.Fatalf("second Init() = %d, %v; want 0, nil", second, err)
 	}
@@ -76,7 +82,7 @@ func TestRebuildReplacesOnlyTheDerivedEventStore(t *testing.T) {
 		t.Fatalf("WriteFile() transcript error = %v", err)
 	}
 	paths := testPaths(t)
-	if _, err := Init(paths, root, claudeDir); err != nil {
+	if _, err := Init(paths, root, claudeDir, testExecutable(t)); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 	projectsBefore, err := os.ReadFile(paths.ProjectsFile)
@@ -98,7 +104,19 @@ func TestRebuildReplacesOnlyTheDerivedEventStore(t *testing.T) {
 
 func TestUninstallRemovesOnlyWakeHooksAndKeepsData(t *testing.T) {
 	claudeDir := filepath.Join(t.TempDir(), "claude")
-	settings := `{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"existing command"}]},{"wake":true,"hooks":[{"type":"command","command":"changed wake command"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"` + hookCommand + `"}]}]}}`
+	// The SessionStart marked group carries a command this build would never write,
+	// and it is still removed: ownership is the marker plus the group's shape, never
+	// the command string, so a group an earlier build wrote stays recognisable.
+	//
+	// The SessionEnd group carries Wake's exact command with no marker, and it is
+	// preserved: command equality is not proof of ownership, and a user who copied
+	// that command into their own group owns it. That is the mixed-group case the
+	// ticket names, and hooks_test.go covers it on its own.
+	command, commandErr := hookCommandFor(testExecutable(t))
+	if commandErr != nil {
+		t.Fatalf("hookCommandFor() error = %v", commandErr)
+	}
+	settings := `{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"existing command"}]},{"wake":true,"hooks":[{"type":"command","command":"changed wake command"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":` + quote(command) + `}]}]}}`
 	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
 		t.Fatalf("MkdirAll() error = %v", err)
 	}
@@ -113,12 +131,12 @@ func TestUninstallRemovesOnlyWakeHooksAndKeepsData(t *testing.T) {
 		t.Fatalf("WriteFile() data error = %v", err)
 	}
 
-	removed, err := Uninstall(paths, claudeDir, false)
-	if err != nil || !removed {
-		t.Fatalf("Uninstall() = %t, %v", removed, err)
+	removed, uninstallErr := Uninstall(paths, claudeDir, false)
+	if uninstallErr != nil || !removed {
+		t.Fatalf("Uninstall() = %t, %v", removed, uninstallErr)
 	}
 	raw, err := os.ReadFile(filepath.Join(claudeDir, "settings.json"))
-	if err != nil || !containsCommand(raw, "existing command") || containsCommand(raw, hookCommand) || contains(string(raw), `"wake": true`) {
+	if err != nil || !containsCommand(raw, "existing command") || !containsCommand(raw, command) || contains(string(raw), `"wake": true`) {
 		t.Fatalf("settings after uninstall = %s, error = %v", raw, err)
 	}
 	if _, statErr := os.Stat(filepath.Join(paths.DataDir, "events.ndjson")); statErr != nil {
@@ -211,7 +229,7 @@ func TestIngestFromASubdirectoryInventoriesTheWholeRepository(t *testing.T) {
 	if err := os.MkdirAll(inside, 0o700); err != nil {
 		t.Fatalf("MkdirAll() error = %v", err)
 	}
-	if _, err := Init(paths, root, claudeDir); err != nil {
+	if _, err := Init(paths, root, claudeDir, testExecutable(t)); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 	t.Chdir(inside)
@@ -283,7 +301,7 @@ func TestInitInventoriesTheProjectItJustConsented(t *testing.T) {
 	paths := testPaths(t)
 	claudeDir, root := inventoryFixture(t)
 
-	if _, err := Init(paths, root, claudeDir); err != nil {
+	if _, err := Init(paths, root, claudeDir, testExecutable(t)); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 	raw, err := os.ReadFile(paths.PrimitivesFile)
@@ -292,6 +310,86 @@ func TestInitInventoriesTheProjectItJustConsented(t *testing.T) {
 	}
 	if !contains(string(raw), "global-skill") || !contains(string(raw), "local-skill") {
 		t.Fatalf("primitives.json = %s", raw)
+	}
+}
+
+// The counter file is derived and non-precious (ADR-0014), and doctor already
+// renders an unreadable one as a state rather than an error. A command that writes
+// counters must agree: a health.json this build cannot read is not a reason to refuse
+// to import history, install a trigger, or uninstall one — and the recovery, deleting
+// a file nothing tells the user about, would be undiscoverable.
+func TestAnUnreadableCounterFileDoesNotStopAnyCommand(t *testing.T) {
+	for _, name := range []string{"init", "ingest", "remove"} {
+		t.Run(name, func(t *testing.T) {
+			paths := testPaths(t)
+			claudeDir, root := inventoryFixture(t)
+			writeFixture(t, paths.HealthFile, `{"version":99}`)
+
+			var err error
+			switch name {
+			case "init":
+				_, err = Init(paths, root, claudeDir, testExecutable(t))
+			case "ingest":
+				if _, initErr := Init(paths, root, claudeDir, testExecutable(t)); initErr != nil {
+					t.Fatalf("Init() error = %v", initErr)
+				}
+				writeFixture(t, paths.HealthFile, `{"version":99}`)
+				t.Chdir(root)
+				_, err = Ingest(paths, claudeDir)
+			case "remove":
+				if _, initErr := Init(paths, root, claudeDir, testExecutable(t)); initErr != nil {
+					t.Fatalf("Init() error = %v", initErr)
+				}
+				writeFixture(t, paths.HealthFile, `{"version":99}`)
+				var removed bool
+				removed, err = Uninstall(paths, claudeDir, false)
+				if err == nil && !removed {
+					t.Error("Uninstall() = false, want true — the hooks were installed")
+				}
+			}
+			if err != nil {
+				t.Fatalf("%s error = %v, want the command to run and the counters to be replaced", name, err)
+			}
+
+			if _, readErr := health.New(paths.HealthFile).Read(); readErr != nil {
+				t.Errorf("the counter file is still unreadable after %s: %v", name, readErr)
+			}
+		})
+	}
+}
+
+// A counter write that fails for a reason of its own — an unwritable data root, a
+// file this user does not own — happens after the hooks are already gone. It may
+// surface, since a local layout this build cannot write to is worth knowing about,
+// but it must not turn what did happen into a report that nothing did.
+func TestUninstallStillReportsTheHooksItRemovedWhenTheCountersCannotBeWritten(t *testing.T) {
+	paths := testPaths(t)
+	claudeDir, root := inventoryFixture(t)
+	if _, err := Init(paths, root, claudeDir, testExecutable(t)); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	// Read-only, so creating the counter file's lock fails. Restored afterwards, or
+	// t.TempDir's own cleanup cannot remove it.
+	if err := os.Chmod(paths.DataDir, 0o500); err != nil {
+		t.Fatalf("Chmod() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(paths.DataDir, 0o700); err != nil {
+			t.Errorf("restoring the data root: %v", err)
+		}
+	})
+
+	// The error is not asserted: running as root, or on a filesystem that ignores
+	// the mode, the write succeeds and there is nothing to report. What is asserted
+	// holds either way.
+	removed, err := Uninstall(paths, claudeDir, false)
+
+	if !removed {
+		t.Errorf("Uninstall() = false, error = %v — the hooks were removed and the report says they were not", err)
+	}
+	state, hookErr := HookState(claudeDir)
+	if hookErr != nil || state != 0 {
+		t.Errorf("HookState() = %d, %v — want no Wake group left", state, hookErr)
 	}
 }
 
@@ -327,6 +425,7 @@ func testPaths(t *testing.T) config.Paths {
 	paths.SaltFile = filepath.Join(paths.ConfigDir, "salt.bin")
 	paths.ProjectsFile = filepath.Join(paths.DataDir, "projects.bin")
 	paths.PrimitivesFile = filepath.Join(paths.DataDir, "primitives.json")
+	paths.HealthFile = filepath.Join(paths.DataDir, "health.json")
 	return paths
 }
 

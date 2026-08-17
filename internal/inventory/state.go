@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"slices"
 	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/atomicfile"
 	"github.com/SupermodularAI/agents-wake/internal/lockfile"
 	"github.com/SupermodularAI/agents-wake/internal/metrics"
 	"github.com/SupermodularAI/agents-wake/internal/record"
@@ -20,7 +20,6 @@ import (
 const (
 	primitiveFileVersion = 1
 	fileMode             = fs.FileMode(0o600)
-	dirMode              = fs.FileMode(0o700)
 )
 
 // Usage is a locally available primitive and its activity derived from the
@@ -189,25 +188,8 @@ func (s *Store) write(primitives []Usage) error {
 		return fmt.Errorf("encoding primitive inventory: %w", err)
 	}
 	raw = append(raw, '\n')
-	if makeErr := os.MkdirAll(filepath.Dir(s.path), dirMode); makeErr != nil {
-		return fmt.Errorf("creating primitive inventory directory: %w", makeErr)
-	}
-	file, err := os.CreateTemp(filepath.Dir(s.path), "primitives-*.json")
-	if err != nil {
-		return fmt.Errorf("creating primitive inventory: %w", err)
-	}
-	temporary := file.Name()
-	if _, err := file.Write(raw); err != nil {
-		return errors.Join(fmt.Errorf("writing primitive inventory: %w", err), file.Close(), os.Remove(temporary))
-	}
-	if err := file.Chmod(fileMode); err != nil {
-		return errors.Join(fmt.Errorf("setting primitive inventory mode: %w", err), file.Close(), os.Remove(temporary))
-	}
-	if err := file.Close(); err != nil {
-		return errors.Join(fmt.Errorf("closing primitive inventory: %w", err), os.Remove(temporary))
-	}
-	if err := os.Rename(temporary, s.path); err != nil {
-		return errors.Join(fmt.Errorf("replacing primitive inventory: %w", err), os.Remove(temporary))
+	if err := atomicfile.Publish(s.path, raw, fileMode); err != nil {
+		return fmt.Errorf("publishing primitive inventory: %w", err)
 	}
 	return nil
 }
