@@ -47,7 +47,7 @@ func Init(paths config.Paths, root, claudeDir string) (int, error) {
 	if err != nil {
 		return written, err
 	}
-	return written, refreshInventory(paths, claudeDir, root, events)
+	return written, refreshInventory(paths, repos, claudeDir, root, events)
 }
 
 // Ingest imports available transcripts for consented repositories only.
@@ -65,7 +65,7 @@ func Ingest(paths config.Paths, claudeDir string) (int, error) {
 	if err != nil {
 		return written, err
 	}
-	return written, refreshInventory(paths, claudeDir, root, events)
+	return written, refreshInventory(paths, repos, claudeDir, root, events)
 }
 
 // Rebuild discards only the derived event spool before importing consented
@@ -137,8 +137,35 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 	return written, err
 }
 
-func refreshInventory(paths config.Paths, claudeDir, root string, events *store.Store) error {
-	return inventory.New(paths.PrimitivesFile).Refresh(events, inventory.ClaudeCodeAt(claudeDir, root))
+// DiscoveryScope resolves which Claude Code discovery paths cwd may read.
+//
+// Consent is the boundary wake init established (ADR-0010): this resolves it and
+// nothing else — it never registers a root, never invokes git, and never stats
+// the filesystem to decide (ADR-0019 §1, §9). It fails closed: a consent answer
+// that cannot be produced withholds project-local discovery rather than
+// defaulting to it, and the unconsented fallback id Identify returns is never
+// read, so it cannot be persisted (ADR-0019 §9).
+func DiscoveryScope(paths config.Paths, claudeDir, cwd string) inventory.Scope {
+	repos, err := config.OpenRepos(paths)
+	if err != nil {
+		return inventory.Scope{ClaudeDir: claudeDir, Project: inventory.ProjectUnresolved}
+	}
+	return discoveryScope(repos, claudeDir, cwd)
+}
+
+func discoveryScope(repos *config.Repos, claudeDir, cwd string) inventory.Scope {
+	identity, err := repos.Identify(cwd)
+	if err != nil {
+		return inventory.Scope{ClaudeDir: claudeDir, Project: inventory.ProjectUnresolved}
+	}
+	if !identity.Matched {
+		return inventory.Scope{ClaudeDir: claudeDir, Project: inventory.ProjectUnconsented}
+	}
+	return inventory.Scope{ClaudeDir: claudeDir, Root: cwd, Project: inventory.ProjectConsented}
+}
+
+func refreshInventory(paths config.Paths, repos *config.Repos, claudeDir, root string, events *store.Store) error {
+	return inventory.New(paths.PrimitivesFile).Refresh(events, inventory.ClaudeCodeInScope(discoveryScope(repos, claudeDir, root)))
 }
 
 func installHooks(claudeDir string) error {
