@@ -115,23 +115,58 @@ func (r *Repos) Identify(cwd string) (Identity, error) {
 		return Identity{}, fmt.Errorf("the working directory %w", err)
 	}
 
-	best := ""
-	id := ""
-	for _, entry := range r.table.Projects {
-		for _, spelling := range entry.spellings() {
-			if !hasPathPrefix(cleaned, spelling, entry.CaseInsensitive) {
-				continue
-			}
-			if id != "" && len(spelling) <= len(best) {
-				continue
-			}
-			best, id = spelling, entry.ID
-		}
-	}
+	_, id := r.match(cleaned)
 	if id != "" {
 		return Identity{ID: id, Matched: true}, nil
 	}
 	return Identity{ID: r.hashRoot(cleaned), Matched: false}, nil
+}
+
+// ConsentedRoot returns the recorded root the given working directory belongs to,
+// or the empty string when it belongs to none.
+//
+// It answers the question local discovery has to ask — which directory tree may be
+// read on behalf of this working directory — against the same snapshot, by the same
+// longest-prefix rule, and with the same no-filesystem guarantee as Identify
+// (ADR-0019 §1). Discovery needs the root rather than the directory: consent was
+// given for a repository, and scanning only the subdirectory a command happens to
+// run in collects part of that repository and then reports a complete pass.
+//
+// This is the one path this package returns, and it is one the caller already held:
+// the answer is a prefix of the directory the caller passed in, so it discloses
+// nothing new. That is why Identity still carries no path — a record's repository is
+// a hashed id and only ever that (plan §3.4) — and why NestedRootError still names
+// an enclosing repository by id alone, since that root is one the caller never
+// offered. This root chooses which directories to read; it is never persisted and
+// never printed.
+func (r *Repos) ConsentedRoot(cwd string) (string, error) {
+	cleaned, err := lexicalClean(cwd)
+	if err != nil {
+		return "", fmt.Errorf("the working directory %w", err)
+	}
+	root, _ := r.match(cleaned)
+	return root, nil
+}
+
+// match returns the recorded spelling and id of the entry cwd belongs to, or two
+// empty strings when no recorded spelling is a prefix of it.
+//
+// Longest wins because that is what makes the answer unique when the table happens
+// to hold nested roots, which Register refuses but a hand-edited or older file may
+// contain. cwd is assumed already lexically clean.
+func (r *Repos) match(cwd string) (root, id string) {
+	for _, entry := range r.table.Projects {
+		for _, spelling := range entry.spellings() {
+			if !hasPathPrefix(cwd, spelling, entry.CaseInsensitive) {
+				continue
+			}
+			if id != "" && len(spelling) <= len(root) {
+				continue
+			}
+			root, id = spelling, entry.ID
+		}
+	}
+	return root, id
 }
 
 // Register records a consented repository root and returns its id.

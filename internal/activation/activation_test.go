@@ -177,6 +177,57 @@ func TestDiscoveryScopeGrantsProjectDiscoveryInsideAConsentedRepository(t *testi
 	}
 }
 
+func TestDiscoveryScopeResolvesTheConsentedRootFromASubdirectory(t *testing.T) {
+	paths := testPaths(t)
+	claudeDir := filepath.Join(t.TempDir(), "claude")
+	root := t.TempDir()
+	inside := filepath.Join(root, "packages", "api")
+	if err := os.MkdirAll(inside, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	repos, err := config.OpenRepos(paths)
+	if err != nil {
+		t.Fatalf("OpenRepos() error = %v", err)
+	}
+	if _, registerErr := repos.Register(root, filepath.Base(root)); registerErr != nil {
+		t.Fatalf("Register() error = %v", registerErr)
+	}
+
+	// Consent was given for the repository, not for the directory the command
+	// happens to run in. Scoping discovery to the subdirectory would read only
+	// part of the repository's primitives and then, being a complete pass, replace
+	// the snapshot with that part.
+	got, _ := DiscoveryScope(paths, claudeDir, inside)
+	want := inventory.Scope{ClaudeDir: claudeDir, Root: root, Project: inventory.ProjectConsented}
+	if got != want {
+		t.Fatalf("DiscoveryScope() = %+v, want %+v", got, want)
+	}
+}
+
+func TestIngestFromASubdirectoryInventoriesTheWholeRepository(t *testing.T) {
+	paths := testPaths(t)
+	claudeDir, root := inventoryFixture(t)
+	inside := filepath.Join(root, "packages", "api")
+	if err := os.MkdirAll(inside, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if _, err := Init(paths, root, claudeDir); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	t.Chdir(inside)
+
+	if _, err := Ingest(paths, claudeDir); err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+	raw, err := os.ReadFile(paths.PrimitivesFile)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !contains(string(raw), "local-skill") || !contains(string(raw), "global-skill") {
+		t.Fatalf("a scan from inside the repository lost its primitives: %s", raw)
+	}
+}
+
 func TestDiscoveryScopeFailsClosedWhenConsentCannotBeResolved(t *testing.T) {
 	paths := testPaths(t)
 	claudeDir := filepath.Join(t.TempDir(), "claude")

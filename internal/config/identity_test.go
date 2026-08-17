@@ -1174,3 +1174,37 @@ func TestNameKeyIsAStableSubkeyOfTheSaltAndNotTheSalt(t *testing.T) {
 		t.Fatal("NameKey() does not depend on the salt")
 	}
 }
+
+func TestConsentedRootAnswersWithTheRecordedRoot(t *testing.T) {
+	paths := testPaths(t)
+	repos, err := OpenRepos(paths)
+	if err != nil {
+		t.Fatalf("OpenRepos() error = %v", err)
+	}
+	root := mkdirAll(t, filepath.Join(tempRealDir(t), "repo"))
+	if _, registerErr := repos.Register(root, "repo"); registerErr != nil {
+		t.Fatalf("Register() error = %v", registerErr)
+	}
+
+	for _, cwd := range []string{root, filepath.Join(root, "packages", "api")} {
+		got, rootErr := repos.ConsentedRoot(cwd)
+		if rootErr != nil {
+			t.Fatalf("ConsentedRoot(%q) error = %v", cwd, rootErr)
+		}
+		if got != root {
+			t.Errorf("ConsentedRoot(%q) = %q, want %q", cwd, got, root)
+		}
+	}
+
+	outside := mkdirAll(t, filepath.Join(tempRealDir(t), "elsewhere"))
+	got, err := repos.ConsentedRoot(outside)
+	if err != nil {
+		t.Fatalf("ConsentedRoot() error = %v", err)
+	}
+	if got != "" {
+		t.Errorf("ConsentedRoot() on an unconsented directory = %q, want no root", got)
+	}
+	if _, err := repos.ConsentedRoot("relative/dir"); err == nil {
+		t.Error("ConsentedRoot() accepted a relative directory")
+	}
+}
