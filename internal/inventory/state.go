@@ -104,6 +104,11 @@ func derive(summary metrics.Summary, available []Primitive) []Usage {
 		key := usageKey{harness: primitive.Harness, kind: primitive.Kind, name: primitive.Name}
 		usage := observed[key]
 		usage.Harness, usage.Kind, usage.Name = primitive.Harness, primitive.Kind, primitive.Name
+		// Fail closed: a name the record contract would refuse must not reach the
+		// snapshot either, whatever a caller handed us (ADR-0007, plan §3.4).
+		if !usage.valid() {
+			continue
+		}
 		items[key] = usage
 	}
 	result := make([]Usage, 0, len(items))
@@ -156,10 +161,7 @@ func (s *Store) write(primitives []Usage) error {
 }
 
 func (u Usage) valid() bool {
-	if _, err := record.BoundedIdentifier(string(u.Harness)); err != nil {
-		return false
-	}
-	if _, err := record.BoundedIdentifier(string(u.Name)); err != nil {
+	if !record.ValidHarness(u.Harness) || !record.ValidName(u.Name) {
 		return false
 	}
 	if !validKind(u.Kind) {

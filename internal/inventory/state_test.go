@@ -1,7 +1,10 @@
 package inventory
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,6 +46,45 @@ func TestRefreshPersistsDiscoveredPrimitivesAndCurrentUsage(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].Invocations != 2 || !items[0].LastUsed.Equal(second.Timestamp) {
 		t.Fatalf("updated inventory = %+v", items)
+	}
+}
+
+func TestRefreshDropsPrimitivesWithUnsafeNames(t *testing.T) {
+	events := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	statePath := filepath.Join(t.TempDir(), "primitives.json")
+	available := []Primitive{
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "safe-skill"},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "usr/local/bin"},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "contains space"},
+	}
+	if err := New(statePath).Refresh(events, available); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	raw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	var snapshot struct{ Primitives []Usage }
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if len(snapshot.Primitives) != 1 || snapshot.Primitives[0].Name != "safe-skill" {
+		t.Fatalf("primitives.json = %+v", snapshot.Primitives)
+	}
+	if strings.Contains(string(raw), "usr/local") {
+		t.Fatalf("primitives.json retains a path: %s", raw)
+	}
+}
+
+func TestReadRejectsAPathShapedPrimitiveName(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "primitives.json")
+	content := `{"version":1,"refreshed_at":"2026-08-13T12:00:00Z","primitives":[{"harness":"claude-code","kind":"skill","name":"usr/local/bin"}]}`
+	if err := os.WriteFile(statePath, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if _, err := New(statePath).Read(); err == nil {
+		t.Fatal("Read() accepted a path-shaped primitive name")
 	}
 }
 
