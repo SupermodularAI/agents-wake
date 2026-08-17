@@ -138,6 +138,27 @@ func TestScanCountersDistinguishAnUnreadableSourceFromACleanZero(t *testing.T) {
 		}
 	})
 
+	// A machine with no Claude Code history at all is a clean zero, not an
+	// unreadable source. filepath.WalkDir reports the root's own stat error through
+	// the callback, so "the directory is not there" arrives by the same route as
+	// "the directory could not be read" and the two have to be told apart.
+	t.Run("no transcript directory at all", func(t *testing.T) {
+		paths := testPaths(t)
+		claudeDir := filepath.Join(t.TempDir(), "claude")
+
+		if _, err := Trigger(paths, claudeDir); err != nil {
+			t.Fatalf("Trigger() error = %v", err)
+		}
+
+		scan := scanCounters(t, paths)
+		if scan.Unreadable != 0 {
+			t.Errorf("Unreadable = %d, want 0 — nothing was there to read", scan.Unreadable)
+		}
+		if scan.Transcripts != 0 {
+			t.Errorf("Transcripts = %d, want 0", scan.Transcripts)
+		}
+	})
+
 	t.Run("a transcript that cannot be opened", func(t *testing.T) {
 		if os.Getuid() == 0 {
 			t.Skip("running as root: a 0o000 file is still readable")

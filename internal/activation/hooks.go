@@ -362,10 +362,13 @@ func removeHooks(paths config.Paths, claudeDir string) (removed, keptOwned int, 
 //
 // It is doctor's read-only counterpart to installHooks: it takes no lock and
 // publishes nothing, because a diagnostic must not modify what it reports
-// (ADR-0010). A settings file it cannot read reports zero and the error, which
-// doctor renders rather than fails on.
-func HookState(paths config.Paths, claudeDir string) (int, error) {
-	_ = paths
+// (ADR-0010). Taking no lock is why it needs no config.Paths, unlike every writer
+// here — the read is safe on its own, since the file is published by rename and a
+// reader sees the old complete file or the new one.
+//
+// A settings file it cannot read reports zero and the error, which doctor renders
+// rather than fails on.
+func HookState(claudeDir string) (int, error) {
 	doc, err := readSettings(claudeDir)
 	if err != nil {
 		return 0, err
