@@ -85,6 +85,18 @@ func derivedID(t *testing.T, p Paths, root string) string {
 	return openRepos(t, p).hashRoot(root)
 }
 
+// derivedMAC returns the match digest the salt under p derives for entry.
+//
+// A hand-written table needs it for the same reason it needs derivedID: the digest
+// is verified against the salt, so an entry carrying the wrong one — or none — stops
+// resolving, and a test about longest-prefix matching or case folding would be
+// asserting that a refused entry does not resolve. The tests that want an entry only
+// a hand edit could produce leave it out on purpose.
+func derivedMAC(t *testing.T, p Paths, entry projectEntry) string {
+	t.Helper()
+	return openRepos(t, p).matchMAC(entry)
+}
+
 // Acceptance item 11, second half, and ADR-0019 §8: 128 bits as 32 lowercase hex
 // characters. T003 validates the same shape downstream, so two spellings of one
 // id would be two ids there.
@@ -166,8 +178,8 @@ func TestResolutionPicksTheLongestMatchingRoot(t *testing.T) {
 	writeProjectsJSON(t, p, `{
   "version": 1,
   "projects": [
-    {"id": "`+outer+`", "label": "outer", "root": "/a"},
-    {"id": "`+inner+`", "label": "inner", "root": "/a/b"}
+    {"id": "`+outer+`", "label": "outer", "root": "/a", "match_mac": "`+derivedMAC(t, p, projectEntry{Root: "/a"})+`"},
+    {"id": "`+inner+`", "label": "inner", "root": "/a/b", "match_mac": "`+derivedMAC(t, p, projectEntry{Root: "/a/b"})+`"}
   ]
 }
 `)
@@ -493,10 +505,11 @@ func TestCaseFoldingIsDrivenByTheRecordedFlagNotTheDisk(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			p := testPaths(t)
 			id := derivedID(t, p, "/Repo/Path")
+			mac := derivedMAC(t, p, projectEntry{Root: "/Repo/Path", CaseInsensitive: c.caseInsensitive})
 			writeProjectsJSON(t, p, `{
   "version": 1,
   "projects": [
-    {"id": "`+id+`", "label": "repo", "root": "/Repo/Path", "case_insensitive": `+boolText(c.caseInsensitive)+`}
+    {"id": "`+id+`", "label": "repo", "root": "/Repo/Path", "case_insensitive": `+boolText(c.caseInsensitive)+`, "match_mac": "`+mac+`"}
   ]
 }
 `)
@@ -1041,7 +1054,7 @@ func TestDroppedEntriesIsReported(t *testing.T) {
 	writeProjectsJSON(t, p, `{
   "version": 1,
   "projects": [
-    {"id": "`+derivedID(t, p, "/a")+`", "label": "good", "root": "/a"},
+    {"id": "`+derivedID(t, p, "/a")+`", "label": "good", "root": "/a", "match_mac": "`+derivedMAC(t, p, projectEntry{Root: "/a"})+`"},
     {"id": "nothex", "label": "bad", "root": "/b"},
     {"id": "`+hexID('c')+`", "label": "bad", "root": "relative"}
   ]

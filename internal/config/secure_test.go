@@ -239,10 +239,10 @@ func TestATamperedProjectIdDoesNotChangeAttribution(t *testing.T) {
 // member of such a set is refused. Preferring one would be choosing an
 // attribution, which is exactly what a hand edit must not be able to do.
 //
-// Both duplicates below carry ids their own roots really derive, so the id check
-// cannot catch them and the ambiguity pass is what is under test. The case where a
-// duplicate's id does not derive is the test below this one, and it has a different
-// — weaker, and correct — outcome.
+// Both duplicates below carry the ids and the match digests their own contents
+// really derive, so neither keyed check catches them and the ambiguity pass is what
+// is under test. The case where a duplicate's id does not derive is the test below
+// this one, and it has a different — weaker, and correct — outcome.
 func TestADuplicateProjectEntryDoesNotChangeAttribution(t *testing.T) {
 	for _, c := range []struct {
 		name      string
@@ -253,7 +253,7 @@ func TestADuplicateProjectEntryDoesNotChangeAttribution(t *testing.T) {
 		}},
 		{"a second repository claiming the first's root as an alias", func(r *Repos, original projectEntry) projectEntry {
 			other := filepath.Join(filepath.Dir(original.Root), "other")
-			return projectEntry{ID: r.hashRoot(other), Label: "other", Root: other, Aliases: []string{original.Root}}
+			return r.signed(projectEntry{ID: r.hashRoot(other), Label: "other", Root: other, Aliases: []string{original.Root}})
 		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -276,6 +276,67 @@ func TestADuplicateProjectEntryDoesNotChangeAttribution(t *testing.T) {
 				t.Errorf("DroppedEntries() = %d, want at least 2 — every member of the set is refused", r.DroppedEntries())
 			}
 		})
+	}
+}
+
+// An alias is a recorded spelling, so it decides attribution exactly as the root
+// does — and it decides consent too, because ConsentedRoot answers with whichever
+// spelling matched and discovery reads the tree under it. An id derived from the
+// root alone says nothing about the aliases beside it, so a single otherwise
+// legitimate entry with one hand-added alias would pass every other check: no
+// spelling is duplicated, so the ambiguity pass sees nothing, and valid() asks only
+// that an alias be absolute and clean.
+func TestAHandAddedAliasDoesNotChangeAttributionOrWidenConsent(t *testing.T) {
+	p := testPaths(t)
+	base := tempRealDir(t)
+	root := mkdirAll(t, filepath.Join(base, "repo"))
+	unrelated := mkdirAll(t, filepath.Join(base, "unrelated"))
+	consented := mustRegister(t, openRepos(t, p), root, "repo")
+
+	rewriteTable(t, p, func(entries []projectEntry) []projectEntry {
+		entries[0].Aliases = append(entries[0].Aliases, unrelated)
+		return entries
+	})
+
+	r := openRepos(t, p)
+
+	got := mustIdentify(t, r, unrelated)
+	if got.Matched || got.ID == consented {
+		t.Errorf("Identify(unrelated) = %+v, want Matched false and an id other than %q — the hand edit decided the attribution", got, consented)
+	}
+	allowed, err := r.ConsentedRoot(unrelated)
+	if err != nil {
+		t.Fatalf("ConsentedRoot() = %v", err)
+	}
+	if allowed != "" {
+		t.Error("ConsentedRoot(unrelated) answered with a root, so discovery would read a tree the user never consented to")
+	}
+	if r.DroppedEntries() < 1 {
+		t.Errorf("DroppedEntries() = %d, want at least 1 — the refusal has to be visible", r.DroppedEntries())
+	}
+}
+
+// The alias check must refuse the hand edit, not aliases as such: the spelling
+// Register itself records has to keep resolving.
+func TestARegisteredAliasKeepsResolving(t *testing.T) {
+	p := testPaths(t)
+	base := tempRealDir(t)
+	root := mkdirAll(t, filepath.Join(base, "repo"))
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(root, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	want := mustRegister(t, openRepos(t, p), link, "repo")
+
+	r := openRepos(t, p)
+
+	for _, cwd := range []string{root, link, filepath.Join(link, "sub")} {
+		if got := mustIdentify(t, r, cwd); !got.Matched || got.ID != want {
+			t.Errorf("Identify(%q) = %+v, want id %q with Matched true", cwd, got, want)
+		}
+	}
+	if r.DroppedEntries() != 0 {
+		t.Errorf("DroppedEntries() = %d, want 0 — this build must trust the aliases it recorded itself", r.DroppedEntries())
 	}
 }
 

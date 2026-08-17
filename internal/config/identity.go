@@ -115,16 +115,20 @@ func (r *Repos) readTable() (projectsFile, int, error) {
 	return table, dropped + refused, nil
 }
 
-// trustworthy keeps the entries whose recorded id is the one the salt and the
-// recorded root actually derive, with every ambiguous set removed, and reports how
-// many it refused.
+// trustworthy keeps the entries this build derives both keyed values of, with every
+// ambiguous set removed, and reports how many it refused.
 //
 // The id is the attribution: an entry whose id is not HMAC-SHA256(salt, root)
 // truncated to idHexLen is an entry someone wrote by hand, and honouring it would
 // let a hand-edited file decide which repository an event belongs to (ADR-0019 §3,
-// §8). Two entries claiming the same id, the same root, or the same recorded
-// spelling are ambiguous, and every member of such a set is refused rather than one
-// of them arbitrarily preferred — picking would be choosing an attribution.
+// §8). The id covers the root alone, so the match digest covers the rest of what
+// resolution matches with — every alias and the case-folding flag — for the same
+// reason and against the same salt: an alias hand-added beside a legitimate root is
+// not a collision, so nothing else here would refuse it, and it would both
+// re-attribute a directory and widen what discovery may read. Two entries claiming
+// the same id, the same root, or the same recorded spelling are ambiguous, and every
+// member of such a set is refused rather than one of them arbitrarily preferred —
+// picking would be choosing an attribution.
 //
 // Refusing never re-derives, reassigns or re-registers anything. `init` is the only
 // operation that discovers and records a root, and a registered root is never
@@ -136,7 +140,9 @@ func (r *Repos) trustworthy(entries []projectEntry) (kept []projectEntry, refuse
 	// salt to something that can offer roots and watch how long the refusal takes.
 	derived := make([]projectEntry, 0, len(entries))
 	for _, entry := range entries {
-		if !hmac.Equal([]byte(entry.ID), []byte(r.hashRoot(entry.Root))) {
+		idOK := hmac.Equal([]byte(entry.ID), []byte(r.hashRoot(entry.Root)))
+		matchOK := hmac.Equal([]byte(entry.MatchMAC), []byte(r.matchMAC(entry)))
+		if !idOK || !matchOK {
 			refused++
 			continue
 		}
@@ -383,6 +389,9 @@ func (r *Repos) registration(table projectsFile, canonical string, aliases []str
 		// Cloned before appending: the entry is a copy of the recorded one, but its
 		// alias slice still shares the recorded backing array.
 		existing.Aliases = append(slices.Clone(existing.Aliases), added...)
+		// Re-signed, because the digest covers the spellings and this changed them.
+		// The id is not: this is the same repository under a new spelling.
+		existing = r.signed(existing)
 		if !existing.valid() {
 			return table, "", false, errUnreadableEntry
 		}
@@ -395,13 +404,13 @@ func (r *Repos) registration(table projectsFile, canonical string, aliases []str
 		return table, "", false, nested
 	}
 
-	entry := projectEntry{
+	entry := r.signed(projectEntry{
 		ID:              r.hashRoot(canonical),
 		Label:           label,
 		Root:            canonical,
 		Aliases:         aliases,
 		CaseInsensitive: fold,
-	}
+	})
 	if !entry.valid() {
 		return table, "", false, errUnreadableEntry
 	}
@@ -469,6 +478,57 @@ func (r *Repos) NameKey() []byte {
 		panic("deriving the derived-name key: " + err.Error())
 	}
 	return mac.Sum(nil)
+}
+
+// matchMACDomain separates the match digest from every other use of the salt, for
+// the reason nameKeyDomain gives: two keyed values over one key with no domain label
+// are one substitution away from being confused for each other. The version suffix
+// leaves room to change what the digest covers without touching the id.
+const matchMACDomain = "wake/match-mac/v1"
+
+// matchMAC is the keyed digest over everything resolution matches an observed
+// working directory against: the entry's canonical root, its aliases in recorded
+// order, and its case-folding flag.
+//
+// Not truncated, unlike the id: this value is never printed and never persisted
+// anywhere but the local table, so there is no brevity to trade the margin for.
+//
+// The parts are NUL-separated, which is injective here because a path cannot contain
+// a NUL byte — so no two different entries encode to the same input, and moving an
+// alias's spelling into the root cannot produce the same digest as leaving it where
+// it was.
+func (r *Repos) matchMAC(entry projectEntry) string {
+	buf := append([]byte(matchMACDomain), 0)
+	if entry.CaseInsensitive {
+		buf = append(buf, 'f')
+	}
+	buf = append(buf, 0)
+	for _, spelling := range entry.spellings() {
+		buf = append(buf, spelling...)
+		buf = append(buf, 0)
+	}
+
+	mac := hmac.New(sha256.New, r.salt)
+	// Checked for the reason hashRoot gives: a short write would key the digest to
+	// a prefix of the entry, and every entry written afterwards would carry a
+	// digest nothing else agrees with.
+	if _, err := mac.Write(buf); err != nil {
+		panic("hashing a project entry: " + err.Error())
+	}
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// signed returns entry with the match digest this build derives for it. Every write
+// site goes through it, so a spelling recorded without a digest cannot happen — an
+// entry missing one is refused on the next read, which would be a registration that
+// looked successful and then collected nothing (errUnreadableEntry's reason).
+//
+// It deliberately leaves ID alone: an existing entry's id is never recomputed
+// (ADR-0019 §9), and the id of a new one is derived where the entry is built, from
+// the canonical root the caller resolved.
+func (r *Repos) signed(entry projectEntry) projectEntry {
+	entry.MatchMAC = r.matchMAC(entry)
+	return entry
 }
 
 // hashRoot is the repository id: HMAC-SHA256 of the root under the per-machine

@@ -68,6 +68,23 @@ type projectEntry struct {
 	// and folding would merge two repositories — and derivation cannot probe for
 	// it, so the answer is recorded here instead.
 	CaseInsensitive bool `json:"case_insensitive"`
+	// MatchMAC is the keyed digest over everything resolution matches against:
+	// the canonical root, every alias, and the case-folding flag (ADR-0019 §3
+	// applied to the whole of what the entry resolves with).
+	//
+	// ID covers Root and nothing else, so on its own it leaves the rest of the
+	// entry hand-editable: an alias added beside a legitimate root attributes a
+	// directory the user never consented to that repository's id, and — since
+	// ConsentedRoot answers with whichever spelling matched — lets local
+	// discovery read the tree under it. Neither is a collision, so the ambiguity
+	// pass never sees it.
+	//
+	// An entry without a digest this build derives is refused and counted like any
+	// other untrustworthy entry: fail closed, never repair (constraint 22). A
+	// table written before this field existed is therefore refused rather than
+	// half-trusted, and `wake init` in the repository re-records it — with the
+	// same id, since ID's derivation is unchanged, so nothing is re-identified.
+	MatchMAC string `json:"match_mac"`
 }
 
 // valid reports whether an entry is one this build is willing to resolve
