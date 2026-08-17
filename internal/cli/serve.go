@@ -31,8 +31,14 @@ func newServeCmd() *cobra.Command {
 		if err := primitives.Refresh(events, inventory.ClaudeCodeInScope(scope, names)); err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Serving dashboard at http://127.0.0.1:8080")
-		return ui.ListenAndServe(8080, events, primitives)
+		listener, err := ui.Listen(8080)
+		if err != nil {
+			return err
+		}
+		// From the bound listener's own address, so the message can only name a
+		// port something is actually listening on.
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Serving dashboard at http://"+listener.Addr().String())
+		return ui.Serve(listener, events, primitives)
 	}}
 	return cmd
 }
