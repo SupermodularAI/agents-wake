@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/SupermodularAI/agents-wake/internal/config"
+	"github.com/SupermodularAI/agents-wake/internal/inventory"
 	"github.com/SupermodularAI/agents-wake/internal/store"
 )
 
@@ -142,6 +143,129 @@ func TestUninstallPurgesOnlyDataRoot(t *testing.T) {
 	}
 	if _, err := os.Stat(paths.DataDir); !os.IsNotExist(err) {
 		t.Fatalf("data root still exists: %v", err)
+	}
+}
+
+func TestDiscoveryScopeWithholdsProjectDiscoveryOutsideAConsentedRepository(t *testing.T) {
+	paths := testPaths(t)
+	claudeDir := filepath.Join(t.TempDir(), "claude")
+	root := t.TempDir()
+
+	got := DiscoveryScope(paths, claudeDir, root)
+	want := inventory.Scope{ClaudeDir: claudeDir, Project: inventory.ProjectUnconsented}
+	if got != want {
+		t.Fatalf("DiscoveryScope() = %+v, want %+v", got, want)
+	}
+}
+
+func TestDiscoveryScopeGrantsProjectDiscoveryInsideAConsentedRepository(t *testing.T) {
+	paths := testPaths(t)
+	claudeDir := filepath.Join(t.TempDir(), "claude")
+	root := t.TempDir()
+	repos, err := config.OpenRepos(paths)
+	if err != nil {
+		t.Fatalf("OpenRepos() error = %v", err)
+	}
+	if _, err := repos.Register(root, filepath.Base(root)); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	got := DiscoveryScope(paths, claudeDir, root)
+	want := inventory.Scope{ClaudeDir: claudeDir, Root: root, Project: inventory.ProjectConsented}
+	if got != want {
+		t.Fatalf("DiscoveryScope() = %+v, want %+v", got, want)
+	}
+}
+
+func TestDiscoveryScopeFailsClosedWhenConsentCannotBeResolved(t *testing.T) {
+	paths := testPaths(t)
+	claudeDir := filepath.Join(t.TempDir(), "claude")
+	if err := os.MkdirAll(filepath.Dir(paths.ProjectsFile), 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(paths.ProjectsFile, []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	got := DiscoveryScope(paths, claudeDir, t.TempDir())
+	want := inventory.Scope{ClaudeDir: claudeDir, Project: inventory.ProjectUnresolved}
+	if got != want {
+		t.Fatalf("DiscoveryScope() = %+v, want %+v", got, want)
+	}
+}
+
+func TestDiscoveryScopeWithholdsProjectDiscoveryForARelativeDirectory(t *testing.T) {
+	paths := testPaths(t)
+	claudeDir := filepath.Join(t.TempDir(), "claude")
+
+	got := DiscoveryScope(paths, claudeDir, "relative/dir")
+	want := inventory.Scope{ClaudeDir: claudeDir, Project: inventory.ProjectUnresolved}
+	if got != want {
+		t.Fatalf("DiscoveryScope() = %+v, want %+v", got, want)
+	}
+}
+
+func TestIngestDoesNotInventoryAnUnconsentedProject(t *testing.T) {
+	paths := testPaths(t)
+	claudeDir, root := inventoryFixture(t)
+	t.Chdir(root)
+
+	if _, err := Ingest(paths, claudeDir); err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+	raw, err := os.ReadFile(paths.PrimitivesFile)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !contains(string(raw), "global-skill") {
+		t.Fatalf("primitives.json lost global discovery: %s", raw)
+	}
+	if contains(string(raw), "local-skill") {
+		t.Fatalf("primitives.json inventoried an unconsented project: %s", raw)
+	}
+	if contains(string(raw), root) {
+		t.Fatalf("primitives.json contains the working directory: %s", raw)
+	}
+}
+
+func TestInitInventoriesTheProjectItJustConsented(t *testing.T) {
+	paths := testPaths(t)
+	claudeDir, root := inventoryFixture(t)
+
+	if _, err := Init(paths, root, claudeDir); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	raw, err := os.ReadFile(paths.PrimitivesFile)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !contains(string(raw), "global-skill") || !contains(string(raw), "local-skill") {
+		t.Fatalf("primitives.json = %s", raw)
+	}
+}
+
+// inventoryFixture writes a Claude directory holding one global skill and a
+// project directory holding one project-local skill, so a snapshot names which
+// discovery path produced it.
+func inventoryFixture(t *testing.T) (claudeDir, root string) {
+	t.Helper()
+	claudeDir = filepath.Join(t.TempDir(), "claude")
+	root = filepath.Join(t.TempDir(), "project")
+	writeFixture(t, filepath.Join(claudeDir, "skills", "global-skill", "SKILL.md"), "# global")
+	writeFixture(t, filepath.Join(root, ".claude", "skills", "local-skill", "SKILL.md"), "# local")
+	transcript := `{"uuid":"entry-1","sessionId":"session-1","cwd":"` + root + `","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}
+{"uuid":"entry-2","sessionId":"session-1","cwd":"` + root + `","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`
+	writeFixture(t, filepath.Join(claudeDir, "projects", "project", "session.jsonl"), transcript)
+	return claudeDir, root
+}
+
+func writeFixture(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
 	}
 }
 
