@@ -113,12 +113,26 @@ func (s *Store) RecordHooks(hooks Hooks) error {
 // republished whole: a scan recording its counters from a report read before a
 // concurrent `wake remove` recorded its own would erase the hook counters, and a
 // trigger firing while the user runs `remove` is exactly that race.
+//
+// A file this build cannot read is replaced rather than refused, which is the
+// opposite of what Read does and deliberately so. Reading it as zeroes would render
+// "collects zero" for a state nobody measured; refusing to write over it would make
+// an unparseable diagnostics file stop `init`, `ingest` and `remove` — none of which
+// the counters are a precondition for — with a recovery (delete the file) that
+// nothing tells the user about. The file is derived and non-precious (ADR-0014), and
+// the caller replaces the half it owns wholesale, so nothing that was still readable
+// is lost.
 func (s *Store) update(mutate func(*Report)) error {
 	return lockfile.WithLock(s.lockPath, func() error {
 		report, err := s.read()
-		if err != nil {
+		if err != nil && !errors.Is(err, errInvalidReport) {
+			// Everything else — a permission error, a directory in the file's place —
+			// is a fault of the local layout rather than of the file's contents, and
+			// replacing what could not be read is not this package's call to make.
 			return err
 		}
+		// read leaves report zero when it refuses the file's contents, which is the
+		// report a fresh install has and the one the next scan fills in.
 		mutate(&report)
 		report.Version = reportVersion
 

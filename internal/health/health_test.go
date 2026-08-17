@@ -92,6 +92,39 @@ func TestReadRejectsAnUnknownVersion(t *testing.T) {
 	}
 }
 
+// Reading is where an unreadable file has to be a refusal; writing is where it must
+// not be. The file is derived and non-precious: a record replaces the half it owns
+// wholesale, so starting from zero loses nothing that was still readable — while
+// refusing would make an unparseable diagnostics file stop `init`, `ingest` and
+// `remove`, none of which the counters are a precondition for.
+func TestRecordingOverAnUnreadableReportReplacesIt(t *testing.T) {
+	for _, content := range []string{`{"version":99}`, `{not json`, ``} {
+		t.Run(content, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "health.json")
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatalf("WriteFile() error = %v", err)
+			}
+			store := New(path)
+
+			at := time.Now().UTC().Truncate(time.Second)
+			if err := store.RecordScan(Scan{At: at, Transcripts: 3}); err != nil {
+				t.Fatalf("RecordScan() error = %v", err)
+			}
+
+			got, err := store.Read()
+			if err != nil {
+				t.Fatalf("Read() error = %v — the record left a file this build still cannot read", err)
+			}
+			if got.Scan.Transcripts != 3 || !got.Scan.At.Equal(at) {
+				t.Errorf("Read() = %+v, want the scan just recorded", got)
+			}
+			if got.Hooks != (Hooks{}) {
+				t.Errorf("hooks = %+v, want zero — nothing readable was there to keep", got.Hooks)
+			}
+		})
+	}
+}
+
 func TestReportIsWrittenAt0600(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "health.json")
 	if err := New(path).RecordScan(Scan{At: time.Now().UTC()}); err != nil {
