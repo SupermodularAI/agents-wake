@@ -26,6 +26,15 @@ type Result struct {
 	Records   []record.Record
 	Malformed int
 	Pending   int
+	// Refused counts tool calls dropped because the primitive's own name failed
+	// validation — a Task block naming no subagent, or a name the name/scope
+	// grammar refuses. Fail closed (ADR-0007): nothing is written and no
+	// placeholder name is substituted. It is deliberately not Malformed, which
+	// means "a line that is unusable" and feeds doctor's drift signal, and
+	// deliberately not the store's Dropped, which counts records refused at write
+	// time. The value that was refused is never carried — only the count (plan
+	// §4.2).
+	Refused int
 }
 
 // Resolver maps a recorded working directory to a consented repository hash.

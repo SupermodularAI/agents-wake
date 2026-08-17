@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/SupermodularAI/agents-wake/internal/metrics"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 )
 
@@ -337,6 +338,170 @@ func skillCallTranscript(t *testing.T, skill string) string {
 	}, "\n")
 }
 
+// subagentCallTranscript is a terminated Task call naming subagentType as its
+// primitive.
+func subagentCallTranscript(t *testing.T, subagentType string) string {
+	t.Helper()
+	return strings.Join([]string{
+		fmt.Sprintf(`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Task","input":{"subagent_type":%s}}]}}`, quoted(t, subagentType)),
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+	}, "\n")
+}
+
+func TestReadNamesASubagentCallByItsSubagentType(t *testing.T) {
+	input := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Task","input":{"subagent_type":"explorer"}},{"type":"tool_use","id":"call-2","name":"Task","input":{"subagent_type":"code-reviewer"}},{"type":"tool_use","id":"call-3","name":"Task","input":{"subagent_type":"general-purpose"}}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false},{"type":"tool_result","tool_use_id":"call-2","is_error":false},{"type":"tool_result","tool_use_id":"call-3","is_error":false}]}}`,
+	}, "\n")
+
+	result, err := Read(strings.NewReader(input), resolver, names)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 3 || result.Malformed != 0 || result.Pending != 0 || result.Refused != 0 {
+		t.Fatalf("Read() = %+v, want one record per subagent invocation", result)
+	}
+	seen := map[record.Identifier]bool{}
+	for _, event := range result.Records {
+		if event.Name == "Task" {
+			t.Errorf("record is named after the tool, not the subagent: %+v", event)
+		}
+		if event.Kind != record.KindSubagent {
+			t.Errorf("record kind = %q, want %q", event.Kind, record.KindSubagent)
+		}
+		if err := record.Validate(event); err != nil {
+			t.Errorf("Validate(%+v) error = %v", event, err)
+		}
+		seen[event.Name] = true
+	}
+	for _, want := range []record.Identifier{"explorer", "code-reviewer", "general-purpose"} {
+		if !seen[want] {
+			t.Errorf("no record named %q; got %v", want, seen)
+		}
+	}
+	if len(seen) != 3 {
+		t.Errorf("distinct names = %v, want exactly three", seen)
+	}
+}
+
+func TestReadCollapsesRepeatedSubagentInvocationsToOnePrimitive(t *testing.T) {
+	input := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Task","input":{"subagent_type":"explorer"}},{"type":"tool_use","id":"call-2","name":"Task","input":{"subagent_type":"explorer"}},{"type":"tool_use","id":"call-3","name":"Task","input":{"subagent_type":"code-reviewer"}}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false},{"type":"tool_result","tool_use_id":"call-2","is_error":false},{"type":"tool_result","tool_use_id":"call-3","is_error":false}]}}`,
+	}, "\n")
+
+	result, err := Read(strings.NewReader(input), resolver, names)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	// The invocation grain first: two calls of one subagent stay two records with
+	// two distinct ids, so nothing is lost before aggregation collapses them.
+	if len(result.Records) != 3 {
+		t.Fatalf("Read() records = %+v, want one per invocation", result.Records)
+	}
+	var explorers []record.Record
+	for _, event := range result.Records {
+		if event.Name == "explorer" {
+			explorers = append(explorers, event)
+		}
+	}
+	if len(explorers) != 2 {
+		t.Fatalf("explorer records = %d, want 2", len(explorers))
+	}
+	if explorers[0].EventID == explorers[1].EventID {
+		t.Errorf("both explorer invocations derived the same event id %q", explorers[0].EventID)
+	}
+
+	// Then the primitive grain, through the real aggregation layer rather than by
+	// inspection.
+	summary := metrics.Aggregate(result.Records)
+	if len(summary.Primitives) != 2 {
+		t.Fatalf("Aggregate() primitives = %+v, want explorer and code-reviewer", summary.Primitives)
+	}
+	usage := map[record.Identifier]metrics.PrimitiveUsage{}
+	for _, primitive := range summary.Primitives {
+		usage[primitive.Name] = primitive
+	}
+	if got := usage["explorer"]; got.Invocations != 2 || got.Kind != record.KindSubagent {
+		t.Errorf("explorer usage = %+v, want 2 invocations of a subagent", got)
+	}
+	if got := usage["code-reviewer"]; got.Invocations != 1 || got.Kind != record.KindSubagent {
+		t.Errorf("code-reviewer usage = %+v, want 1 invocation of a subagent", got)
+	}
+}
+
+func TestReadDropsAndCountsASubagentCallWithNoType(t *testing.T) {
+	input := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Task"},{"type":"tool_use","id":"call-2","name":"Task","input":{"subagent_type":""}}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false},{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}`,
+	}, "\n")
+
+	result, err := Read(strings.NewReader(input), resolver, names)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 0 {
+		t.Errorf("Read() records = %+v, want none: a nameless Task call is not collected as \"Task\"", result.Records)
+	}
+	// Nothing was buffered, so the later tool_result synthesises nothing.
+	if result.Pending != 0 {
+		t.Errorf("Pending = %d, want 0", result.Pending)
+	}
+	// A refused name is not an unusable line, so doctor's drift signal is untouched.
+	if result.Malformed != 0 {
+		t.Errorf("Malformed = %d, want 0", result.Malformed)
+	}
+	if result.Refused != 2 {
+		t.Errorf("Refused = %d, want 2", result.Refused)
+	}
+}
+
+func TestReadDropsAndCountsSubagentCallsWithAHostileType(t *testing.T) {
+	for _, value := range hostileValues {
+		result, err := Read(strings.NewReader(subagentCallTranscript(t, value)), resolver, names)
+		if err != nil {
+			t.Fatalf("Read() error = %v", err)
+		}
+		if len(result.Records) != 0 || result.Pending != 0 || result.Refused != 1 {
+			t.Errorf("Read(subagent_type=%q) = %+v", value, result)
+		}
+	}
+}
+
+func TestReadDerivesADirectoryScopedSubagentReference(t *testing.T) {
+	result, err := Read(strings.NewReader(subagentCallTranscript(t, "apps/web:reviewer")), resolver, names)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 1 {
+		t.Fatalf("Read() records = %+v", result.Records)
+	}
+	event := result.Records[0]
+	if event.Kind != record.KindSubagent {
+		t.Errorf("record kind = %q, want %q", event.Kind, record.KindSubagent)
+	}
+	name := string(event.Name)
+	if !strings.HasPrefix(name, "scope-") || !strings.HasSuffix(name, ":reviewer") {
+		t.Fatalf("record name = %q, want scope-<digest>:reviewer", name)
+	}
+	if strings.Contains(name, "apps") || strings.Contains(name, "web") {
+		t.Fatalf("record name retains a path fragment: %q", name)
+	}
+	if err := record.Validate(event); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestReadDropsAScopedSubagentCallWithoutAScopeKey(t *testing.T) {
+	result, err := Read(strings.NewReader(subagentCallTranscript(t, "apps/web:reviewer")), resolver, record.Namer{})
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 0 || result.Pending != 0 || result.Refused != 1 {
+		t.Errorf("Read() = %+v, want the call dropped and counted, never named unkeyed", result)
+	}
+}
+
 func TestReadDropsCallsWhosePrimitiveNameIsPathShaped(t *testing.T) {
 	for _, value := range hostileValues {
 		result, err := Read(strings.NewReader(skillCallTranscript(t, value)), resolver, names)
@@ -442,9 +607,9 @@ func TestReadPreservesRealClaudeCodeIdentityFormats(t *testing.T) {
 }
 
 func TestMarshalledRecordsCarryNoSeparator(t *testing.T) {
-	inputs := []string{skillCallTranscript(t, "apps/web:deploy")}
+	inputs := []string{skillCallTranscript(t, "apps/web:deploy"), subagentCallTranscript(t, "apps/web:reviewer")}
 	for _, value := range hostileValues {
-		inputs = append(inputs, skillCallTranscript(t, value))
+		inputs = append(inputs, skillCallTranscript(t, value), subagentCallTranscript(t, value))
 	}
 	inputs = append(inputs, strings.Join([]string{
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","version":"../1.0.0","attributionSkill":"/etc/passwd","attributionAgent":"../secrets","attributionMcpServer":"plugin:../evil:tool","message":{"model":"~/.ssh/id_rsa","content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
