@@ -54,44 +54,50 @@ func newDoctorCmd() *cobra.Command {
 func writeDiagnosis(out io.Writer, paths config.Paths, claudeDir string) error {
 	report, readErr := health.New(paths.HealthFile).Read()
 
-	// A settings file this build cannot read reports zero hooks rather than failing:
-	// the live count is a second opinion on what the counters say, and losing it must
-	// not cost the whole diagnosis.
+	// The live count, read out of the settings file, rather than what `init` last
+	// recorded installing. They differ exactly when somebody edited that file since,
+	// and "are the hooks there now" is the question doctor is being asked — a user
+	// who deleted Wake's hooks by hand must not be told they are installed. A file
+	// this build cannot read is its own state on the integration line below, not a
+	// zero here.
 	installed, hookErr := activation.HookState(claudeDir)
 	if hookErr != nil {
 		installed = 0
 	}
 
-	lines := []struct {
+	for _, line := range []struct {
 		key   string
 		value int
 	}{
 		{"hooks installed", installed},
 		{"hooks removed", report.Hooks.Removed},
 		{"owned hook groups kept", report.Hooks.KeptOwned},
+	} {
+		if _, err := fmt.Fprintf(out, "%s: %d\n", line.key, line.value); err != nil {
+			return err
+		}
+	}
+
+	if _, err := fmt.Fprintf(out, "last scan: %s\n", scanTime(report, readErr)); err != nil {
+		return err
+	}
+	for _, line := range []struct {
+		key   string
+		value int
+	}{
 		{"transcripts", report.Scan.Transcripts},
 		{"unreadable sources", report.Scan.Unreadable},
 		{"parse errors", report.Scan.ParseErrors},
 		{"skipped transcripts", report.Scan.Skipped},
 		{"events written", report.Scan.EventsWritten},
 		{"refused project entries", report.Scan.RefusedProjects},
-	}
-	// The recorded install count is what `init` last did; the live one is what the
-	// settings file holds now. They differ when somebody edited the file since, and
-	// the live one is the honest answer to "are the hooks there".
-	if readErr == nil && installed == 0 {
-		lines[0].value = report.Hooks.Installed
-	}
-
-	if _, err := fmt.Fprintf(out, "last scan: %s\n", scanTime(report, readErr)); err != nil {
-		return err
-	}
-	for _, line := range lines {
+	} {
 		if _, err := fmt.Fprintf(out, "%s: %d\n", line.key, line.value); err != nil {
 			return err
 		}
 	}
-	_, err := fmt.Fprintf(out, "integration: %s\n", integrationState(report, readErr))
+
+	_, err := fmt.Fprintf(out, "integration: %s\n", integrationState(report, readErr, hookErr))
 	return err
 }
 
@@ -111,13 +117,18 @@ func scanTime(report health.Report, readErr error) string {
 // numbers are complete and the answer is zero. Reporting the first as the second is
 // how `unused` would come to recommend removing something the user relies on.
 //
-// A counter file this build cannot read is its own state rather than an error: a
+// An input this build cannot read is its own state rather than an error: a
 // diagnostic that failed in the situation it exists for is worse than one that says
-// what it could not determine.
-func integrationState(report health.Report, readErr error) string {
+// what it could not determine. Both unreadable states come first, because a number
+// derived from an input nobody could read is not a number worth reading — and a
+// settings file this build refuses is exactly what a user comes here after `wake
+// init` told them to fix it.
+func integrationState(report health.Report, readErr, hookErr error) string {
 	switch {
 	case readErr != nil:
 		return "counters unreadable"
+	case hookErr != nil:
+		return "hooks unreadable"
 	case report.Scan.At.IsZero():
 		return "never scanned"
 	case report.Scan.Unreadable > 0 || report.Scan.ParseErrors > 0:

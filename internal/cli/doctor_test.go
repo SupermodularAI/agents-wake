@@ -99,9 +99,47 @@ func TestDoctorOutputNamesNoPathOrLabel(t *testing.T) {
 	}
 }
 
-func TestDoctorReportsTheInstalledHookCount(t *testing.T) {
+// The installed count is read live out of the settings file, so it answers "are
+// the hooks there now" rather than "what did init once do". The two differ exactly
+// when somebody edited that file since, which is when the question gets asked.
+func TestDoctorReportsTheLiveHookCountNotTheRecordedOne(t *testing.T) {
+	isolate(t)
+	root := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	t.Chdir(root)
+	if _, _, err := runSplit(t, "init"); err != nil {
+		t.Fatalf("init error = %v", err)
+	}
+
+	out, _, err := runSplit(t, "doctor")
+	if err != nil {
+		t.Fatalf("doctor error = %v", err)
+	}
+	if !strings.Contains(out, "hooks installed: 2") {
+		t.Errorf("output is missing the live hook count:\n%s", out)
+	}
+
+	// The hooks are deleted by hand, and nothing re-records anything. The recorded
+	// count still says init installed two; the live count is the honest answer.
+	settings := filepath.Join(realHome(t), ".claude", "settings.json")
+	if writeErr := os.WriteFile(settings, []byte(`{"model":"opus"}`), 0o600); writeErr != nil {
+		t.Fatalf("WriteFile() error = %v", writeErr)
+	}
+
+	out, _, err = runSplit(t, "doctor")
+	if err != nil {
+		t.Fatalf("doctor error = %v", err)
+	}
+	if !strings.Contains(out, "hooks installed: 0") {
+		t.Errorf("output reports hooks that are not there:\n%s", out)
+	}
+}
+
+func TestDoctorReportsTheKeptOwnedCount(t *testing.T) {
 	paths := isolate(t)
-	if err := health.New(paths.HealthFile).RecordHooks(health.Hooks{At: time.Now().UTC(), Installed: 2, KeptOwned: 1}); err != nil {
+	if err := health.New(paths.HealthFile).RecordHooks(health.Hooks{At: time.Now().UTC(), Removed: 1, KeptOwned: 1}); err != nil {
 		t.Fatalf("RecordHooks() error = %v", err)
 	}
 
@@ -110,11 +148,45 @@ func TestDoctorReportsTheInstalledHookCount(t *testing.T) {
 		t.Fatalf("doctor error = %v", err)
 	}
 
-	for _, want := range []string{"hooks installed: 2", "owned hook groups kept: 1"} {
+	for _, want := range []string{"hooks removed: 1", "owned hook groups kept: 1"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output is missing %q:\n%s", want, out)
 		}
 	}
+}
+
+// A settings file this build refuses is exactly what a user comes to doctor about,
+// having been told by `wake init` to fix it. Reporting zero hooks would send them
+// looking in the wrong place.
+func TestDoctorReportsAnUnreadableSettingsFile(t *testing.T) {
+	isolate(t)
+	claudeDir := filepath.Join(realHome(t), ".claude")
+	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`null`), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	out, _, err := runSplit(t, "doctor")
+	if err != nil {
+		t.Fatalf("doctor error = %v, want nil", err)
+	}
+
+	if !strings.Contains(out, "integration: hooks unreadable") {
+		t.Errorf("output is missing the unreadable-hooks state:\n%s", out)
+	}
+}
+
+// realHome resolves the HOME isolate set, which is where the Claude Code directory
+// lives. WAKE_DIR moves the data root only, never HOME.
+func realHome(t *testing.T) string {
+	t.Helper()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir() error = %v", err)
+	}
+	return home
 }
 
 // doctor reporting a diagnostic failure as a command failure would make it useless
