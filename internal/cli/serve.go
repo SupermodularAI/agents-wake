@@ -42,7 +42,9 @@ func runServe(cmd *cobra.Command, port int) error {
 	}
 	events := store.New(filepath.Join(paths.DataDir, "events.ndjson"))
 	primitives := inventory.New(paths.PrimitivesFile)
-	if err := primitives.Refresh(events, inventory.ClaudeCodeInScope(scope, names)); err != nil {
+	// Assigned, not redeclared: err is read again below, and a shadowed copy here
+	// would make the later reads ambiguous to a reader and to govet.
+	if err = primitives.Refresh(events, inventory.ClaudeCodeInScope(scope, names)); err != nil {
 		return err
 	}
 	listener, err := ui.Listen(port)
