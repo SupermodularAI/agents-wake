@@ -158,9 +158,14 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 	scan := health.Scan{At: time.Now().UTC(), RefusedProjects: repos.DroppedEntries()}
 	err := filepath.WalkDir(filepath.Join(claudeDir, "projects"), func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			// A directory that cannot be walked is a source that was there and could
-			// not be read, which is exactly what Unreadable counts.
-			scan.Unreadable++
+			// "Not there" arrives by this same route as "could not be read":
+			// filepath.WalkDir reports even the root's own stat error through the
+			// callback. A machine with no Claude Code history is a clean zero, so
+			// only the errors that are not absence count as unreadable — otherwise
+			// every fresh install would report a source it failed to read.
+			if !errors.Is(walkErr, fs.ErrNotExist) {
+				scan.Unreadable++
+			}
 			return nil
 		}
 		if entry.IsDir() || filepath.Ext(path) != ".jsonl" {

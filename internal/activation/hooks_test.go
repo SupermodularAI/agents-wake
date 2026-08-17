@@ -281,7 +281,7 @@ func TestInstallCorrectsItsOwnGroupWhenTheBinaryMoved(t *testing.T) {
 	if strings.Count(got, second) != len(hookEvents) {
 		t.Errorf("settings = %s, want exactly one group per event carrying the new command", got)
 	}
-	installed, err := HookState(paths, claudeDir)
+	installed, err := HookState(claudeDir)
 	if err != nil {
 		t.Fatalf("HookState() error = %v", err)
 	}
