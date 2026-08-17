@@ -4,8 +4,16 @@
 package cli
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+
 	"github.com/spf13/cobra"
 
+	"github.com/SupermodularAI/agents-wake/internal/config"
+	"github.com/SupermodularAI/agents-wake/internal/metrics"
+	"github.com/SupermodularAI/agents-wake/internal/record"
+	"github.com/SupermodularAI/agents-wake/internal/store"
 	"github.com/SupermodularAI/agents-wake/internal/version"
 )
 
@@ -37,7 +45,24 @@ func newRootCmd() *cobra.Command {
 		// This is where plan §7.3's split lands once there is something to show:
 		// a dashboard for a TTY, deterministic text when stdout is not one.
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return cmd.Help()
+			if file, ok := cmd.OutOrStdout().(*os.File); ok && isTerminal(file) {
+				return newServeCmd().Execute()
+			}
+			paths, err := config.ResolvePaths()
+			if err != nil {
+				return err
+			}
+			entries, err := store.New(filepath.Join(paths.DataDir, "events.ndjson")).Entries(0)
+			if err != nil {
+				return err
+			}
+			records := make([]record.Record, 0, len(entries))
+			for _, entry := range entries {
+				records = append(records, entry.Record)
+			}
+			summary := metrics.Aggregate(records)
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "terminal invocations: %d\ndistinct sessions: %d\n", summary.Invocations, summary.Sessions)
+			return err
 		},
 		// Usage on an error would bury the error itself.
 		SilenceUsage: true,
@@ -47,6 +72,11 @@ func newRootCmd() *cobra.Command {
 		cmd.AddCommand(newCmd())
 	}
 	return cmd
+}
+
+func isTerminal(file *os.File) bool {
+	info, err := file.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
 // Execute runs the root command and returns a process exit code.

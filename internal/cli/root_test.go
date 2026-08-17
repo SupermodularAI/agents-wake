@@ -18,12 +18,12 @@ func run(t *testing.T, args ...string) (string, error) {
 	return out.String(), err
 }
 
-func TestBareInvocationPrintsHelpAndSucceeds(t *testing.T) {
+func TestBareInvocationPrintsDeterministicTextAndSucceeds(t *testing.T) {
 	out, err := run(t)
 	if err != nil {
 		t.Fatalf("bare invocation returned an error: %v", err)
 	}
-	for _, want := range []string{"Usage:", "wake", "Flags:"} {
+	for _, want := range []string{"terminal invocations:", "distinct sessions:"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("help output is missing %q; got:\n%s", want, out)
 		}
