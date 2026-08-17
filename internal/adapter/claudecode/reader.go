@@ -131,8 +131,34 @@ type toolResult struct {
 	Interrupted bool `json:"interrupted"`
 }
 
+// valid bounds the entry id to the opaque-token domain rather than only requiring
+// it to be non-empty, because that id is half of every tool call's derived
+// identity: a value from the token domain cannot contain callSeparator, which is
+// what makes the composition unambiguous (ADR-0004). A transcript entry whose id
+// is outside that domain is counted malformed like any other unusable line. Real
+// Claude Code ids are RFC 4122 uuids, which the domain admits.
 func (entry transcriptEntry) valid() bool {
-	return entry.UUID != "" && entry.SessionID != "" && !entry.Timestamp.IsZero()
+	if entry.SessionID == "" || entry.Timestamp.IsZero() {
+		return false
+	}
+	_, err := record.BoundedToken(entry.UUID)
+	return err == nil
+}
+
+// callSeparator delimits the two halves of a tool call's source identity. It is a
+// unit separator, which neither half can contain — valid bounds the entry id to
+// the token domain and call bounds the block id — so the split is unambiguous: no
+// two distinct (entry, block) pairs share a composed identity, and no composed
+// identity can equal a bare entry id, which is what attributedRun derives a
+// terminal run from.
+const callSeparator = "\x1f"
+
+// callSourceEvent identifies one tool_use block by the source event carrying it
+// and the block's own id. Both halves come from the transcript: no ordinal of the
+// block within its entry, no write time, no randomness — so the same transcript
+// re-derives the same ids forever and re-ingestion stays a no-op (ADR-0004).
+func callSourceEvent(entryUUID string, blockID record.Identifier) record.Identifier {
+	return record.Identifier(entryUUID + callSeparator + string(blockID))
 }
 
 type call struct {
@@ -171,7 +197,7 @@ func (entry transcriptEntry) call(block contentBlock, resolve Resolver, names re
 
 	derived := call{
 		id:        string(id),
-		eventID:   record.DeriveEventID(harness, record.Identifier(entry.UUID)),
+		eventID:   record.DeriveEventID(harness, callSourceEvent(entry.UUID, id)),
 		sessionID: sessionID,
 		timestamp: record.NormalizedTimestamp(entry.Timestamp),
 		kind:      kindFor(record.Identifier(block.Name)),
