@@ -57,7 +57,10 @@ func Lines(reader io.Reader, maxLine int, visit func(line []byte)) (int, error) 
 			pending = append(pending, line...)
 			line = pending
 		}
-		if len(line) > 0 || terminated {
+		// oversized carries the case of a discarded line the input ended on with
+		// nothing left in hand: a tail that is an exact multiple of readBuffer
+		// leaves an empty final chunk, and the line still has to be counted.
+		if len(line) > 0 || terminated || oversized {
 			switch {
 			case oversized || len(line) > maxLine:
 				skipped++
