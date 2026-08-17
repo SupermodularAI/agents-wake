@@ -134,8 +134,12 @@ func Uninstall(paths config.Paths, claudeDir string, purge bool) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	// removed > 0 alongside the error, not false: the hooks are already gone by the
+	// time the counters are written, and a diagnostics write that fails for a reason
+	// of its own — an unwritable data root — must not report that nothing happened.
+	// The error still surfaces; what it must not do is contradict the work.
 	if recordErr := health.New(paths.HealthFile).RecordHooks(health.Hooks{At: time.Now().UTC(), Removed: removed, KeptOwned: keptOwned}); recordErr != nil {
-		return false, recordErr
+		return removed > 0, recordErr
 	}
 	if purge {
 		if err := os.RemoveAll(paths.DataDir); err != nil {

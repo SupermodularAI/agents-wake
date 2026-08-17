@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/SupermodularAI/agents-wake/internal/config"
+	"github.com/SupermodularAI/agents-wake/internal/health"
 	"github.com/SupermodularAI/agents-wake/internal/inventory"
 	"github.com/SupermodularAI/agents-wake/internal/store"
 )
@@ -309,6 +310,86 @@ func TestInitInventoriesTheProjectItJustConsented(t *testing.T) {
 	}
 	if !contains(string(raw), "global-skill") || !contains(string(raw), "local-skill") {
 		t.Fatalf("primitives.json = %s", raw)
+	}
+}
+
+// The counter file is derived and non-precious (ADR-0014), and doctor already
+// renders an unreadable one as a state rather than an error. A command that writes
+// counters must agree: a health.json this build cannot read is not a reason to refuse
+// to import history, install a trigger, or uninstall one — and the recovery, deleting
+// a file nothing tells the user about, would be undiscoverable.
+func TestAnUnreadableCounterFileDoesNotStopAnyCommand(t *testing.T) {
+	for _, name := range []string{"init", "ingest", "remove"} {
+		t.Run(name, func(t *testing.T) {
+			paths := testPaths(t)
+			claudeDir, root := inventoryFixture(t)
+			writeFixture(t, paths.HealthFile, `{"version":99}`)
+
+			var err error
+			switch name {
+			case "init":
+				_, err = Init(paths, root, claudeDir, testExecutable(t))
+			case "ingest":
+				if _, initErr := Init(paths, root, claudeDir, testExecutable(t)); initErr != nil {
+					t.Fatalf("Init() error = %v", initErr)
+				}
+				writeFixture(t, paths.HealthFile, `{"version":99}`)
+				t.Chdir(root)
+				_, err = Ingest(paths, claudeDir)
+			case "remove":
+				if _, initErr := Init(paths, root, claudeDir, testExecutable(t)); initErr != nil {
+					t.Fatalf("Init() error = %v", initErr)
+				}
+				writeFixture(t, paths.HealthFile, `{"version":99}`)
+				var removed bool
+				removed, err = Uninstall(paths, claudeDir, false)
+				if err == nil && !removed {
+					t.Error("Uninstall() = false, want true — the hooks were installed")
+				}
+			}
+			if err != nil {
+				t.Fatalf("%s error = %v, want the command to run and the counters to be replaced", name, err)
+			}
+
+			if _, readErr := health.New(paths.HealthFile).Read(); readErr != nil {
+				t.Errorf("the counter file is still unreadable after %s: %v", name, readErr)
+			}
+		})
+	}
+}
+
+// A counter write that fails for a reason of its own — an unwritable data root, a
+// file this user does not own — happens after the hooks are already gone. It may
+// surface, since a local layout this build cannot write to is worth knowing about,
+// but it must not turn what did happen into a report that nothing did.
+func TestUninstallStillReportsTheHooksItRemovedWhenTheCountersCannotBeWritten(t *testing.T) {
+	paths := testPaths(t)
+	claudeDir, root := inventoryFixture(t)
+	if _, err := Init(paths, root, claudeDir, testExecutable(t)); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	// Read-only, so creating the counter file's lock fails. Restored afterwards, or
+	// t.TempDir's own cleanup cannot remove it.
+	if err := os.Chmod(paths.DataDir, 0o500); err != nil {
+		t.Fatalf("Chmod() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(paths.DataDir, 0o700); err != nil {
+			t.Errorf("restoring the data root: %v", err)
+		}
+	})
+
+	// The error is not asserted: running as root, or on a filesystem that ignores
+	// the mode, the write succeeds and there is nothing to report. What is asserted
+	// holds either way.
+	removed, err := Uninstall(paths, claudeDir, false)
+
+	if !removed {
+		t.Errorf("Uninstall() = false, error = %v — the hooks were removed and the report says they were not", err)
+	}
+	state, hookErr := HookState(claudeDir)
+	if hookErr != nil || state != 0 {
+		t.Errorf("HookState() = %d, %v — want no Wake group left", state, hookErr)
 	}
 }
 
