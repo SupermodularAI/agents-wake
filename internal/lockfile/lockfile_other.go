@@ -16,3 +16,10 @@ import (
 func lockExclusive(*os.File) error {
 	return errors.New("advisory file locking is not supported on " + runtime.GOOS)
 }
+
+// lockExclusiveNow reports the same absence for the non-waiting acquire, and for
+// the same reason: a caller must never read "this platform cannot lock" as "the
+// lock is free".
+func lockExclusiveNow(*os.File) (bool, error) {
+	return false, errors.New("advisory file locking is not supported on " + runtime.GOOS)
+}
