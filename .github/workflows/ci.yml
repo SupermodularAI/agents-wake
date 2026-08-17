@@ -8,6 +8,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The release workflow calls this one, so the release gate is exactly the CI
+  # gate: one build matrix (ADR-0021), never a second one that can drift from it.
+  workflow_call:
 
 permissions:
   contents: read
@@ -24,8 +27,8 @@ jobs:
     name: fmt · lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: stable
           cache: true
@@ -52,8 +55,8 @@ jobs:
       matrix:
         go: ["1.25.x", "stable"]
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: ${{ matrix.go }}
           cache: true
@@ -64,6 +67,12 @@ jobs:
       - name: go test
         run: make test
 
+      # The release gate requires a race-clean suite. Once, on the current
+      # toolchain: the floor is what the matrix above proves.
+      - name: go test -race
+        if: matrix.go == 'stable'
+        run: make test-race
+
   build:
     name: build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest
@@ -73,11 +82,11 @@ jobs:
         goos: [darwin, linux]
         goarch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           # `git describe` needs tags to produce a real version.
           fetch-depth: 0
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           # Release artifacts are built with the current toolchain; the floor is
           # what `test` above verifies.
@@ -107,9 +116,55 @@ jobs:
             exit 1
           fi
 
+      # CI artifacts are ephemeral and dev-stamped, and are never attached to a
+      # Release: public release assets come only from GoReleaser in release.yml.
       - name: upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: wake-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/wake
           if-no-files-found: error
+          retention-days: 7
+
+  # A config check, not a second build matrix: the platform set in
+  # .goreleaser.yaml is asserted equal to this file's by
+  # internal/platform/matrix_test.go. Without this job, .goreleaser.yaml and
+  # release.yml would first be exercised by a tag push.
+  release-config:
+    name: goreleaser check · snapshot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: stable
+          cache: true
+      # GoReleaser shells out to syft for the per-archive SBOM.
+      - uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
+
+      - name: goreleaser check
+        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
+        with:
+          version: "~> v2"
+          args: check
+
+      # A snapshot proves the config produces the artifacts, publishing nothing.
+      - name: goreleaser snapshot
+        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
+        with:
+          version: "~> v2"
+          args: release --snapshot --clean
+
+      # The ldflags templates are asserted on the artifact, not trusted from the
+      # config: a snapshot has no tag, so tag/commit/date is checked at tag time
+      # in release.yml, and commit/date here, on every pull request.
+      - name: confirm the snapshot artifact carries version metadata
+        run: |
+          binary="$(find dist -type f -name wake -path '*linux_amd64*' | head -n 1)"
+          test -n "$binary" || { echo "::error::no linux/amd64 binary in dist"; exit 1; }
+          version="$("$binary" --version)"
+          echo "$version"
+          echo "$version" | grep -qE 'commit [0-9a-f]{7,}' || { echo "::error::--version does not name the commit"; exit 1; }
+          echo "$version" | grep -qE 'built [0-9]{4}-[0-9]{2}-[0-9]{2}T' || { echo "::error::--version does not name the build date"; exit 1; }

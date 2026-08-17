@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -87,4 +89,87 @@ func TestHandlerShowsAvailablePrimitivesWithoutUsage(t *testing.T) {
 
 func event(id string, outcome *record.Outcome) record.Record {
 	return record.Record{SchemaVersion: record.SchemaVersion, EventID: record.DeriveEventID("claude-code", record.Identifier(id)), Timestamp: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC), Harness: "claude-code", SessionID: "session-1", Repo: "0123456789abcdef0123456789abcdef", Kind: record.KindSkill, Name: "review", Invoker: record.InvokerModel, Outcome: outcome}
+}
+
+func TestListenBindsLoopbackOnly(t *testing.T) {
+	listener, err := Listen(0)
+	if err != nil {
+		t.Fatalf("Listen(0) error = %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	if got := listener.Addr().String(); !strings.HasPrefix(got, "127.0.0.1:") {
+		t.Errorf("Listen(0) bound %s, want a 127.0.0.1 address", got)
+	}
+}
+
+// Acceptance: a port collision is reported, so the caller can decline to
+// announce a dashboard that is not listening.
+func TestListenReportsAnOccupiedPort(t *testing.T) {
+	first, err := Listen(0)
+	if err != nil {
+		t.Fatalf("Listen(0) error = %v", err)
+	}
+	t.Cleanup(func() { _ = first.Close() })
+	port := first.Addr().(*net.TCPAddr).Port
+	second, err := Listen(port)
+	if err == nil {
+		_ = second.Close()
+		t.Fatalf("Listen(%d) on an occupied port = nil error, want a failure", port)
+	}
+}
+
+func TestServerBoundsEveryRequestPhase(t *testing.T) {
+	limits := defaultTimeouts()
+	server := newServer(nil, limits)
+	for _, phase := range []struct {
+		name string
+		got  time.Duration
+		want time.Duration
+	}{
+		{"ReadHeaderTimeout", server.ReadHeaderTimeout, limits.Header},
+		{"ReadTimeout", server.ReadTimeout, limits.Read},
+		{"WriteTimeout", server.WriteTimeout, limits.Write},
+		{"IdleTimeout", server.IdleTimeout, limits.Idle},
+	} {
+		if phase.got != phase.want {
+			t.Errorf("%s = %v, want %v", phase.name, phase.got, phase.want)
+		}
+		if phase.got <= 0 {
+			t.Errorf("%s is unbounded", phase.name)
+		}
+	}
+}
+
+// Acceptance: a half-written request cannot hold a connection indefinitely. The
+// headers below are deliberately never terminated; the header timeout is what
+// makes the read return instead of blocking until the client gives up.
+func TestPartialRequestDoesNotHoldTheConnection(t *testing.T) {
+	listener, err := Listen(0)
+	if err != nil {
+		t.Fatalf("Listen(0) error = %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	handler := Handler(
+		store.New(filepath.Join(t.TempDir(), "events.ndjson")),
+		inventory.New(filepath.Join(t.TempDir(), "primitives.json")),
+	)
+	go func() {
+		_ = serve(listener, handler, timeouts{Header: 50 * time.Millisecond, Read: 100 * time.Millisecond, Write: time.Second, Idle: 100 * time.Millisecond})
+	}()
+
+	conn, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if _, err := conn.Write([]byte("GET / HTTP/1.1\r\nHost: dashboard\r\n")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline() error = %v", err)
+	}
+	// A deadline error here means the server kept the half-written request open.
+	if _, err := io.ReadAll(conn); err != nil {
+		t.Errorf("reading a half-written request's connection error = %v, want the server to close it", err)
+	}
 }

@@ -5,9 +5,11 @@ import (
 	"embed"
 	"fmt"
 	"html/template"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/SupermodularAI/agents-wake/internal/inventory"
 	"github.com/SupermodularAI/agents-wake/internal/metrics"
@@ -50,9 +52,48 @@ func Handler(source *store.Store, primitives *inventory.Store) http.Handler {
 	})
 }
 
-// ListenAndServe binds the dashboard to loopback only.
-func ListenAndServe(port int, source *store.Store, primitives *inventory.Store) error {
-	return http.ListenAndServe("127.0.0.1:"+strconv.Itoa(port), Handler(source, primitives))
+// timeouts bounds each phase of a request. A dashboard request is one template
+// render over the local store, so none of these needs to be generous: an
+// unbounded phase is what lets a half-written request hold a descriptor forever.
+type timeouts struct{ Header, Read, Write, Idle time.Duration }
+
+func defaultTimeouts() timeouts {
+	return timeouts{Header: 5 * time.Second, Read: 15 * time.Second, Write: 30 * time.Second, Idle: 60 * time.Second}
+}
+
+// Listen binds the dashboard to loopback only, and to nothing else: the address is
+// fixed at 127.0.0.1 so no caller can widen it.
+//
+// Binding is separate from serving so the caller announces the URL only after the
+// bind succeeded — an occupied port must not print an active-server message.
+func Listen(port int) (net.Listener, error) {
+	address := "127.0.0.1:" + strconv.Itoa(port)
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return nil, fmt.Errorf("cannot bind the dashboard to %s: %w", address, err)
+	}
+	return listener, nil
+}
+
+// Serve serves the dashboard over an already-bound listener, with every request
+// phase bounded.
+func Serve(listener net.Listener, source *store.Store, primitives *inventory.Store) error {
+	return serve(listener, Handler(source, primitives), defaultTimeouts())
+}
+
+// serve exists so a test can bound the phases in milliseconds instead of seconds.
+func serve(listener net.Listener, handler http.Handler, limits timeouts) error {
+	return newServer(handler, limits).Serve(listener)
+}
+
+func newServer(handler http.Handler, limits timeouts) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: limits.Header,
+		ReadTimeout:       limits.Read,
+		WriteTimeout:      limits.Write,
+		IdleTimeout:       limits.Idle,
+	}
 }
 
 type dashboardView struct {

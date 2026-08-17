@@ -1,0 +1,78 @@
+name: Release
+
+# A tag is the only trigger: release artefacts exist because someone named a
+# version, never because a branch moved.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # The gate is CI itself, called rather than copied: fmt-check, lint, vet, test
+  # (`make validate`'s four targets), `go test -race ./...`, and the
+  # darwin/linux x amd64/arm64 build matrix. A matrix declared here could drift
+  # from the one that guards every pull request (ADR-0021).
+  gate:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: goreleaser
+    needs: gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write     # create the release and upload its assets
+      id-token: write     # sign the provenance attestation
+      attestations: write # store it against this repository
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0 # GoReleaser needs tag history for the changelog
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: stable
+          cache: true
+      # GoReleaser shells out to syft for the per-archive SBOM.
+      - uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
+
+      - name: goreleaser release
+        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Provenance over the published artefacts, not over the source: what a user
+      # downloads is what `gh attestation verify` has to be able to check.
+      #
+      # The binaries are subjects too, not just the archives that carry them:
+      # `gh attestation verify` resolves an attestation by the sha256 digest of
+      # the file it is handed, and the README documents verifying the *installed*
+      # binary. `dist/**/wake` is what matches GoReleaser's per-build directory
+      # (`dist/wake_linux_amd64_v1/wake`). Four subjects share the name `wake`
+      # with different digests, which the action allows — it deduplicates on name
+      # and digest together. internal/platform/attestation_test.go keeps this list
+      # and the README's command from drifting apart.
+      - name: attest provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/checksums.txt
+            dist/**/wake
+
+      - name: confirm the artefact reports tag, commit and date
+        run: |
+          binary="$(find dist -type f -name wake -path '*linux_amd64*' | head -n 1)"
+          test -n "$binary" || { echo "::error::no linux/amd64 binary in dist"; exit 1; }
+          version="$("$binary" --version)"
+          echo "$version"
+          echo "$version" | grep -qF "${GITHUB_REF_NAME}" || { echo "::error::--version does not name the tag"; exit 1; }
+          echo "$version" | grep -qE 'commit [0-9a-f]{7,}' || { echo "::error::--version does not name the commit"; exit 1; }
+          echo "$version" | grep -qE 'built [0-9]{4}-[0-9]{2}-[0-9]{2}T' || { echo "::error::--version does not name the build date"; exit 1; }
