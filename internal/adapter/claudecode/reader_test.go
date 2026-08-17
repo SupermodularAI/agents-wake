@@ -494,6 +494,26 @@ func TestReadDropsAndCountsASubagentCallWithNoType(t *testing.T) {
 	}
 }
 
+// Refused now drives doctor's "collects nothing", so it must count only calls Wake
+// would otherwise have collected. Activity in a directory the user never consented
+// to is outside collection altogether: counting it would report lost collection for
+// a repository Wake was never asked to read, and would never clear.
+func TestReadDoesNotCountARefusalInAnUnconsentedRepository(t *testing.T) {
+	deny := func(string) (record.Hash, bool) { return "", false }
+	for _, transcript := range []string{
+		subagentCallTranscript(t, ""),
+		subagentCallTranscript(t, "/usr/local/bin"),
+	} {
+		result, err := Read(strings.NewReader(transcript), deny, names)
+		if err != nil {
+			t.Fatalf("Read() error = %v", err)
+		}
+		if len(result.Records) != 0 || result.Refused != 0 {
+			t.Errorf("Read() = %+v, want no record and no refusal", result)
+		}
+	}
+}
+
 func TestReadDropsAndCountsSubagentCallsWithAHostileType(t *testing.T) {
 	for _, value := range hostileValues {
 		result, err := Read(strings.NewReader(subagentCallTranscript(t, value)), resolver, names)
