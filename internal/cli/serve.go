@@ -21,13 +21,13 @@ func newServeCmd() *cobra.Command {
 			return err
 		}
 		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Serving dashboard at http://127.0.0.1:8080")
-		scope, err := resolveDiscoveryScope(cmd, paths)
+		scope, names, err := resolveDiscoveryScope(cmd, paths)
 		if err != nil {
 			return err
 		}
 		events := store.New(filepath.Join(paths.DataDir, "events.ndjson"))
 		primitives := inventory.New(paths.PrimitivesFile)
-		if err := primitives.Refresh(events, inventory.ClaudeCodeInScope(scope)); err != nil {
+		if err := primitives.Refresh(events, inventory.ClaudeCodeInScope(scope, names)); err != nil {
 			return err
 		}
 		return ui.ListenAndServe(8080, events, primitives)

@@ -125,7 +125,7 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 		result, ingestErr := ingest.ClaudeCode(file, func(cwd string) (record.Hash, bool) {
 			identity, identifyErr := repos.Identify(cwd)
 			return record.Hash(identity.ID), identifyErr == nil && identity.Matched
-		}, destination)
+		}, record.NewNamer(repos.NameKey()), destination)
 		if ingestErr == nil {
 			written += result.Written
 		}
@@ -145,27 +145,33 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 // that cannot be produced withholds project-local discovery rather than
 // defaulting to it, and the unconsented fallback id Identify returns is never
 // read, so it cannot be persisted (ADR-0019 §9).
-func DiscoveryScope(paths config.Paths, claudeDir, cwd string) inventory.Scope {
+// It returns the name key alongside the scope because both come from the same
+// consent boundary and discovery needs both (ADR-0020). A scope that could not be
+// resolved answers with the zero Namer, which refuses to digest anything: an error
+// path must not widen what gets persisted.
+func DiscoveryScope(paths config.Paths, claudeDir, cwd string) (inventory.Scope, record.Namer) {
 	repos, err := config.OpenRepos(paths)
 	if err != nil {
-		return inventory.Scope{ClaudeDir: claudeDir, Project: inventory.ProjectUnresolved}
+		return inventory.Scope{ClaudeDir: claudeDir, Project: inventory.ProjectUnresolved}, record.Namer{}
 	}
 	return discoveryScope(repos, claudeDir, cwd)
 }
 
-func discoveryScope(repos *config.Repos, claudeDir, cwd string) inventory.Scope {
+func discoveryScope(repos *config.Repos, claudeDir, cwd string) (inventory.Scope, record.Namer) {
+	names := record.NewNamer(repos.NameKey())
 	identity, err := repos.Identify(cwd)
 	if err != nil {
-		return inventory.Scope{ClaudeDir: claudeDir, Project: inventory.ProjectUnresolved}
+		return inventory.Scope{ClaudeDir: claudeDir, Project: inventory.ProjectUnresolved}, names
 	}
 	if !identity.Matched {
-		return inventory.Scope{ClaudeDir: claudeDir, Project: inventory.ProjectUnconsented}
+		return inventory.Scope{ClaudeDir: claudeDir, Project: inventory.ProjectUnconsented}, names
 	}
-	return inventory.Scope{ClaudeDir: claudeDir, Root: cwd, Project: inventory.ProjectConsented}
+	return inventory.Scope{ClaudeDir: claudeDir, Root: cwd, Project: inventory.ProjectConsented}, names
 }
 
 func refreshInventory(paths config.Paths, repos *config.Repos, claudeDir, root string, events *store.Store) error {
-	return inventory.New(paths.PrimitivesFile).Refresh(events, inventory.ClaudeCodeInScope(discoveryScope(repos, claudeDir, root)))
+	scope, names := discoveryScope(repos, claudeDir, root)
+	return inventory.New(paths.PrimitivesFile).Refresh(events, inventory.ClaudeCodeInScope(scope, names))
 }
 
 func installHooks(claudeDir string) error {
