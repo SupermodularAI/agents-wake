@@ -3,6 +3,7 @@ package inventory
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/SupermodularAI/agents-wake/internal/record"
@@ -59,6 +60,33 @@ func TestClaudeCodeInScopeSkipsInvalidPrimitiveNames(t *testing.T) {
 
 	if got := ClaudeCodeInScope(Scope{ClaudeDir: claudeDir, Root: root, Project: ProjectConsented}, names); len(got.Primitives) != 0 {
 		t.Fatalf("ClaudeCodeInScope() = %+v", got)
+	}
+}
+
+func TestClaudeCodeInScopeKeepsListingsAroundAnOversizedLine(t *testing.T) {
+	claudeDir := filepath.Join(t.TempDir(), ".claude")
+	root := t.TempDir()
+	oversized := `{"cwd":"` + root + `","attachment":{"type":"skill_listing","content":"- oversized-skill: ` + strings.Repeat("A", 2*1024*1024) + `"}}`
+	write(t, filepath.Join(claudeDir, "projects", "session.jsonl"), strings.Join([]string{
+		`{"cwd":"` + root + `","attachment":{"type":"skill_listing","content":"- before-skill: description"}}`,
+		oversized,
+		`{"cwd":"` + root + `","attachment":{"type":"agent_listing_delta","addedTypes":["after-agent"]}}`,
+	}, "\n"))
+
+	got := ClaudeCodeInScope(Scope{ClaudeDir: claudeDir, Root: root, Project: ProjectConsented}, names)
+
+	found := map[primitiveKey]bool{}
+	for _, item := range got.Primitives {
+		found[primitiveKey{kind: item.Kind, name: item.Name}] = true
+	}
+	if !found[primitiveKey{kind: record.KindSkill, name: "before-skill"}] {
+		t.Errorf("the listing before the oversized line was lost: %+v", got)
+	}
+	if !found[primitiveKey{kind: record.KindSubagent, name: "after-agent"}] {
+		t.Errorf("the listing after the oversized line was lost: %+v", got)
+	}
+	if found[primitiveKey{kind: record.KindSkill, name: "oversized-skill"}] {
+		t.Errorf("the oversized line was parsed in part rather than discarded: %+v", got)
 	}
 }
 
