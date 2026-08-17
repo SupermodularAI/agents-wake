@@ -117,6 +117,19 @@ func scanTime(report health.Report, readErr error) string {
 // numbers are complete and the answer is zero. Reporting the first as the second is
 // how `unused` would come to recommend removing something the user relies on.
 //
+// A refused project entry belongs in the first arm for the same reason: an entry
+// this build will not resolve is attribution it could not perform, so every
+// transcript belonging to that repository counted as holding nothing, and the
+// numbers are missing all of it. It is also not a rare tamper case — it is what
+// every project table written before match_mac became required looks like on its
+// first scan, and the remedy (`wake init` in the repository) is undiscoverable if
+// doctor calls the situation a complete count of zero.
+//
+// Skipped is deliberately not in it. A transcript whose working directory belongs to
+// no consented repository was read completely and collected nothing because consent
+// says so, and an unterminated call is a number that is not final yet rather than
+// one nobody could read (ADR-0015). Both are honest zeroes.
+//
 // An input this build cannot read is its own state rather than an error: a
 // diagnostic that failed in the situation it exists for is worse than one that says
 // what it could not determine. Both unreadable states come first, because a number
@@ -131,7 +144,7 @@ func integrationState(report health.Report, readErr, hookErr error) string {
 		return "hooks unreadable"
 	case report.Scan.At.IsZero():
 		return "never scanned"
-	case report.Scan.Unreadable > 0 || report.Scan.ParseErrors > 0:
+	case report.Scan.Unreadable > 0 || report.Scan.ParseErrors > 0 || report.Scan.RefusedProjects > 0:
 		return "collects nothing"
 	case report.Scan.EventsWritten == 0:
 		return "collects zero"

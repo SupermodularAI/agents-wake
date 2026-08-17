@@ -36,6 +36,11 @@ func TestDoctorDistinguishesCollectsNothingFromCollectsZero(t *testing.T) {
 	}{
 		{"a source that could not be read", health.Scan{Unreadable: 1}, "integration: collects nothing"},
 		{"a source that could not be parsed", health.Scan{ParseErrors: 1}, "integration: collects nothing"},
+		// A project table entry this build refuses is attribution it could not
+		// perform, so every transcript belonging to that repository resolved to no
+		// consented project — the numbers below are missing all of it. This is the
+		// state every install written before match_mac reaches on its first scan.
+		{"a project entry this build refuses", health.Scan{Transcripts: 1, Skipped: 1, RefusedProjects: 1}, "integration: collects nothing"},
 		{"every source read and none held an event", health.Scan{Transcripts: 3, Skipped: 3}, "integration: collects zero"},
 		{"events written", health.Scan{EventsWritten: 4}, "integration: collecting"},
 	} {
