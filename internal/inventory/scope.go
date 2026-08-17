@@ -36,3 +36,21 @@ type Scope struct {
 
 // allowsProject reports whether project-local discovery may run.
 func (s Scope) allowsProject() bool { return s.Project == ProjectConsented && s.Root != "" }
+
+// Discovery is the result of one discovery pass: what it found, and whether it was
+// allowed to look everywhere it would have had to look to be sure.
+//
+// The second half travels with the first because the snapshot writer needs both: an
+// entry missing from a pass that could not read a consented project is out of
+// scope, not gone, and dropping it would erase a repository's primitives and their
+// counters (Store.available). Pairing them in one value is what stops a caller from
+// reporting a partial pass as a complete one.
+type Discovery struct {
+	// Primitives is everything this pass was allowed to see.
+	Primitives []Primitive
+	// ProjectScanned reports that project-local discovery ran. False is the
+	// conservative answer — the zero Discovery is treated as partial — because
+	// wrongly claiming completeness deletes recorded state, while wrongly claiming
+	// partialness only keeps a name around one refresh longer.
+	ProjectScanned bool
+}

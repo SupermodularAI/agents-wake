@@ -123,6 +123,45 @@ func TestReportOutsideAConsentedRepositoryLeavesConsentedUsageIntact(t *testing.
 	}
 }
 
+func TestReportOutsideAConsentedRepositoryKeepsItsProjectPrimitives(t *testing.T) {
+	paths, root := reportFixture(t)
+	consent(t, paths, root)
+	appendReportRecord(t, paths)
+
+	// Inside the consented repository the snapshot holds its project-local skills.
+	if out, err := run(t, "report"); err != nil {
+		t.Fatalf("wake report inside the repository error = %v: %s", err, out)
+	}
+	raw := readPrimitives(t, paths)
+	for _, want := range []string{`"name": "report"`, `"name": "unused"`, `"name": "global-skill"`} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("primitives.json is missing %s: %s", want, raw)
+		}
+	}
+
+	// A command run somewhere Wake was never consented to cannot see them, and
+	// therefore cannot have learned they are gone. Replacing the snapshot from that
+	// view would erase the repository's primitives and their counters until a
+	// command happened to run inside it again.
+	t.Chdir(t.TempDir())
+	out, err := run(t, "report")
+	if err != nil {
+		t.Fatalf("wake report outside the repository error = %v: %s", err, out)
+	}
+	raw = readPrimitives(t, paths)
+	for _, want := range []string{`"name": "report"`, `"name": "unused"`, `"name": "global-skill"`} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("an unconsented scan replaced the snapshot, losing %s: %s", want, raw)
+		}
+	}
+	if !strings.Contains(raw, `"invocations": 1`) {
+		t.Fatalf("primitives.json lost the counter of a carried primitive: %s", raw)
+	}
+	if strings.Contains(raw, root) {
+		t.Fatalf("primitives.json contains the working directory: %s", raw)
+	}
+}
+
 // reportFixture isolates Wake's state, writes one global and two project-local
 // skills, and moves into the project directory without consenting to it.
 func reportFixture(t *testing.T) (config.Paths, string) {

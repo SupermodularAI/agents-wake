@@ -21,7 +21,7 @@ func TestHandlerRendersStoredMetrics(t *testing.T) {
 		t.Fatalf("Append() error = %v", err)
 	}
 	primitives := inventory.New(filepath.Join(t.TempDir(), "primitives.json"))
-	if err := primitives.Refresh(source, []inventory.Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "review"}}); err != nil {
+	if err := primitives.Refresh(source, inventory.Discovery{Primitives: []inventory.Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "review"}}, ProjectScanned: true}); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 	response := httptest.NewRecorder()
@@ -57,7 +57,7 @@ func TestHandlerExcludesBuiltinToolsFromPrimitiveTable(t *testing.T) {
 		t.Fatalf("Append() error = %v", err)
 	}
 	primitives := inventory.New(filepath.Join(t.TempDir(), "primitives.json"))
-	if err := primitives.Refresh(source, []inventory.Primitive{{Harness: "claude-code", Kind: record.KindBuiltinTool, Name: "Bash"}, {Harness: "claude-code", Kind: record.KindSkill, Name: "pr-review"}}); err != nil {
+	if err := primitives.Refresh(source, inventory.Discovery{Primitives: []inventory.Primitive{{Harness: "claude-code", Kind: record.KindBuiltinTool, Name: "Bash"}, {Harness: "claude-code", Kind: record.KindSkill, Name: "pr-review"}}, ProjectScanned: true}); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 	response := httptest.NewRecorder()
@@ -73,7 +73,7 @@ func TestHandlerShowsAvailablePrimitivesWithoutUsage(t *testing.T) {
 	available := []inventory.Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "available-skill"}}
 	source := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
 	primitives := inventory.New(filepath.Join(t.TempDir(), "primitives.json"))
-	if err := primitives.Refresh(source, available); err != nil {
+	if err := primitives.Refresh(source, inventory.Discovery{Primitives: available, ProjectScanned: true}); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 	Handler(source, primitives).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
