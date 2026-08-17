@@ -24,7 +24,7 @@ LDFLAGS := -s -w \
 	-X $(PKG)/internal/version.Date=$(DATE)
 
 .DEFAULT_GOAL := help
-.PHONY: help build run test vet lint fmt fmt-check validate tidy tools-update clean
+.PHONY: help build run test test-race vet lint fmt fmt-check validate tidy tools-update clean
 
 help: ## Show this help
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -38,6 +38,12 @@ run: build ## Build and run
 
 test: ## Run unit tests
 	$(GO) test ./...
+
+# Deliberately outside `validate`: the race build roughly doubles a local verify
+# loop, and the release gate names it as a check of its own alongside validate.
+# CI runs it on every pull request.
+test-race: ## Run unit tests with the race detector
+	$(GO) test -race ./...
 
 vet: ## Run go vet
 	$(GO) vet ./...
