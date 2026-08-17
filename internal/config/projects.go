@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/SupermodularAI/agents-wake/internal/atomicfile"
 )
 
 // projectsVersion is the format version stamped on every write. A future format
@@ -66,6 +68,23 @@ type projectEntry struct {
 	// and folding would merge two repositories — and derivation cannot probe for
 	// it, so the answer is recorded here instead.
 	CaseInsensitive bool `json:"case_insensitive"`
+	// MatchMAC is the keyed digest over everything resolution matches against:
+	// the canonical root, every alias, and the case-folding flag (ADR-0019 §3
+	// applied to the whole of what the entry resolves with).
+	//
+	// ID covers Root and nothing else, so on its own it leaves the rest of the
+	// entry hand-editable: an alias added beside a legitimate root attributes a
+	// directory the user never consented to that repository's id, and — since
+	// ConsentedRoot answers with whichever spelling matched — lets local
+	// discovery read the tree under it. Neither is a collision, so the ambiguity
+	// pass never sees it.
+	//
+	// An entry without a digest this build derives is refused and counted like any
+	// other untrustworthy entry: fail closed, never repair (constraint 22). A
+	// table written before this field existed is therefore refused rather than
+	// half-trusted, and `wake init` in the repository re-records it — with the
+	// same id, since ID's derivation is unchanged, so nothing is re-identified.
+	MatchMAC string `json:"match_mac"`
 }
 
 // valid reports whether an entry is one this build is willing to resolve
@@ -130,7 +149,20 @@ func validRoot(path string) bool {
 // Entries that fail validation are dropped and counted. The count is returned so
 // doctor can report it, since a silently shrinking table is the failure mode this
 // design cannot otherwise see.
+//
+// The file's type and mode are checked before it is opened, for a different reason
+// than the salt's: this table is not a secret, but it decides which repository an
+// event belongs to. A symlink standing in for it points resolution — and the next
+// republication — somewhere else, and a mode looser than 0600 means anyone else on
+// the machine can rewrite that decision. The refusal names the file's role and
+// never the file (plan §4.2).
 func readProjects(path string) (projectsFile, int, error) {
+	if err := checkSensitiveFile(path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return projectsFile{Version: projectsVersion}, 0, nil
+		}
+		return projectsFile{}, 0, fmt.Errorf("the project table %w", err)
+	}
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return projectsFile{Version: projectsVersion}, 0, nil
@@ -177,16 +209,18 @@ func parseFailure(err error) string {
 	return "invalid JSON"
 }
 
-// writeProjects replaces the table atomically.
+// writeProjects replaces the table atomically and durably.
 //
 // Atomically because the table is what every identity resolves against: a
 // half-written file is not a table with fewer repositories in it, it is a table
-// that fails to parse, and the next scan would stop rather than guess. Writing a
-// temporary file in the same directory and renaming it means a reader sees either
-// the old table or the new one.
+// that fails to parse, and the next scan would stop rather than guess. A reader
+// therefore sees either the old table or the new one, never a partial one — and
+// a write reported as successful is one a power loss cannot undo.
 //
-// The temporary file is removed on every failure path. A leftover projects-*.json
-// is a file full of real paths that nothing would ever clean up.
+// Both properties come from atomicfile, including the removal of the in-progress
+// temporary file on every failure path: a leftover .publish-* next to this file
+// is a full copy of a table of real repository paths that nothing would ever
+// clean up.
 func writeProjects(path string, table projectsFile) error {
 	table.Version = projectsVersion
 
@@ -196,31 +230,5 @@ func writeProjects(path string, table projectsFile) error {
 	}
 	data = append(data, '\n')
 
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, dataDirMode); err != nil {
-		return fmt.Errorf("creating %s: %w", dir, err)
-	}
-
-	f, err := os.CreateTemp(dir, "projects-*.json")
-	if err != nil {
-		return fmt.Errorf("creating a temporary file in %s: %w", dir, err)
-	}
-	tmp := f.Name()
-
-	if _, err := f.Write(data); err != nil {
-		return errors.Join(fmt.Errorf("writing %s: %w", tmp, err), f.Close(), os.Remove(tmp))
-	}
-	// CreateTemp already opens at 0600; setting it explicitly keeps the mode a
-	// stated property of this function rather than a property of the standard
-	// library's default.
-	if err := f.Chmod(projectsFileMode); err != nil {
-		return errors.Join(fmt.Errorf("setting the mode of %s: %w", tmp, err), f.Close(), os.Remove(tmp))
-	}
-	if err := f.Close(); err != nil {
-		return errors.Join(fmt.Errorf("closing %s: %w", tmp, err), os.Remove(tmp))
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return errors.Join(fmt.Errorf("replacing %s: %w", path, err), os.Remove(tmp))
-	}
-	return nil
+	return atomicfile.Publish(path, data, projectsFileMode)
 }

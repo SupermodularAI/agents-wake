@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -70,16 +71,110 @@ type Repos struct {
 // it is. A table that does not parse is an error rather than an empty table,
 // because resolving against an empty table would hand every repository a new
 // identity on the next scan.
+//
+// The two directories are checked before either file is touched, because the mode
+// of a file is only as strong as the directory holding it: in a directory anyone
+// else can write, the salt can be replaced between one read and the next whatever
+// its own mode says. Only those two directories, never their ancestors — see
+// checkStateDir. Each refusal names the directory's role and not its path.
 func OpenRepos(p Paths) (*Repos, error) {
+	if err := checkStateDir(p.ConfigDir); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("the configuration directory %w", err)
+	}
+	if err := checkStateDir(filepath.Dir(p.ProjectsFile)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("the state directory %w", err)
+	}
+
 	salt, err := loadOrCreateSalt(p)
 	if err != nil {
 		return nil, err
 	}
-	table, dropped, err := readProjects(p.ProjectsFile)
+	// The salt first, then a *Repos built with it, then the table: verifying an
+	// entry's id means deriving it, and that cannot happen before the salt is
+	// known.
+	r := &Repos{paths: p, salt: salt}
+	table, dropped, err := r.readTable()
 	if err != nil {
 		return nil, err
 	}
-	return &Repos{paths: p, salt: salt, table: table, dropped: dropped}, nil
+	r.table, r.dropped = table, dropped
+	return r, nil
+}
+
+// readTable reads the resolution table and keeps only the entries this build is
+// willing to resolve against. It returns the count it refused, which is the sum of
+// the entries readProjects dropped on shape and the entries this verified against
+// the salt and rejected (ADR-0019 §7).
+func (r *Repos) readTable() (projectsFile, int, error) {
+	table, dropped, err := readProjects(r.paths.ProjectsFile)
+	if err != nil {
+		return projectsFile{}, 0, err
+	}
+	kept, refused := r.trustworthy(table.Projects)
+	table.Projects = kept
+	return table, dropped + refused, nil
+}
+
+// trustworthy keeps the entries this build derives both keyed values of, with every
+// ambiguous set removed, and reports how many it refused.
+//
+// The id is the attribution: an entry whose id is not HMAC-SHA256(salt, root)
+// truncated to idHexLen is an entry someone wrote by hand, and honouring it would
+// let a hand-edited file decide which repository an event belongs to (ADR-0019 §3,
+// §8). The id covers the root alone, so the match digest covers the rest of what
+// resolution matches with — every alias and the case-folding flag — for the same
+// reason and against the same salt: an alias hand-added beside a legitimate root is
+// not a collision, so nothing else here would refuse it, and it would both
+// re-attribute a directory and widen what discovery may read. Two entries claiming
+// the same id, the same root, or the same recorded spelling are ambiguous, and every
+// member of such a set is refused rather than one of them arbitrarily preferred —
+// picking would be choosing an attribution.
+//
+// Refusing never re-derives, reassigns or re-registers anything. `init` is the only
+// operation that discovers and records a root, and a registered root is never
+// reassigned (ADR-0019 §9); a refused entry simply stops resolving, so the
+// directory hashes as itself with Matched false, which is the fail-closed answer.
+func (r *Repos) trustworthy(entries []projectEntry) (kept []projectEntry, refused int) {
+	// A constant-time compare over an id derived from a secret salt. It costs
+	// nothing here and removes the question of whether a timing signal leaks the
+	// salt to something that can offer roots and watch how long the refusal takes.
+	derived := make([]projectEntry, 0, len(entries))
+	for _, entry := range entries {
+		idOK := hmac.Equal([]byte(entry.ID), []byte(r.hashRoot(entry.Root)))
+		matchOK := hmac.Equal([]byte(entry.MatchMAC), []byte(r.matchMAC(entry)))
+		if !idOK || !matchOK {
+			refused++
+			continue
+		}
+		derived = append(derived, entry)
+	}
+
+	// Ambiguity is counted across the entries that survived derivation, not the
+	// original set: an entry already refused cannot make another one ambiguous.
+	ids := map[string]int{}
+	roots := map[string]int{}
+	spellings := map[string]int{}
+	for _, entry := range derived {
+		ids[entry.ID]++
+		roots[entry.Root]++
+		for _, spelling := range entry.spellings() {
+			spellings[spelling]++
+		}
+	}
+
+	kept = make([]projectEntry, 0, len(derived))
+	for _, entry := range derived {
+		ambiguous := ids[entry.ID] > 1 || roots[entry.Root] > 1
+		for _, spelling := range entry.spellings() {
+			ambiguous = ambiguous || spellings[spelling] > 1
+		}
+		if ambiguous {
+			refused++
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	return kept, refused
 }
 
 // DroppedEntries reports how many recorded entries this build refused to trust.
@@ -230,7 +325,12 @@ func (r *Repos) Register(root, label string) (string, error) {
 		// The re-read is the point of the lock. Deciding from r.table — a snapshot
 		// taken at OpenRepos — and then republishing the whole file would erase any
 		// entry another writer recorded since.
-		table, dropped, readErr := readProjects(r.paths.ProjectsFile)
+		//
+		// Through readTable rather than readProjects, so an entry this build refuses
+		// to resolve against is also one it refuses to carry back into the file. A
+		// hand-written entry that survived a write would be an attribution the table
+		// keeps asserting after it has been rejected.
+		table, dropped, readErr := r.readTable()
 		if readErr != nil {
 			return readErr
 		}
@@ -289,6 +389,9 @@ func (r *Repos) registration(table projectsFile, canonical string, aliases []str
 		// Cloned before appending: the entry is a copy of the recorded one, but its
 		// alias slice still shares the recorded backing array.
 		existing.Aliases = append(slices.Clone(existing.Aliases), added...)
+		// Re-signed, because the digest covers the spellings and this changed them.
+		// The id is not: this is the same repository under a new spelling.
+		existing = r.signed(existing)
 		if !existing.valid() {
 			return table, "", false, errUnreadableEntry
 		}
@@ -301,13 +404,13 @@ func (r *Repos) registration(table projectsFile, canonical string, aliases []str
 		return table, "", false, nested
 	}
 
-	entry := projectEntry{
+	entry := r.signed(projectEntry{
 		ID:              r.hashRoot(canonical),
 		Label:           label,
 		Root:            canonical,
 		Aliases:         aliases,
 		CaseInsensitive: fold,
-	}
+	})
 	if !entry.valid() {
 		return table, "", false, errUnreadableEntry
 	}
@@ -375,6 +478,57 @@ func (r *Repos) NameKey() []byte {
 		panic("deriving the derived-name key: " + err.Error())
 	}
 	return mac.Sum(nil)
+}
+
+// matchMACDomain separates the match digest from every other use of the salt, for
+// the reason nameKeyDomain gives: two keyed values over one key with no domain label
+// are one substitution away from being confused for each other. The version suffix
+// leaves room to change what the digest covers without touching the id.
+const matchMACDomain = "wake/match-mac/v1"
+
+// matchMAC is the keyed digest over everything resolution matches an observed
+// working directory against: the entry's canonical root, its aliases in recorded
+// order, and its case-folding flag.
+//
+// Not truncated, unlike the id: this value is never printed and never persisted
+// anywhere but the local table, so there is no brevity to trade the margin for.
+//
+// The parts are NUL-separated, which is injective here because a path cannot contain
+// a NUL byte — so no two different entries encode to the same input, and moving an
+// alias's spelling into the root cannot produce the same digest as leaving it where
+// it was.
+func (r *Repos) matchMAC(entry projectEntry) string {
+	buf := append([]byte(matchMACDomain), 0)
+	if entry.CaseInsensitive {
+		buf = append(buf, 'f')
+	}
+	buf = append(buf, 0)
+	for _, spelling := range entry.spellings() {
+		buf = append(buf, spelling...)
+		buf = append(buf, 0)
+	}
+
+	mac := hmac.New(sha256.New, r.salt)
+	// Checked for the reason hashRoot gives: a short write would key the digest to
+	// a prefix of the entry, and every entry written afterwards would carry a
+	// digest nothing else agrees with.
+	if _, err := mac.Write(buf); err != nil {
+		panic("hashing a project entry: " + err.Error())
+	}
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// signed returns entry with the match digest this build derives for it. Every write
+// site goes through it, so a spelling recorded without a digest cannot happen — an
+// entry missing one is refused on the next read, which would be a registration that
+// looked successful and then collected nothing (errUnreadableEntry's reason).
+//
+// It deliberately leaves ID alone: an existing entry's id is never recomputed
+// (ADR-0019 §9), and the id of a new one is derived where the entry is built, from
+// the canonical root the caller resolved.
+func (r *Repos) signed(entry projectEntry) projectEntry {
+	entry.MatchMAC = r.matchMAC(entry)
+	return entry
 }
 
 // hashRoot is the repository id: HMAC-SHA256 of the root under the per-machine

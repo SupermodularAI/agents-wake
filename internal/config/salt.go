@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+
+	"github.com/SupermodularAI/agents-wake/internal/atomicfile"
 )
 
 // saltLen is the salt's length in bytes (ADR-0019 §3). 32 bytes is HMAC-SHA256's
@@ -35,7 +37,11 @@ var errSaltWrongLength = errors.New("the salt file is the wrong length")
 // It fails closed on a file it does not understand. A salt of the wrong length is
 // a truncated write or somebody else's file; using it would produce ids nothing
 // else agrees with, and replacing it would silently re-identify every repository.
-// The error states lengths only — the bytes are the secret.
+// The error states lengths only — the bytes are the secret. The same refusal
+// covers a file it is not willing to read at all: a symlink standing in for the
+// salt is a redirection, and a mode looser than 0600 means the key to every id
+// already delivered is readable by someone else. Refusing is the answer in both
+// cases, and refusing without naming the file or its contents.
 //
 // It loses races safely. Two first runs at once — a scan and a hook firing
 // together — are resolved by the salt file appearing whole or not at all: the
@@ -82,6 +88,13 @@ func loadOrCreateSalt(p Paths) ([]byte, error) {
 	if err := f.Chmod(saltFileMode); err != nil {
 		return nil, errors.Join(fmt.Errorf("setting the mode of %s: %w", tmp, err), f.Close(), os.Remove(tmp))
 	}
+	// Before the link, not after: the salt is never regenerated, so a salt file
+	// whose directory entry survived a power loss while its bytes did not is a
+	// file this build will refuse for the rest of the machine's life — and every
+	// id already derived from the real salt becomes unreachable.
+	if err := f.Sync(); err != nil {
+		return nil, errors.Join(fmt.Errorf("syncing %s: %w", tmp, err), f.Close(), os.Remove(tmp))
+	}
 	if err := f.Close(); err != nil {
 		return nil, errors.Join(fmt.Errorf("closing %s: %w", tmp, err), os.Remove(tmp))
 	}
@@ -107,12 +120,33 @@ func loadOrCreateSalt(p Paths) ([]byte, error) {
 	case removeErr != nil:
 		return nil, fmt.Errorf("removing %s: %w", tmp, removeErr)
 	}
+	// The link created a directory entry, and that entry has to be durable for the
+	// same reason the bytes do: a salt that came back after a crash under a
+	// different name than the one the ids were derived with is not recoverable. A
+	// failure here joins the answer rather than being ignored — the caller has to
+	// know the salt it is about to hash with may not be there next boot.
+	if err := atomicfile.SyncDir(p.ConfigDir); err != nil {
+		return nil, fmt.Errorf("syncing %s: %w", p.ConfigDir, err)
+	}
 	return fresh, nil
 }
 
 // readSalt reads an existing salt file. A missing file is reported as
 // fs.ErrNotExist so the caller can tell "not yet" from "wrong".
+//
+// The file's type and mode are checked before it is opened. The salt is the one
+// secret this tool holds — it is what makes a repository id one-way — so a file
+// that is a symlink, is not a regular file, or is reachable by anyone other than
+// its owner is one this build refuses rather than one it reads and carries on with.
+// The role is a fixed literal here and the fault carries no path, so the message
+// names neither the file nor a byte of it (plan §4.2).
 func readSalt(p Paths) ([]byte, error) {
+	if err := checkSensitiveFile(p.SaltFile); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("the repository-id salt %w", err)
+	}
 	salt, err := os.ReadFile(p.SaltFile)
 	if err != nil {
 		// Not wrapped with a message: fs.ErrNotExist is the control-flow

@@ -72,6 +72,98 @@ func TestWithLockReturnsTheFunctionError(t *testing.T) {
 	}
 }
 
+func TestTryWithLockRunsFnWhenTheLockIsFree(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.lock")
+
+	runs := 0
+	ran, err := TryWithLock(path, func() error {
+		runs++
+		return nil
+	})
+
+	if err != nil {
+		t.Fatalf("TryWithLock() error = %v", err)
+	}
+	if !ran {
+		t.Error("ran = false, want true when the lock is free")
+	}
+	if runs != 1 {
+		t.Errorf("fn ran %d times, want 1", runs)
+	}
+}
+
+func TestTryWithLockSkipsWhenAnotherHolderHasIt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.lock")
+
+	// The holder runs in a goroutine so it can keep the lock while the attempt
+	// below runs. Its own os.OpenFile is a distinct open file description, which
+	// is what flock locks against — a second acquire from this same process is
+	// therefore genuinely blocked, exactly as another process would be.
+	held := make(chan struct{})
+	release := make(chan struct{})
+	holderDone := make(chan error, 1)
+	go func() {
+		holderDone <- WithLock(path, func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+
+	ran, err := TryWithLock(path, func() error {
+		t.Error("fn ran while another holder had the lock")
+		return nil
+	})
+	close(release)
+
+	if err != nil {
+		t.Errorf("TryWithLock() error = %v, want nil — a held lock is not a failure", err)
+	}
+	if ran {
+		t.Error("ran = true, want false while another holder has the lock")
+	}
+	if holderErr := <-holderDone; holderErr != nil {
+		t.Fatalf("holder WithLock() error = %v", holderErr)
+	}
+}
+
+func TestTryWithLockReleasesTheLockAfterFn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.lock")
+
+	runs := 0
+	for attempt := range 2 {
+		ran, err := TryWithLock(path, func() error {
+			runs++
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("TryWithLock() attempt %d error = %v", attempt, err)
+		}
+		if !ran {
+			t.Fatalf("attempt %d ran = false — the lock was not released", attempt)
+		}
+	}
+
+	if runs != 2 {
+		t.Fatalf("fn ran %d times, want 2", runs)
+	}
+}
+
+func TestTryWithLockReturnsTheFunctionError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.lock")
+	sentinel := errors.New("sentinel")
+
+	ran, err := TryWithLock(path, func() error { return sentinel })
+
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("TryWithLock() error = %v, want %v", err, sentinel)
+	}
+	if !ran {
+		t.Error("ran = false, want true — fn did run and returned the error")
+	}
+}
+
 func TestWithLockFailsWhenTheLockCannotBeOpened(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(file, []byte("occupied"), 0o600); err != nil {

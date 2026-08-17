@@ -72,6 +72,31 @@ func hexID(b byte) string {
 	return strings.Repeat(string(b), idHexLen)
 }
 
+// derivedID returns the id the salt under p derives for root.
+//
+// A hand-written table has to carry real ids to test anything but the refusal: the
+// table is verified against the salt, so an entry whose id is not the one its root
+// derives stops resolving. A test about longest-prefix matching or case folding
+// would otherwise be asserting that a refused entry does not resolve, which it does
+// not test and which another test covers. Calling this also creates the salt, so the
+// ids and the later OpenRepos agree.
+func derivedID(t *testing.T, p Paths, root string) string {
+	t.Helper()
+	return openRepos(t, p).hashRoot(root)
+}
+
+// derivedMAC returns the match digest the salt under p derives for entry.
+//
+// A hand-written table needs it for the same reason it needs derivedID: the digest
+// is verified against the salt, so an entry carrying the wrong one — or none — stops
+// resolving, and a test about longest-prefix matching or case folding would be
+// asserting that a refused entry does not resolve. The tests that want an entry only
+// a hand edit could produce leave it out on purpose.
+func derivedMAC(t *testing.T, p Paths, entry projectEntry) string {
+	t.Helper()
+	return openRepos(t, p).matchMAC(entry)
+}
+
 // Acceptance item 11, second half, and ADR-0019 §8: 128 bits as 32 lowercase hex
 // characters. T003 validates the same shape downstream, so two spellings of one
 // id would be two ids there.
@@ -149,12 +174,12 @@ func TestSubdirectoryHashesIdenticallyToTheRoot(t *testing.T) {
 // roots one inside the other.
 func TestResolutionPicksTheLongestMatchingRoot(t *testing.T) {
 	p := testPaths(t)
-	outer, inner := hexID('a'), hexID('b')
+	outer, inner := derivedID(t, p, "/a"), derivedID(t, p, "/a/b")
 	writeProjectsJSON(t, p, `{
   "version": 1,
   "projects": [
-    {"id": "`+outer+`", "label": "outer", "root": "/a"},
-    {"id": "`+inner+`", "label": "inner", "root": "/a/b"}
+    {"id": "`+outer+`", "label": "outer", "root": "/a", "match_mac": "`+derivedMAC(t, p, projectEntry{Root: "/a"})+`"},
+    {"id": "`+inner+`", "label": "inner", "root": "/a/b", "match_mac": "`+derivedMAC(t, p, projectEntry{Root: "/a/b"})+`"}
   ]
 }
 `)
@@ -479,11 +504,12 @@ func TestCaseFoldingIsDrivenByTheRecordedFlagNotTheDisk(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			p := testPaths(t)
-			id := hexID('a')
+			id := derivedID(t, p, "/Repo/Path")
+			mac := derivedMAC(t, p, projectEntry{Root: "/Repo/Path", CaseInsensitive: c.caseInsensitive})
 			writeProjectsJSON(t, p, `{
   "version": 1,
   "projects": [
-    {"id": "`+id+`", "label": "repo", "root": "/Repo/Path", "case_insensitive": `+boolText(c.caseInsensitive)+`}
+    {"id": "`+id+`", "label": "repo", "root": "/Repo/Path", "case_insensitive": `+boolText(c.caseInsensitive)+`, "match_mac": "`+mac+`"}
   ]
 }
 `)
@@ -640,14 +666,40 @@ func TestRegisterKeepsAnEntryWrittenByAnotherRepos(t *testing.T) {
 // it, so a child registers one root and exits instead of running the suite.
 const envChildRoot = "WAKE_TEST_REGISTER_ROOT"
 
+// envChildConfigKey and envChildConfigValue carry the setting a child process
+// should write, for the config-side counterpart of the test below.
+const (
+	envChildConfigKey   = "WAKE_TEST_SET_CONFIG_KEY"
+	envChildConfigValue = "WAKE_TEST_SET_CONFIG_VALUE"
+)
+
 // TestMain gives this package a second entry point for the multi-process
 // registration test below. Cross-process exclusion cannot be observed from inside
 // one process, and this is the cheapest honest way to have two.
 func TestMain(m *testing.M) {
+	if key := os.Getenv(envChildConfigKey); key != "" {
+		os.Exit(setInChildProcess(key, os.Getenv(envChildConfigValue)))
+	}
 	if root := os.Getenv(envChildRoot); root != "" {
 		os.Exit(registerInChildProcess(root))
 	}
 	os.Exit(m.Run())
+}
+
+// setInChildProcess is the whole child for the config test: resolve the paths the
+// parent's HOME points at, write one setting, exit. The parent reports whatever
+// reaches stderr.
+func setInChildProcess(key, value string) int {
+	p, err := ResolvePaths()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "resolving paths: %v\n", err)
+		return 1
+	}
+	if _, err := Set(p, key, value); err != nil {
+		fmt.Fprintf(os.Stderr, "setting %s: %v\n", key, err)
+		return 1
+	}
+	return 0
 }
 
 // registerInChildProcess is the whole child: resolve the paths the parent's HOME
@@ -1002,7 +1054,7 @@ func TestDroppedEntriesIsReported(t *testing.T) {
 	writeProjectsJSON(t, p, `{
   "version": 1,
   "projects": [
-    {"id": "`+hexID('a')+`", "label": "good", "root": "/a"},
+    {"id": "`+derivedID(t, p, "/a")+`", "label": "good", "root": "/a", "match_mac": "`+derivedMAC(t, p, projectEntry{Root: "/a"})+`"},
     {"id": "nothex", "label": "bad", "root": "/b"},
     {"id": "`+hexID('c')+`", "label": "bad", "root": "relative"}
   ]
@@ -1206,5 +1258,63 @@ func TestConsentedRootAnswersWithTheRecordedRoot(t *testing.T) {
 	}
 	if _, err := repos.ConsentedRoot("relative/dir"); err == nil {
 		t.Error("ConsentedRoot() accepted a relative directory")
+	}
+}
+
+// The config file's own multi-process case, and the interleaving half of the
+// ticket's acceptance. Set republishes the whole file from a fresh decode, so two
+// processes writing two different keys is exactly the shape that loses one — and
+// the exclusion that prevents it is per-process by nature, so goroutines in one
+// address space prove nothing about it.
+func TestConcurrentConfigWritesInSeparateProcessesAllSurvive(t *testing.T) {
+	p := testPaths(t)
+
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locating the test binary: %v", err)
+	}
+
+	writes := [][2]string{
+		{"store.retention_raw", "90d"},
+		{"store.rollup_after", "7d"},
+		{"ui.default_window", "14d"},
+		{"session.idle_timeout", "45m"},
+	}
+	output := make([]string, len(writes))
+	failures := make([]error, len(writes))
+
+	var wg sync.WaitGroup
+	for i, write := range writes {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cmd := exec.Command(binary)
+			// HOME comes from testPaths, so the child writes the parent's config.
+			cmd.Env = append(os.Environ(), envChildConfigKey+"="+write[0], envChildConfigValue+"="+write[1])
+			out, runErr := cmd.CombinedOutput()
+			output[i], failures[i] = string(out), runErr
+		}()
+	}
+	wg.Wait()
+
+	for i, err := range failures {
+		if err != nil {
+			t.Fatalf("child %d exited %v: %s", i, err, output[i])
+		}
+	}
+
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load() = %v", err)
+	}
+	for _, write := range writes {
+		got, getErr := c.Get(write[0])
+		if getErr != nil {
+			t.Errorf("Get(%q) = %v", write[0], getErr)
+			continue
+		}
+		if got != write[1] {
+			t.Errorf("Get(%q) = %q, want %q — another process's write erased it", write[0], got, write[1])
+		}
 	}
 }

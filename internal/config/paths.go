@@ -40,11 +40,24 @@ const (
 	saltFileName       = "repo-salt"
 	projectsFileName   = "projects.json"
 	primitivesFileName = "primitives.json"
-	// projectsLockName is what a writer of projects.json holds while it reads,
-	// merges and republishes the table. It is a lock and nothing else: always
-	// empty, safe to delete, and it carries no path, label or id — so it is not
-	// part of Paths, which is the surface other packages see.
-	projectsLockName = "projects.lock"
+	healthFileName     = "health.json"
+	// The three lock names. Each is what a writer of one state file holds while it
+	// reads, merges and republishes that file, and they are three distinct files on
+	// purpose: a writer of the project table must never wait on a writer of
+	// config.toml, or a hook-triggered scan and a `wake init` in another repository
+	// would serialise against each other for no reason.
+	//
+	// None of them is a field of Paths. They are locks and nothing else: always
+	// empty, safe to delete, and carrying no path, label or id — whereas Paths is
+	// the surface other packages see and the list `init` discloses.
+	//
+	// claudeSettingsLockName guards ~/.claude/settings.json even though it lives
+	// here rather than beside that file. Wake can only serialise Wake's own writers
+	// either way, and dropping a lock file into the harness's own directory would
+	// add a file `init` would then have to disclose under ADR-0010.
+	projectsLockName       = "projects.lock"
+	configLockName         = "config.lock"
+	claudeSettingsLockName = "claude-settings.lock"
 )
 
 // Paths is where every file this tool owns lives. One resolver owns the layout so
@@ -73,6 +86,16 @@ type Paths struct {
 	// PrimitivesFile is the derived inventory of locally available primitives and
 	// their aggregate activity. It contains no paths or configuration content.
 	PrimitivesFile string
+	// HealthFile holds what the last scan and the last hook change managed to do,
+	// as counts and timestamps only — no path, no label, no line of any
+	// transcript. It is what makes "collects nothing" distinguishable from
+	// "collects zero" after a hook-invoked scan that is required to exit in
+	// silence (ADR-0010, ADR-0016).
+	//
+	// Under the data root, because it is derived and non-precious: deleting the
+	// data root has to stay safe (ADR-0014), and losing these counters costs one
+	// scan's worth of diagnostics and nothing else.
+	HealthFile string
 }
 
 // ResolvePaths resolves the layout from the home directory and EnvDataDir, and
@@ -108,5 +131,6 @@ func ResolvePaths() (Paths, error) {
 		SaltFile:       filepath.Join(configDir, saltFileName),
 		ProjectsFile:   filepath.Join(dataDir, projectsFileName),
 		PrimitivesFile: filepath.Join(dataDir, primitivesFileName),
+		HealthFile:     filepath.Join(dataDir, healthFileName),
 	}, nil
 }
