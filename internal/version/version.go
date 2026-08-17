@@ -1,9 +1,10 @@
 // Package version carries the build identity of the binary.
 //
-// Every value here is injected at link time via -ldflags (see Taskfile.yml).
-// The defaults are deliberately not real version numbers: a binary reporting
-// "dev" is one built outside the task pipeline, and that should be visible
-// rather than indistinguishable from a release.
+// Every value here is injected at link time via -ldflags: by the Makefile for a
+// local build, and by .goreleaser.yaml for an official release artefact. The
+// defaults are deliberately not real version numbers: a binary reporting "dev"
+// is one built outside either pipeline, and that should be visible rather than
+// indistinguishable from a release.
 package version
 
 var (
