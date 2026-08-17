@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"strings"
 	"time"
 )
 
@@ -20,9 +19,8 @@ import (
 const SchemaVersion uint = 1
 
 var (
-	identifierPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@+/-]{0,127}$`)
-	versionPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+:-]{0,127}$`)
-	hexPattern        = regexp.MustCompile(`^[a-f0-9]+$`)
+	versionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+:-]{0,127}$`)
+	hexPattern     = regexp.MustCompile(`^[a-f0-9]+$`)
 )
 
 // Identifier is a bounded, machine-readable name. It is not free text.
@@ -134,10 +132,10 @@ func Validate(r Record) error {
 	if r.Timestamp.IsZero() {
 		return errors.New("missing timestamp")
 	}
-	if !validIdentifier(r.Harness) || !validIdentifier(r.SessionID) || !validRepoHash(r.Repo) || !validKind(r.Kind) || !validIdentifier(r.Name) || !validInvoker(r.Invoker) {
+	if !ValidHarness(r.Harness) || !validToken(r.SessionID) || !validRepoHash(r.Repo) || !validKind(r.Kind) || !ValidName(r.Name) || !validInvoker(r.Invoker) {
 		return errors.New("invalid required record field")
 	}
-	if !validOptionalIdentifier(r.Package) || !validOptionalIdentifier(r.ViaSkill) || !validOptionalIdentifier(r.ViaAgent) || !validOptionalIdentifier(r.Model) || !validOptionalIdentifier(r.Effort) || !validOptionalVersion(r.HarnessVersion) || !validOptionalVersion(r.PackageVersion) {
+	if !validOptionalName(r.Package) || !validOptionalName(r.ViaSkill) || !validOptionalName(r.ViaAgent) || !validOptionalName(r.Model) || !validOptionalName(r.Effort) || !validOptionalVersion(r.HarnessVersion) || !validOptionalVersion(r.PackageVersion) {
 		return errors.New("invalid optional record field")
 	}
 	if r.Source != nil && !validSource(*r.Source) {
@@ -151,12 +149,6 @@ func Validate(r Record) error {
 	}
 	return nil
 }
-
-func validIdentifier(v Identifier) bool { return identifierPattern.MatchString(string(v)) }
-
-func validOptionalIdentifier(v Identifier) bool { return v == "" || validIdentifier(v) }
-
-func validOptionalVersion(v Version) bool { return v == "" || versionPattern.MatchString(string(v)) }
 
 func validSHA256(v Hash) bool { return len(v) == sha256.Size*2 && hexPattern.MatchString(string(v)) }
 
@@ -214,13 +206,3 @@ func IsTerminal(r Record) bool {
 
 // NormalizedTimestamp strips monotonic clock data before persistence.
 func NormalizedTimestamp(t time.Time) time.Time { return t.UTC().Round(0) }
-
-// BoundedIdentifier returns an Identifier only when it fits the record contract.
-func BoundedIdentifier(value string) (Identifier, error) {
-	value = strings.TrimSpace(value)
-	identifier := Identifier(value)
-	if !validIdentifier(identifier) {
-		return "", errors.New("invalid identifier")
-	}
-	return identifier, nil
-}
