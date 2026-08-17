@@ -140,7 +140,7 @@ type call struct {
 }
 
 func (entry transcriptEntry) call(block contentBlock, resolve Resolver) (call, bool) {
-	id, err := record.BoundedIdentifier(block.ID)
+	id, err := record.BoundedToken(block.ID)
 	if err != nil {
 		return call{}, false
 	}
@@ -148,7 +148,7 @@ func (entry transcriptEntry) call(block contentBlock, resolve Resolver) (call, b
 	if err != nil {
 		return call{}, false
 	}
-	sessionID, err := record.BoundedIdentifier(entry.SessionID)
+	sessionID, err := record.BoundedToken(entry.SessionID)
 	if err != nil {
 		return call{}, false
 	}
@@ -167,16 +167,16 @@ func (entry transcriptEntry) call(block contentBlock, resolve Resolver) (call, b
 		invoker:   record.InvokerModel,
 		repo:      repo,
 	}
-	if version, err := record.BoundedIdentifier(entry.Version); err == nil {
-		derived.version = record.Version(version)
+	if version, err := record.BoundedVersion(entry.Version); err == nil {
+		derived.version = version
 	}
 	if model, err := record.BoundedIdentifier(entry.Message.Model); err == nil {
 		derived.model = model
 	}
-	if skill, err := record.BoundedIdentifier(entry.AttributionSkill); err == nil {
+	if skill, err := record.DerivedName(entry.AttributionSkill); err == nil {
 		derived.viaSkill = skill
 	}
-	if agent, err := record.BoundedIdentifier(entry.AttributionAgent); err == nil {
+	if agent, err := record.DerivedName(entry.AttributionAgent); err == nil {
 		derived.viaAgent = agent
 	}
 	if packageName, ok := packageFromAttribution(entry.AttributionMCPServer); ok {
@@ -201,11 +201,11 @@ func (entry transcriptEntry) attributedRun(resolve Resolver) (record.Record, boo
 		kind = record.KindSubagent
 		invoker = record.InvokerModel
 	}
-	primitive, err := record.BoundedIdentifier(name)
+	primitive, err := record.DerivedName(name)
 	if err != nil {
 		return record.Record{}, false
 	}
-	sessionID, err := record.BoundedIdentifier(entry.SessionID)
+	sessionID, err := record.BoundedToken(entry.SessionID)
 	if err != nil {
 		return record.Record{}, false
 	}
@@ -225,8 +225,8 @@ func (entry transcriptEntry) attributedRun(resolve Resolver) (record.Record, boo
 		Name:          primitive,
 		Invoker:       invoker,
 	}
-	if version, err := record.BoundedIdentifier(entry.Version); err == nil {
-		event.HarnessVersion = record.Version(version)
+	if version, err := record.BoundedVersion(entry.Version); err == nil {
+		event.HarnessVersion = version
 	}
 	if model, err := record.BoundedIdentifier(entry.Message.Model); err == nil {
 		event.Model = model
@@ -236,7 +236,7 @@ func (entry transcriptEntry) attributedRun(resolve Resolver) (record.Record, boo
 
 func primitiveName(block contentBlock) (record.Identifier, error) {
 	if block.Name == "Skill" && block.Input.Skill != "" {
-		return record.BoundedIdentifier(block.Input.Skill)
+		return record.DerivedName(block.Input.Skill)
 	}
 	return record.BoundedIdentifier(block.Name)
 }
@@ -282,7 +282,7 @@ func packageFromAttribution(value string) (record.Identifier, bool) {
 	}
 	for index := len(prefix); index < len(value); index++ {
 		if value[index] == ':' {
-			packageName, err := record.BoundedIdentifier(value[len(prefix):index])
+			packageName, err := record.DerivedName(value[len(prefix):index])
 			return packageName, err == nil
 		}
 	}
