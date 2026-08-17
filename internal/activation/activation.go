@@ -30,17 +30,29 @@ const ingestLockName = "ingest.lock"
 // Init records consent, adds Wake's trigger without replacing existing hooks,
 // and imports available Claude Code history.
 //
-// executable is the path this process was started from, and resolving a hook
-// command out of it is Init's first act — before consent is recorded, before
-// config.toml is touched and before the settings file is opened. An installation
-// that cannot host a hook command therefore writes nothing at all, which is
-// stronger than rejecting it before modifying the settings: a consent record for a
-// repository whose trigger was never installed is a repository that silently
-// collects only what a manual `wake ingest` picks up.
+// Every refusal that can be decided from the arguments alone is raised first —
+// before consent is recorded, before config.toml is touched and before the settings
+// file is opened. An installation that cannot host Wake's trigger therefore writes
+// nothing at all, which is stronger than rejecting it before modifying the
+// settings: a consent record for a repository whose trigger was never installed is
+// a repository that silently collects only what a manual `wake ingest` picks up.
+//
+// Two things are pre-checkable, and both are checked here. executable is the path
+// this process was started from, and a hook command is resolved out of it.
+// claudeDir holds the settings file, and the shapes this build refuses to edit — a
+// non-regular file, a link resolving to nothing — are decided by one Lstat, so
+// leaving them to be raised from inside installHooks would raise them after
+// Register and AddToList had already written.
 func Init(paths config.Paths, root, claudeDir, executable string) (int, error) {
 	command, err := hookCommandFor(executable)
 	if err != nil {
 		return 0, err
+	}
+	// The resolved path is deliberately discarded rather than carried into
+	// installHooks: the file it publishes must be the one resolved under the
+	// settings lock, and a path resolved out here is a pre-check, not the decision.
+	if _, settingsErr := settingsFileFor(claudeDir); settingsErr != nil {
+		return 0, settingsErr
 	}
 	repos, err := config.OpenRepos(paths)
 	if err != nil {
