@@ -68,6 +68,12 @@ type Scan struct {
 	Skipped         int       `json:"skipped"`
 	EventsWritten   int       `json:"events_written"`
 	RefusedProjects int       `json:"refused_projects"`
+	// RefusedCalls counts primitive invocations a reader found but could not name:
+	// the invocation happened and no number carries it. It is separate from
+	// ParseErrors, which counts lines that were unusable, and from Skipped, which is
+	// an honest zero — this one is collection that was lost, and it is what a
+	// harness renaming the field a primitive's identity lives in looks like.
+	RefusedCalls int `json:"refused_calls"`
 }
 
 // Hooks is what the last `init` or `remove` managed to do. KeptOwned is the partial

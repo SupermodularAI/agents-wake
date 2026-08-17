@@ -41,6 +41,11 @@ func TestDoctorDistinguishesCollectsNothingFromCollectsZero(t *testing.T) {
 		// consented project — the numbers below are missing all of it. This is the
 		// state every install written before match_mac reaches on its first scan.
 		{"a project entry this build refuses", health.Scan{Transcripts: 1, Skipped: 1, RefusedProjects: 1}, "integration: collects nothing"},
+		// A call this build could not name is collection it lost: the primitive was
+		// invoked and the numbers do not carry it. This is the shape a Claude Code
+		// field rename takes, and calling it a complete count of zero is how
+		// `unused` would come to recommend removing a subagent the user runs daily.
+		{"a call whose primitive name this build refuses", health.Scan{Transcripts: 1, RefusedCalls: 1}, "integration: collects nothing"},
 		{"every source read and none held an event", health.Scan{Transcripts: 3, Skipped: 3}, "integration: collects zero"},
 		{"events written", health.Scan{EventsWritten: 4}, "integration: collecting"},
 	} {
@@ -63,6 +68,23 @@ func TestDoctorDistinguishesCollectsNothingFromCollectsZero(t *testing.T) {
 				t.Errorf("output is missing the scan timestamp:\n%s", out)
 			}
 		})
+	}
+}
+
+// The count itself, not only the state word: "how much did it lose" is the next
+// question after "is it collecting", and a counter nothing prints cannot answer it.
+func TestDoctorReportsRefusedCalls(t *testing.T) {
+	paths := isolate(t)
+	if err := health.New(paths.HealthFile).RecordScan(health.Scan{At: time.Now().UTC(), Transcripts: 1, RefusedCalls: 2}); err != nil {
+		t.Fatalf("RecordScan() error = %v", err)
+	}
+
+	out, _, err := runSplit(t, "doctor")
+	if err != nil {
+		t.Fatalf("doctor error = %v", err)
+	}
+	if !strings.Contains(out, "refused calls: 2") {
+		t.Errorf("output is missing the refused-call count:\n%s", out)
 	}
 }
 
