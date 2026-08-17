@@ -20,7 +20,8 @@ func newServeCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Serving dashboard at http://127.0.0.1:8080")
+		// Before the URL: what the dashboard will and will not contain is part of
+		// reading it, and a notice printed after the address reads as an afterthought.
 		scope, names, err := resolveDiscoveryScope(cmd, paths)
 		if err != nil {
 			return err
@@ -30,6 +31,7 @@ func newServeCmd() *cobra.Command {
 		if err := primitives.Refresh(events, inventory.ClaudeCodeInScope(scope, names)); err != nil {
 			return err
 		}
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Serving dashboard at http://127.0.0.1:8080")
 		return ui.ListenAndServe(8080, events, primitives)
 	}}
 	return cmd
