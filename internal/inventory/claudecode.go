@@ -24,24 +24,16 @@ type Primitive struct {
 	Name    record.Identifier
 }
 
-// ClaudeCode prefers primitives Claude Code listed in sessions for root, then
-// supplements them from configured directories because Claude Code does not
-// emit a listing for every primitive kind.
-//
-// Deprecated within this change: T107 Task 8 removes it once every caller passes a Scope.
-func ClaudeCode(home, root string) []Primitive {
-	return ClaudeCodeAt(filepath.Join(home, ".claude"), root)
-}
-
-// ClaudeCodeAt discovers the primitives configured under one Claude Code
-// directory, treating root as consented.
-//
-// Deprecated within this change: T107 Task 8 removes it once every caller passes a Scope.
-func ClaudeCodeAt(claudeDir, root string) []Primitive {
-	return ClaudeCodeInScope(Scope{ClaudeDir: claudeDir, Root: root, Project: ProjectConsented})
-}
-
 // ClaudeCodeInScope discovers the primitives one invocation is allowed to see.
+//
+// It is the only entry point: there is deliberately no overload taking a bare
+// root, so no code path can scan a project directory without first stating a
+// consent answer for it — the same "the type is the boundary" property ADR-0007
+// gives the record.
+//
+// It prefers primitives Claude Code listed in sessions for the consented root,
+// then supplements them from configured directories because Claude Code does not
+// emit a listing for every primitive kind.
 //
 // Global discovery and project-local discovery are separate calls, and the second
 // runs only for a consented working directory: a value read out of an
