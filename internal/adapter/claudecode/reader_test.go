@@ -83,18 +83,23 @@ func TestReadDerivesTerminalAttributedSkill(t *testing.T) {
 	}
 }
 
-func TestReadDerivesTerminalAttributedSubagent(t *testing.T) {
+// An attributed end_turn entry is not a second subagent invocation. The Task call
+// that entered the subagent is the invocation, and the parent transcript carries it
+// as a paired tool_use/tool_result with an outcome; counting the attributed entry
+// too would report one run as two.
+func TestReadDerivesNoSubagentRecordFromAttributionAlone(t *testing.T) {
 	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionAgent":"sdlc-check-architecture","message":{"model":"sonnet","stop_reason":"end_turn"}}`
 	result, err := Read(strings.NewReader(input), resolver, names)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
-	if len(result.Records) != 1 {
-		t.Fatalf("Read() records = %+v", result.Records)
+	if len(result.Records) != 0 {
+		t.Fatalf("Read() records = %+v, want none: the Task call is the invocation", result.Records)
 	}
-	event := result.Records[0]
-	if event.Kind != record.KindSubagent || event.Name != "sdlc-check-architecture" || event.Invoker != record.InvokerModel || event.Outcome != nil {
-		t.Fatalf("record = %+v", event)
+	// It is not a refusal either: the entry is readable and Wake deliberately
+	// collects nothing from it, which must not read as lost collection in doctor.
+	if result.Refused != 0 || result.Malformed != 0 {
+		t.Errorf("Read() = %+v, want no refusal and no malformed line", result)
 	}
 }
 
@@ -427,6 +432,39 @@ func TestReadCollapsesRepeatedSubagentInvocationsToOnePrimitive(t *testing.T) {
 	}
 	if got := usage["code-reviewer"]; got.Invocations != 1 || got.Kind != record.KindSubagent {
 		t.Errorf("code-reviewer usage = %+v, want 1 invocation of a subagent", got)
+	}
+}
+
+// One subagent run is one invocation, even though Claude Code's own storage
+// describes it twice: the parent's Task tool_use/tool_result pair, and the
+// attributed end_turn entry the subagent's own turn leaves behind. Both describe
+// the same logical event, so only one of them may become a record — the store's
+// collapse guarantee, and ADR-0002's invocation grain ("one call to a primitive").
+func TestReadCountsOneSubagentRunAsOneInvocation(t *testing.T) {
+	input := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-1","name":"Task","input":{"subagent_type":"explorer"}}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","attributionAgent":"explorer","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
+		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+	}, "\n")
+
+	result, err := Read(strings.NewReader(input), resolver, names)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 1 {
+		t.Fatalf("Read() records = %+v, want exactly one for one subagent run", result.Records)
+	}
+	// The surviving record is the paired one: it is the only source of the two that
+	// carries an outcome at all (ADR-0005), and the only one bounded by a start and
+	// an end rather than by a stop reason (ADR-0015).
+	event := result.Records[0]
+	if event.Kind != record.KindSubagent || event.Name != "explorer" || event.Outcome == nil || *event.Outcome != record.OutcomeOK {
+		t.Fatalf("record = %+v, want the terminated explorer call with its outcome", event)
+	}
+
+	summary := metrics.Aggregate(result.Records)
+	if len(summary.Primitives) != 1 || summary.Primitives[0].Invocations != 1 {
+		t.Errorf("Aggregate() primitives = %+v, want explorer with one invocation", summary.Primitives)
 	}
 }
 

@@ -250,23 +250,29 @@ func (entry transcriptEntry) call(block contentBlock, resolve Resolver, names re
 	return derived, callAccepted
 }
 
-// attributedRun records the terminal completion of a skill or subagent. Claude
-// Code puts those identities on every transcript entry, including entries in
-// subagent files; the final end_turn entry is the safe completion boundary.
+// attributedRun records the terminal completion of an attributed skill run.
+// Claude Code puts that identity on every entry of the turn it belongs to, and the
+// final end_turn entry is the safe completion boundary.
+//
+// It deliberately derives nothing from attributionAgent, which Claude Code stamps
+// on a subagent's entries the same way. A subagent is entered through the Task
+// tool, so the parent's tool_use/tool_result pair already describes that same run —
+// and describes it better: bounded by a start and an end rather than inferred from
+// a stop reason (ADR-0015), and carrying an outcome, which an end_turn entry never
+// does (ADR-0005). Deriving a record from both would make one run two invocations
+// of one primitive: same name, same kind, same invoker, so they merge on one
+// aggregation key. That is what the store's collapse guarantee ("two sources
+// producing the same logical event collapse to one record") and ADR-0002's
+// invocation grain forbid, and the event ids are legitimately distinct (ADR-0004),
+// so the collapse has to happen here rather than at write time. plan §5.1 names
+// the Task call as the subagent primitive's source; attributionAgent's own role is
+// via_agent attribution on the calls a subagent makes (see call).
 func (entry transcriptEntry) attributedRun(resolve Resolver, names record.Namer) (record.Record, bool) {
-	if entry.Message.StopReason != "end_turn" {
+	if entry.Message.StopReason != "end_turn" || entry.AttributionSkill == "" {
 		return record.Record{}, false
 	}
 
-	name := entry.AttributionSkill
-	kind := record.KindSkill
-	invoker := record.InvokerUser
-	if name == "" {
-		name = entry.AttributionAgent
-		kind = record.KindSubagent
-		invoker = record.InvokerModel
-	}
-	primitive, err := names.DerivedName(name)
+	primitive, err := names.DerivedName(entry.AttributionSkill)
 	if err != nil {
 		return record.Record{}, false
 	}
@@ -286,9 +292,9 @@ func (entry transcriptEntry) attributedRun(resolve Resolver, names record.Namer)
 		Harness:       harness,
 		SessionID:     sessionID,
 		Repo:          repo,
-		Kind:          kind,
+		Kind:          record.KindSkill,
 		Name:          primitive,
-		Invoker:       invoker,
+		Invoker:       record.InvokerUser,
 	}
 	if version, err := record.BoundedVersion(entry.Version); err == nil {
 		event.HarnessVersion = version
