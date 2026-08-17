@@ -640,14 +640,40 @@ func TestRegisterKeepsAnEntryWrittenByAnotherRepos(t *testing.T) {
 // it, so a child registers one root and exits instead of running the suite.
 const envChildRoot = "WAKE_TEST_REGISTER_ROOT"
 
+// envChildConfigKey and envChildConfigValue carry the setting a child process
+// should write, for the config-side counterpart of the test below.
+const (
+	envChildConfigKey   = "WAKE_TEST_SET_CONFIG_KEY"
+	envChildConfigValue = "WAKE_TEST_SET_CONFIG_VALUE"
+)
+
 // TestMain gives this package a second entry point for the multi-process
 // registration test below. Cross-process exclusion cannot be observed from inside
 // one process, and this is the cheapest honest way to have two.
 func TestMain(m *testing.M) {
+	if key := os.Getenv(envChildConfigKey); key != "" {
+		os.Exit(setInChildProcess(key, os.Getenv(envChildConfigValue)))
+	}
 	if root := os.Getenv(envChildRoot); root != "" {
 		os.Exit(registerInChildProcess(root))
 	}
 	os.Exit(m.Run())
+}
+
+// setInChildProcess is the whole child for the config test: resolve the paths the
+// parent's HOME points at, write one setting, exit. The parent reports whatever
+// reaches stderr.
+func setInChildProcess(key, value string) int {
+	p, err := ResolvePaths()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "resolving paths: %v\n", err)
+		return 1
+	}
+	if _, err := Set(p, key, value); err != nil {
+		fmt.Fprintf(os.Stderr, "setting %s: %v\n", key, err)
+		return 1
+	}
+	return 0
 }
 
 // registerInChildProcess is the whole child: resolve the paths the parent's HOME
@@ -1206,5 +1232,63 @@ func TestConsentedRootAnswersWithTheRecordedRoot(t *testing.T) {
 	}
 	if _, err := repos.ConsentedRoot("relative/dir"); err == nil {
 		t.Error("ConsentedRoot() accepted a relative directory")
+	}
+}
+
+// The config file's own multi-process case, and the interleaving half of the
+// ticket's acceptance. Set republishes the whole file from a fresh decode, so two
+// processes writing two different keys is exactly the shape that loses one — and
+// the exclusion that prevents it is per-process by nature, so goroutines in one
+// address space prove nothing about it.
+func TestConcurrentConfigWritesInSeparateProcessesAllSurvive(t *testing.T) {
+	p := testPaths(t)
+
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locating the test binary: %v", err)
+	}
+
+	writes := [][2]string{
+		{"store.retention_raw", "90d"},
+		{"store.rollup_after", "7d"},
+		{"ui.default_window", "14d"},
+		{"session.idle_timeout", "45m"},
+	}
+	output := make([]string, len(writes))
+	failures := make([]error, len(writes))
+
+	var wg sync.WaitGroup
+	for i, write := range writes {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cmd := exec.Command(binary)
+			// HOME comes from testPaths, so the child writes the parent's config.
+			cmd.Env = append(os.Environ(), envChildConfigKey+"="+write[0], envChildConfigValue+"="+write[1])
+			out, runErr := cmd.CombinedOutput()
+			output[i], failures[i] = string(out), runErr
+		}()
+	}
+	wg.Wait()
+
+	for i, err := range failures {
+		if err != nil {
+			t.Fatalf("child %d exited %v: %s", i, err, output[i])
+		}
+	}
+
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load() = %v", err)
+	}
+	for _, write := range writes {
+		got, getErr := c.Get(write[0])
+		if getErr != nil {
+			t.Errorf("Get(%q) = %v", write[0], getErr)
+			continue
+		}
+		if got != write[1] {
+			t.Errorf("Get(%q) = %q, want %q — another process's write erased it", write[0], got, write[1])
+		}
 	}
 }
