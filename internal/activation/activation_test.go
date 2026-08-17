@@ -327,6 +327,7 @@ func testPaths(t *testing.T) config.Paths {
 	paths.SaltFile = filepath.Join(paths.ConfigDir, "salt.bin")
 	paths.ProjectsFile = filepath.Join(paths.DataDir, "projects.bin")
 	paths.PrimitivesFile = filepath.Join(paths.DataDir, "primitives.json")
+	paths.HealthFile = filepath.Join(paths.DataDir, "health.json")
 	return paths
 }
 
