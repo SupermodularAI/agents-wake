@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/SupermodularAI/agents-wake/internal/atomicfile"
 )
 
 // projectsVersion is the format version stamped on every write. A future format
@@ -177,16 +179,18 @@ func parseFailure(err error) string {
 	return "invalid JSON"
 }
 
-// writeProjects replaces the table atomically.
+// writeProjects replaces the table atomically and durably.
 //
 // Atomically because the table is what every identity resolves against: a
 // half-written file is not a table with fewer repositories in it, it is a table
-// that fails to parse, and the next scan would stop rather than guess. Writing a
-// temporary file in the same directory and renaming it means a reader sees either
-// the old table or the new one.
+// that fails to parse, and the next scan would stop rather than guess. A reader
+// therefore sees either the old table or the new one, never a partial one — and
+// a write reported as successful is one a power loss cannot undo.
 //
-// The temporary file is removed on every failure path. A leftover projects-*.json
-// is a file full of real paths that nothing would ever clean up.
+// Both properties come from atomicfile, including the removal of the in-progress
+// temporary file on every failure path: a leftover .publish-* next to this file
+// is a full copy of a table of real repository paths that nothing would ever
+// clean up.
 func writeProjects(path string, table projectsFile) error {
 	table.Version = projectsVersion
 
@@ -196,31 +200,5 @@ func writeProjects(path string, table projectsFile) error {
 	}
 	data = append(data, '\n')
 
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, dataDirMode); err != nil {
-		return fmt.Errorf("creating %s: %w", dir, err)
-	}
-
-	f, err := os.CreateTemp(dir, "projects-*.json")
-	if err != nil {
-		return fmt.Errorf("creating a temporary file in %s: %w", dir, err)
-	}
-	tmp := f.Name()
-
-	if _, err := f.Write(data); err != nil {
-		return errors.Join(fmt.Errorf("writing %s: %w", tmp, err), f.Close(), os.Remove(tmp))
-	}
-	// CreateTemp already opens at 0600; setting it explicitly keeps the mode a
-	// stated property of this function rather than a property of the standard
-	// library's default.
-	if err := f.Chmod(projectsFileMode); err != nil {
-		return errors.Join(fmt.Errorf("setting the mode of %s: %w", tmp, err), f.Close(), os.Remove(tmp))
-	}
-	if err := f.Close(); err != nil {
-		return errors.Join(fmt.Errorf("closing %s: %w", tmp, err), os.Remove(tmp))
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return errors.Join(fmt.Errorf("replacing %s: %w", path, err), os.Remove(tmp))
-	}
-	return nil
+	return atomicfile.Publish(path, data, projectsFileMode)
 }
