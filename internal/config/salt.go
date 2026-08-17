@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+
+	"github.com/SupermodularAI/agents-wake/internal/atomicfile"
 )
 
 // saltLen is the salt's length in bytes (ADR-0019 §3). 32 bytes is HMAC-SHA256's
@@ -82,6 +84,13 @@ func loadOrCreateSalt(p Paths) ([]byte, error) {
 	if err := f.Chmod(saltFileMode); err != nil {
 		return nil, errors.Join(fmt.Errorf("setting the mode of %s: %w", tmp, err), f.Close(), os.Remove(tmp))
 	}
+	// Before the link, not after: the salt is never regenerated, so a salt file
+	// whose directory entry survived a power loss while its bytes did not is a
+	// file this build will refuse for the rest of the machine's life — and every
+	// id already derived from the real salt becomes unreachable.
+	if err := f.Sync(); err != nil {
+		return nil, errors.Join(fmt.Errorf("syncing %s: %w", tmp, err), f.Close(), os.Remove(tmp))
+	}
 	if err := f.Close(); err != nil {
 		return nil, errors.Join(fmt.Errorf("closing %s: %w", tmp, err), os.Remove(tmp))
 	}
@@ -106,6 +115,14 @@ func loadOrCreateSalt(p Paths) ([]byte, error) {
 		return nil, errors.Join(fmt.Errorf("creating %s: %w", p.SaltFile, linkErr), removeErr)
 	case removeErr != nil:
 		return nil, fmt.Errorf("removing %s: %w", tmp, removeErr)
+	}
+	// The link created a directory entry, and that entry has to be durable for the
+	// same reason the bytes do: a salt that came back after a crash under a
+	// different name than the one the ids were derived with is not recoverable. A
+	// failure here joins the answer rather than being ignored — the caller has to
+	// know the salt it is about to hash with may not be there next boot.
+	if err := atomicfile.SyncDir(p.ConfigDir); err != nil {
+		return nil, fmt.Errorf("syncing %s: %w", p.ConfigDir, err)
 	}
 	return fresh, nil
 }
