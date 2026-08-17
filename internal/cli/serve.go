@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
@@ -22,17 +21,13 @@ func newServeCmd() *cobra.Command {
 			return err
 		}
 		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Serving dashboard at http://127.0.0.1:8080")
-		root, err := os.Getwd()
-		if err != nil {
-			return err
-		}
-		home, err := os.UserHomeDir()
+		scope, err := resolveDiscoveryScope(cmd, paths)
 		if err != nil {
 			return err
 		}
 		events := store.New(filepath.Join(paths.DataDir, "events.ndjson"))
 		primitives := inventory.New(paths.PrimitivesFile)
-		if err := primitives.Refresh(events, inventory.ClaudeCode(home, root)); err != nil {
+		if err := primitives.Refresh(events, inventory.ClaudeCodeInScope(scope)); err != nil {
 			return err
 		}
 		return ui.ListenAndServe(8080, events, primitives)

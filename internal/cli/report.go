@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"os"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
@@ -26,17 +25,13 @@ func newReportCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return err
-			}
-			root, err := os.Getwd()
+			scope, err := resolveDiscoveryScope(cmd, paths)
 			if err != nil {
 				return err
 			}
 			events := store.New(filepath.Join(paths.DataDir, "events.ndjson"))
 			primitives := inventory.New(paths.PrimitivesFile)
-			if err := primitives.Refresh(events, inventory.ClaudeCode(home, root)); err != nil {
+			if err := primitives.Refresh(events, inventory.ClaudeCodeInScope(scope)); err != nil {
 				return err
 			}
 			return report.Print(cmd.OutOrStdout(), events, primitives, report.Options{Usage: usage, Unused: unused})
