@@ -161,6 +161,42 @@ func TestReadSkipsMalformedLine(t *testing.T) {
 	}
 }
 
+func TestReadCountsAnOversizedLineWithoutRetainingIt(t *testing.T) {
+	oversized := `{"uuid":"entry-x","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-x","name":"Bash"}]},"pad":"swordfish` + strings.Repeat("A", 1024*1024) + `"}`
+	input := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+		oversized,
+		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","message":{"content":[{"type":"tool_use","id":"call-2","name":"Task"}]}}`,
+		`{"uuid":"entry-4","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:03Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}`,
+	}, "\n")
+
+	result, err := Read(strings.NewReader(input), resolver, names)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 2 {
+		t.Fatalf("Read() records = %d, want a record on each side of the oversized line: %+v", len(result.Records), result)
+	}
+	if result.Malformed != 1 {
+		t.Errorf("Malformed = %d, want 1", result.Malformed)
+	}
+	if result.Pending != 0 {
+		t.Errorf("Pending = %d, want 0", result.Pending)
+	}
+	for _, event := range result.Records {
+		encoded, marshalErr := record.Marshal(event)
+		if marshalErr != nil {
+			t.Fatalf("Marshal() error = %v", marshalErr)
+		}
+		for _, fragment := range []string{"swordfish", "entry-x"} {
+			if strings.Contains(string(encoded), fragment) {
+				t.Fatalf("record retains %q from the oversized line: %s", fragment, encoded)
+			}
+		}
+	}
+}
+
 func TestReadNeverUsesToolArguments(t *testing.T) {
 	input := strings.Join([]string{
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Skill","input":{"args":"do not retain this secret"}}]}}`,

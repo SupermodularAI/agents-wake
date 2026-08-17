@@ -4,16 +4,22 @@
 package claudecode
 
 import (
-	"bufio"
 	"encoding/json"
 	"errors"
 	"io"
 	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/jsonl"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 )
 
 const harness = record.Identifier("claude-code")
+
+// maxLineBytes is the largest transcript line this reader accepts. It stays an
+// internal constant, not a config key: ADR-0014 keeps the config surface
+// deliberately small, and a limit a user can raise is a limit that stops bounding
+// anything.
+const maxLineBytes = 1024 * 1024
 
 // Result contains safe derived records plus collection health counters.
 type Result struct {
@@ -41,18 +47,15 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer) (Result, error
 
 	result := Result{}
 	pending := map[string]call{}
-	scanner := bufio.NewScanner(reader)
-	buffer := make([]byte, 0, 64*1024)
-	scanner.Buffer(buffer, 1024*1024)
-	for scanner.Scan() {
+	skipped, err := jsonl.Lines(reader, maxLineBytes, func(line []byte) {
 		var entry transcriptEntry
-		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+		if unmarshalErr := json.Unmarshal(line, &entry); unmarshalErr != nil {
 			result.Malformed++
-			continue
+			return
 		}
 		if !entry.valid() {
 			result.Malformed++
-			continue
+			return
 		}
 		if event, ok := entry.attributedRun(resolve, names); ok {
 			result.Records = append(result.Records, event)
@@ -75,10 +78,14 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer) (Result, error
 				}
 			}
 		}
-	}
-	if err := scanner.Err(); err != nil {
+	})
+	if err != nil {
 		return Result{}, errors.New("reading Claude Code history")
 	}
+	// A line too long to deliver is unusable in the same way a line that does not
+	// parse is: counted as malformed so doctor can report blindness, and nothing is
+	// synthesised from it — no call is opened, so no result can terminate one.
+	result.Malformed += skipped
 	result.Pending = len(pending)
 	return result, nil
 }
