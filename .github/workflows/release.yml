@@ -50,12 +50,22 @@ jobs:
 
       # Provenance over the published artefacts, not over the source: what a user
       # downloads is what `gh attestation verify` has to be able to check.
+      #
+      # The binaries are subjects too, not just the archives that carry them:
+      # `gh attestation verify` resolves an attestation by the sha256 digest of
+      # the file it is handed, and the README documents verifying the *installed*
+      # binary. `dist/**/wake` is what matches GoReleaser's per-build directory
+      # (`dist/wake_linux_amd64_v1/wake`). Four subjects share the name `wake`
+      # with different digests, which the action allows — it deduplicates on name
+      # and digest together. internal/platform/attestation_test.go keeps this list
+      # and the README's command from drifting apart.
       - name: attest provenance
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
           subject-path: |
             dist/*.tar.gz
             dist/checksums.txt
+            dist/**/wake
 
       - name: confirm the artefact reports tag, commit and date
         run: |
