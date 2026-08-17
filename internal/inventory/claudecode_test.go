@@ -8,10 +8,14 @@ import (
 	"github.com/SupermodularAI/agents-wake/internal/record"
 )
 
+// names keys the scope digest for this package's tests, standing in for the
+// subkey config.Repos.NameKey derives in production.
+var names = record.NewNamer([]byte("test scope key"))
+
 func TestClaudeCodeInScopeDiscoversProjectPrimitivesWhenConsented(t *testing.T) {
 	claudeDir, root := discoveryFixture(t)
 
-	got := ClaudeCodeInScope(Scope{ClaudeDir: claudeDir, Root: root, Project: ProjectConsented})
+	got := ClaudeCodeInScope(Scope{ClaudeDir: claudeDir, Root: root, Project: ProjectConsented}, names)
 	want := map[primitiveKey]bool{
 		{kind: record.KindSkill, name: "global-skill"}:        true,
 		{kind: record.KindSkill, name: "global"}:              true,
@@ -32,7 +36,7 @@ func TestClaudeCodeInScopeDiscoversProjectPrimitivesWhenConsented(t *testing.T) 
 func TestClaudeCodeInScopeWithholdsProjectPrimitivesWhenUnconsented(t *testing.T) {
 	claudeDir, _ := discoveryFixture(t)
 
-	got := ClaudeCodeInScope(Scope{ClaudeDir: claudeDir, Project: ProjectUnconsented})
+	got := ClaudeCodeInScope(Scope{ClaudeDir: claudeDir, Project: ProjectUnconsented}, names)
 	assertOnlyGlobalDiscovery(t, got)
 }
 
@@ -40,7 +44,7 @@ func TestClaudeCodeInScopeIgnoresARootItWasNotConsentedFor(t *testing.T) {
 	claudeDir, root := discoveryFixture(t)
 
 	for _, project := range []ProjectScope{ProjectUnconsented, ProjectUnresolved} {
-		got := ClaudeCodeInScope(Scope{ClaudeDir: claudeDir, Root: root, Project: project})
+		got := ClaudeCodeInScope(Scope{ClaudeDir: claudeDir, Root: root, Project: project}, names)
 		assertOnlyGlobalDiscovery(t, got)
 	}
 }
@@ -50,7 +54,7 @@ func TestClaudeCodeInScopeSkipsInvalidPrimitiveNames(t *testing.T) {
 	root := t.TempDir()
 	write(t, filepath.Join(claudeDir, "projects", "session.jsonl"), `{"cwd":"`+root+`","attachment":{"type":"skill_listing","content":"- contains space: description\n- ../escape: description\n- /etc/passwd: description"}}`)
 
-	if got := ClaudeCodeInScope(Scope{ClaudeDir: claudeDir, Root: root, Project: ProjectConsented}); len(got) != 0 {
+	if got := ClaudeCodeInScope(Scope{ClaudeDir: claudeDir, Root: root, Project: ProjectConsented}, names); len(got) != 0 {
 		t.Fatalf("ClaudeCodeInScope() = %+v", got)
 	}
 }

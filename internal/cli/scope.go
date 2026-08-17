@@ -10,6 +10,7 @@ import (
 	"github.com/SupermodularAI/agents-wake/internal/activation"
 	"github.com/SupermodularAI/agents-wake/internal/config"
 	"github.com/SupermodularAI/agents-wake/internal/inventory"
+	"github.com/SupermodularAI/agents-wake/internal/record"
 )
 
 // resolveDiscoveryScope resolves the consent boundary for primitive discovery and
@@ -22,16 +23,16 @@ import (
 // The notice is a state word and a next step. It names no path and no repository
 // label (plan §3.4, ADR-0019 §7), and it goes to stderr so a non-TTY stdout stays
 // the deterministic text plan §7.3 promises.
-func resolveDiscoveryScope(cmd *cobra.Command, paths config.Paths) (inventory.Scope, error) {
+func resolveDiscoveryScope(cmd *cobra.Command, paths config.Paths) (inventory.Scope, record.Namer, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return inventory.Scope{}, err
+		return inventory.Scope{}, record.Namer{}, err
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
-		return inventory.Scope{}, err
+		return inventory.Scope{}, record.Namer{}, err
 	}
-	scope := activation.DiscoveryScope(paths, filepath.Join(home, ".claude"), cwd)
+	scope, names := activation.DiscoveryScope(paths, filepath.Join(home, ".claude"), cwd)
 	switch scope.Project {
 	case inventory.ProjectUnconsented:
 		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Project-local primitives were not collected: this directory is not a consented repository. Run 'wake init' here to include it.")
@@ -39,5 +40,5 @@ func resolveDiscoveryScope(cmd *cobra.Command, paths config.Paths) (inventory.Sc
 		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Project-local primitives were not collected: the consented-repository table could not be read.")
 	case inventory.ProjectConsented:
 	}
-	return scope, nil
+	return scope, names, nil
 }

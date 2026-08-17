@@ -40,10 +40,13 @@ type Primitive struct {
 // unconsented project must never reach the persisted inventory (ADR-0010,
 // ADR-0019 §2). Unreadable or malformed sources contribute nothing, so a
 // configuration problem cannot break the dashboard.
-func ClaudeCodeInScope(scope Scope) []Primitive {
+//
+// names keys the digest that stands in for a directory-scoped primitive's scope,
+// which a session listing states as a path prefix (ADR-0020).
+func ClaudeCodeInScope(scope Scope, names record.Namer) []Primitive {
 	items := map[primitiveKey]Primitive{}
 	add := func(kind record.Kind, name string) {
-		identifier, err := record.DerivedName(name)
+		identifier, err := names.DerivedName(name)
 		if err != nil {
 			return
 		}

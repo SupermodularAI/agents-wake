@@ -25,13 +25,13 @@ func newReportCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			scope, err := resolveDiscoveryScope(cmd, paths)
+			scope, names, err := resolveDiscoveryScope(cmd, paths)
 			if err != nil {
 				return err
 			}
 			events := store.New(filepath.Join(paths.DataDir, "events.ndjson"))
 			primitives := inventory.New(paths.PrimitivesFile)
-			if err := primitives.Refresh(events, inventory.ClaudeCodeInScope(scope)); err != nil {
+			if err := primitives.Refresh(events, inventory.ClaudeCodeInScope(scope, names)); err != nil {
 				return err
 			}
 			return report.Print(cmd.OutOrStdout(), events, primitives, report.Options{Usage: usage, Unused: unused})

@@ -151,7 +151,7 @@ func TestDiscoveryScopeWithholdsProjectDiscoveryOutsideAConsentedRepository(t *t
 	claudeDir := filepath.Join(t.TempDir(), "claude")
 	root := t.TempDir()
 
-	got := DiscoveryScope(paths, claudeDir, root)
+	got, _ := DiscoveryScope(paths, claudeDir, root)
 	want := inventory.Scope{ClaudeDir: claudeDir, Project: inventory.ProjectUnconsented}
 	if got != want {
 		t.Fatalf("DiscoveryScope() = %+v, want %+v", got, want)
@@ -170,7 +170,7 @@ func TestDiscoveryScopeGrantsProjectDiscoveryInsideAConsentedRepository(t *testi
 		t.Fatalf("Register() error = %v", err)
 	}
 
-	got := DiscoveryScope(paths, claudeDir, root)
+	got, _ := DiscoveryScope(paths, claudeDir, root)
 	want := inventory.Scope{ClaudeDir: claudeDir, Root: root, Project: inventory.ProjectConsented}
 	if got != want {
 		t.Fatalf("DiscoveryScope() = %+v, want %+v", got, want)
@@ -187,7 +187,7 @@ func TestDiscoveryScopeFailsClosedWhenConsentCannotBeResolved(t *testing.T) {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
-	got := DiscoveryScope(paths, claudeDir, t.TempDir())
+	got, _ := DiscoveryScope(paths, claudeDir, t.TempDir())
 	want := inventory.Scope{ClaudeDir: claudeDir, Project: inventory.ProjectUnresolved}
 	if got != want {
 		t.Fatalf("DiscoveryScope() = %+v, want %+v", got, want)
@@ -198,7 +198,7 @@ func TestDiscoveryScopeWithholdsProjectDiscoveryForARelativeDirectory(t *testing
 	paths := testPaths(t)
 	claudeDir := filepath.Join(t.TempDir(), "claude")
 
-	got := DiscoveryScope(paths, claudeDir, "relative/dir")
+	got, _ := DiscoveryScope(paths, claudeDir, "relative/dir")
 	want := inventory.Scope{ClaudeDir: claudeDir, Project: inventory.ProjectUnresolved}
 	if got != want {
 		t.Fatalf("DiscoveryScope() = %+v, want %+v", got, want)

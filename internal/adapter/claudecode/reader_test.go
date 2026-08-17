@@ -25,7 +25,7 @@ func TestReadDerivesOnlyTerminalRecords(t *testing.T) {
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver)
+	result, err := Read(strings.NewReader(input), resolver, names)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -40,7 +40,7 @@ func TestReadDerivesOnlyTerminalRecords(t *testing.T) {
 
 func TestReadDoesNotEmitUnterminatedCall(t *testing.T) {
 	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Skill"}]}}`
-	result, err := Read(strings.NewReader(input), resolver)
+	result, err := Read(strings.NewReader(input), resolver, names)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -54,7 +54,7 @@ func TestReadUsesSkillNameInsteadOfToolName(t *testing.T) {
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Skill","input":{"skill":"pr-review","args":"never retain this prose"}}]}}`,
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
-	result, err := Read(strings.NewReader(input), resolver)
+	result, err := Read(strings.NewReader(input), resolver, names)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -65,7 +65,7 @@ func TestReadUsesSkillNameInsteadOfToolName(t *testing.T) {
 
 func TestReadDerivesTerminalAttributedSkill(t *testing.T) {
 	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"run-sdlc","message":{"model":"sonnet","stop_reason":"end_turn"}}`
-	result, err := Read(strings.NewReader(input), resolver)
+	result, err := Read(strings.NewReader(input), resolver, names)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -80,7 +80,7 @@ func TestReadDerivesTerminalAttributedSkill(t *testing.T) {
 
 func TestReadDerivesTerminalAttributedSubagent(t *testing.T) {
 	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionAgent":"sdlc-check-architecture","message":{"model":"sonnet","stop_reason":"end_turn"}}`
-	result, err := Read(strings.NewReader(input), resolver)
+	result, err := Read(strings.NewReader(input), resolver, names)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -98,7 +98,7 @@ func TestReadRecordsAttributingAgentForPrimitiveCalls(t *testing.T) {
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionAgent":"sdlc-implement","message":{"content":[{"type":"tool_use","id":"call-1","name":"Skill","input":{"skill":"commit-message"}}]}}`,
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
-	result, err := Read(strings.NewReader(input), resolver)
+	result, err := Read(strings.NewReader(input), resolver, names)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -109,7 +109,7 @@ func TestReadRecordsAttributingAgentForPrimitiveCalls(t *testing.T) {
 
 func TestReadDoesNotEmitUnfinishedAttributedRun(t *testing.T) {
 	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionAgent":"sdlc-check-architecture","message":{"model":"sonnet","stop_reason":"tool_use"}}`
-	result, err := Read(strings.NewReader(input), resolver)
+	result, err := Read(strings.NewReader(input), resolver, names)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -123,7 +123,7 @@ func TestReadSkipsUnconsentedRepository(t *testing.T) {
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/outside","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/outside","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
-	result, err := Read(strings.NewReader(input), func(string) (record.Hash, bool) { return "", false })
+	result, err := Read(strings.NewReader(input), func(string) (record.Hash, bool) { return "", false }, names)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -137,7 +137,7 @@ func TestReadKeepsUnknownOutcomeNull(t *testing.T) {
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1"}]}}`,
 	}, "\n")
-	result, err := Read(strings.NewReader(input), resolver)
+	result, err := Read(strings.NewReader(input), resolver, names)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -152,7 +152,7 @@ func TestReadSkipsMalformedLine(t *testing.T) {
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Task"}]}}`,
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":true}]}}`,
 	}, "\n")
-	result, err := Read(strings.NewReader(input), resolver)
+	result, err := Read(strings.NewReader(input), resolver, names)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -166,7 +166,7 @@ func TestReadNeverUsesToolArguments(t *testing.T) {
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Skill","input":{"args":"do not retain this secret"}}]}}`,
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
-	result, err := Read(strings.NewReader(input), resolver)
+	result, err := Read(strings.NewReader(input), resolver, names)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -182,6 +182,10 @@ func TestReadNeverUsesToolArguments(t *testing.T) {
 func resolver(cwd string) (record.Hash, bool) {
 	return repo, cwd == "/repo"
 }
+
+// names keys the scope digest for this package's tests. Production keys it with a
+// subkey of the per-machine salt (config.Repos.NameKey).
+var names = record.NewNamer([]byte("test scope key"))
 
 // quoted encodes value as a JSON string so a hostile value can be embedded in a
 // transcript line without hand-escaping it.
@@ -205,7 +209,7 @@ func skillCallTranscript(t *testing.T, skill string) string {
 
 func TestReadDropsCallsWhosePrimitiveNameIsPathShaped(t *testing.T) {
 	for _, value := range hostileValues {
-		result, err := Read(strings.NewReader(skillCallTranscript(t, value)), resolver)
+		result, err := Read(strings.NewReader(skillCallTranscript(t, value)), resolver, names)
 		if err != nil {
 			t.Fatalf("Read() error = %v", err)
 		}
@@ -219,7 +223,7 @@ func TestReadDropsAttributedRunWithPathShapedAttribution(t *testing.T) {
 	for _, field := range []string{"attributionSkill", "attributionAgent"} {
 		for _, value := range hostileValues {
 			input := fmt.Sprintf(`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z",%q:%s,"message":{"model":"sonnet","stop_reason":"end_turn"}}`, field, quoted(t, value))
-			result, err := Read(strings.NewReader(input), resolver)
+			result, err := Read(strings.NewReader(input), resolver, names)
 			if err != nil {
 				t.Fatalf("Read() error = %v", err)
 			}
@@ -236,7 +240,7 @@ func TestReadOmitsUnsafeOptionalFieldsAndKeepsTheEvent(t *testing.T) {
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver)
+	result, err := Read(strings.NewReader(input), resolver, names)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -253,7 +257,7 @@ func TestReadOmitsUnsafeOptionalFieldsAndKeepsTheEvent(t *testing.T) {
 }
 
 func TestReadDerivesADirectoryScopedSkillReference(t *testing.T) {
-	result, err := Read(strings.NewReader(skillCallTranscript(t, "apps/web:deploy")), resolver)
+	result, err := Read(strings.NewReader(skillCallTranscript(t, "apps/web:deploy")), resolver, names)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -279,7 +283,7 @@ func TestReadPreservesRealClaudeCodeIdentityFormats(t *testing.T) {
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver)
+	result, err := Read(strings.NewReader(input), resolver, names)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -318,7 +322,7 @@ func TestMarshalledRecordsCarryNoSeparator(t *testing.T) {
 	}, "\n"))
 
 	for _, input := range inputs {
-		result, err := Read(strings.NewReader(input), resolver)
+		result, err := Read(strings.NewReader(input), resolver, names)
 		if err != nil {
 			t.Fatalf("Read() error = %v", err)
 		}

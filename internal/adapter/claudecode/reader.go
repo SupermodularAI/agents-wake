@@ -29,7 +29,12 @@ type Resolver func(cwd string) (record.Hash, bool)
 
 // Read streams one Claude Code transcript. Only events accepted by resolve can
 // become records, so an adapter scan cannot widen project consent.
-func Read(reader io.Reader, resolve Resolver) (Result, error) {
+//
+// names carries the key a directory-scoped reference's scope is digested under. A
+// scope is a repository path fragment, so the reader cannot derive a persistable
+// name for one on its own (ADR-0020); a Namer with no key drops those references
+// rather than persisting an unkeyed digest of a path.
+func Read(reader io.Reader, resolve Resolver, names record.Namer) (Result, error) {
 	if resolve == nil {
 		return Result{}, errors.New("missing repository resolver")
 	}
@@ -49,13 +54,13 @@ func Read(reader io.Reader, resolve Resolver) (Result, error) {
 			result.Malformed++
 			continue
 		}
-		if event, ok := entry.attributedRun(resolve); ok {
+		if event, ok := entry.attributedRun(resolve, names); ok {
 			result.Records = append(result.Records, event)
 		}
 		for _, block := range entry.Message.Content {
 			switch block.Type {
 			case "tool_use":
-				if pendingCall, ok := entry.call(block, resolve); ok {
+				if pendingCall, ok := entry.call(block, resolve, names); ok {
 					pending[pendingCall.id] = pendingCall
 				}
 			case "tool_result":
@@ -139,12 +144,12 @@ type call struct {
 	repo        record.Hash
 }
 
-func (entry transcriptEntry) call(block contentBlock, resolve Resolver) (call, bool) {
+func (entry transcriptEntry) call(block contentBlock, resolve Resolver, names record.Namer) (call, bool) {
 	id, err := record.BoundedToken(block.ID)
 	if err != nil {
 		return call{}, false
 	}
-	name, err := primitiveName(block)
+	name, err := primitiveName(block, names)
 	if err != nil {
 		return call{}, false
 	}
@@ -173,10 +178,10 @@ func (entry transcriptEntry) call(block contentBlock, resolve Resolver) (call, b
 	if model, err := record.BoundedIdentifier(entry.Message.Model); err == nil {
 		derived.model = model
 	}
-	if skill, err := record.DerivedName(entry.AttributionSkill); err == nil {
+	if skill, err := names.DerivedName(entry.AttributionSkill); err == nil {
 		derived.viaSkill = skill
 	}
-	if agent, err := record.DerivedName(entry.AttributionAgent); err == nil {
+	if agent, err := names.DerivedName(entry.AttributionAgent); err == nil {
 		derived.viaAgent = agent
 	}
 	if packageName, ok := packageFromAttribution(entry.AttributionMCPServer); ok {
@@ -188,7 +193,7 @@ func (entry transcriptEntry) call(block contentBlock, resolve Resolver) (call, b
 // attributedRun records the terminal completion of a skill or subagent. Claude
 // Code puts those identities on every transcript entry, including entries in
 // subagent files; the final end_turn entry is the safe completion boundary.
-func (entry transcriptEntry) attributedRun(resolve Resolver) (record.Record, bool) {
+func (entry transcriptEntry) attributedRun(resolve Resolver, names record.Namer) (record.Record, bool) {
 	if entry.Message.StopReason != "end_turn" {
 		return record.Record{}, false
 	}
@@ -201,7 +206,7 @@ func (entry transcriptEntry) attributedRun(resolve Resolver) (record.Record, boo
 		kind = record.KindSubagent
 		invoker = record.InvokerModel
 	}
-	primitive, err := record.DerivedName(name)
+	primitive, err := names.DerivedName(name)
 	if err != nil {
 		return record.Record{}, false
 	}
@@ -234,9 +239,9 @@ func (entry transcriptEntry) attributedRun(resolve Resolver) (record.Record, boo
 	return event, true
 }
 
-func primitiveName(block contentBlock) (record.Identifier, error) {
+func primitiveName(block contentBlock, names record.Namer) (record.Identifier, error) {
 	if block.Name == "Skill" && block.Input.Skill != "" {
-		return record.DerivedName(block.Input.Skill)
+		return names.DerivedName(block.Input.Skill)
 	}
 	return record.BoundedIdentifier(block.Name)
 }
@@ -282,7 +287,10 @@ func packageFromAttribution(value string) (record.Identifier, bool) {
 	}
 	for index := len(prefix); index < len(value); index++ {
 		if value[index] == ':' {
-			packageName, err := record.DerivedName(value[len(prefix):index])
+			// The name domain, not the derived one: an MCP server package is never
+			// directory-scoped, so a segment carrying a separator is a hostile value
+			// rather than a scope to digest.
+			packageName, err := record.BoundedIdentifier(value[len(prefix):index])
 			return packageName, err == nil
 		}
 	}

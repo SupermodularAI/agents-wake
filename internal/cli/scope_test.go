@@ -16,7 +16,7 @@ import (
 func TestResolveDiscoveryScopeWithholdsProjectDiscoveryOutsideAConsentedRepository(t *testing.T) {
 	paths, notices, cmd := scopeFixture(t, t.TempDir())
 
-	scope, err := resolveDiscoveryScope(cmd, paths)
+	scope, _, err := resolveDiscoveryScope(cmd, paths)
 	if err != nil {
 		t.Fatalf("resolveDiscoveryScope() error = %v", err)
 	}
@@ -35,7 +35,7 @@ func TestResolveDiscoveryScopeNoticeNamesNoPath(t *testing.T) {
 	}
 	paths, notices, cmd := scopeFixture(t, directory)
 
-	if _, err := resolveDiscoveryScope(cmd, paths); err != nil {
+	if _, _, err := resolveDiscoveryScope(cmd, paths); err != nil {
 		t.Fatalf("resolveDiscoveryScope() error = %v", err)
 	}
 	cwd, err := os.Getwd()
@@ -63,7 +63,7 @@ func TestResolveDiscoveryScopeGrantsProjectDiscoveryInsideAConsentedRepository(t
 		t.Fatalf("Register() error = %v", registerErr)
 	}
 
-	scope, err := resolveDiscoveryScope(cmd, paths)
+	scope, _, err := resolveDiscoveryScope(cmd, paths)
 	if err != nil {
 		t.Fatalf("resolveDiscoveryScope() error = %v", err)
 	}

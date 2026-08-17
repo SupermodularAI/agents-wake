@@ -11,6 +11,10 @@ import (
 	"github.com/SupermodularAI/agents-wake/internal/store"
 )
 
+// names keys the scope digest for this package's tests, standing in for the
+// subkey config.Repos.NameKey derives in production.
+var names = record.NewNamer([]byte("test scope key"))
+
 func TestClaudeCodeIsIdempotent(t *testing.T) {
 	input := strings.Join([]string{
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
@@ -20,11 +24,11 @@ func TestClaudeCodeIsIdempotent(t *testing.T) {
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
 	resolve := func(cwd string) (record.Hash, bool) { return repo, cwd == "/repo" }
 
-	first, err := ClaudeCode(strings.NewReader(input), resolve, destination)
+	first, err := ClaudeCode(strings.NewReader(input), resolve, names, destination)
 	if err != nil {
 		t.Fatalf("first ClaudeCode() error = %v", err)
 	}
-	second, err := ClaudeCode(strings.NewReader(input), resolve, destination)
+	second, err := ClaudeCode(strings.NewReader(input), resolve, names, destination)
 	if err != nil {
 		t.Fatalf("second ClaudeCode() error = %v", err)
 	}
@@ -46,7 +50,7 @@ func TestClaudeCodePersistsNoPathShapedValue(t *testing.T) {
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
 	resolve := func(cwd string) (record.Hash, bool) { return repo, cwd == "/repo" }
 
-	result, err := ClaudeCode(strings.NewReader(input), resolve, destination)
+	result, err := ClaudeCode(strings.NewReader(input), resolve, names, destination)
 	if err != nil {
 		t.Fatalf("ClaudeCode() error = %v", err)
 	}

@@ -7,6 +7,7 @@ import (
 	"io"
 
 	"github.com/SupermodularAI/agents-wake/internal/adapter/claudecode"
+	"github.com/SupermodularAI/agents-wake/internal/record"
 	"github.com/SupermodularAI/agents-wake/internal/store"
 )
 
@@ -23,8 +24,11 @@ type Result struct {
 // ClaudeCode reads one already-authorized Claude Code transcript and persists
 // its completed records. It is the service `wake ingest` will use after init
 // establishes repository consent.
-func ClaudeCode(reader io.Reader, resolve claudecode.Resolver, destination *store.Store) (Result, error) {
-	derived, err := claudecode.Read(reader, resolve)
+//
+// names is the key a scoped primitive reference is digested under, and travels
+// with the resolver because both come from the same consent boundary (ADR-0020).
+func ClaudeCode(reader io.Reader, resolve claudecode.Resolver, names record.Namer, destination *store.Store) (Result, error) {
+	derived, err := claudecode.Read(reader, resolve, names)
 	if err != nil {
 		return Result{}, err
 	}
