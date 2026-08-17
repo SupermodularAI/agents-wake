@@ -5,13 +5,16 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/spf13/cobra"
 
 	"github.com/SupermodularAI/agents-wake/internal/config"
 	"github.com/SupermodularAI/agents-wake/internal/metrics"
+	"github.com/SupermodularAI/agents-wake/internal/platform"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 	"github.com/SupermodularAI/agents-wake/internal/store"
 	"github.com/SupermodularAI/agents-wake/internal/version"
@@ -80,7 +83,17 @@ func isTerminal(file *os.File) bool {
 }
 
 // Execute runs the root command and returns a process exit code.
-func Execute() int {
+func Execute() int { return execute(runtime.GOOS, os.Stderr) }
+
+// execute refuses an unsupported platform before the command tree runs, so a user
+// on one is told at startup rather than midway through a locked read-modify-write
+// (ADR-0021). goos and the stream are parameters because the refusal cannot
+// otherwise be exercised from a supported platform's test run.
+func execute(goos string, stderr io.Writer) int {
+	if err := platform.Check(goos); err != nil {
+		_, _ = fmt.Fprintln(stderr, err)
+		return 1
+	}
 	if err := newRootCmd().Execute(); err != nil {
 		return 1
 	}

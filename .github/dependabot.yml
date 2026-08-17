@@ -1,0 +1,14 @@
+# Pins are only trustworthy if something moves them. Dependabot rewrites the SHA
+# and its version comment together, so a pinned action still receives security
+# fixes.
+#
+# github-actions only: the ask is automated *pin* updates, and go.mod's four
+# direct dependencies are few enough to review by hand.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci

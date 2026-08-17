@@ -8,7 +8,53 @@ This branch is an MVP. It supports Claude Code only.
 
 ## Install
 
-Wake requires Go 1.25 or newer.
+### Official binaries
+
+Wake supports macOS and Linux, on amd64 and arm64. There is no Windows build,
+and `wake` refuses to start on a platform it does not support rather than
+half-working.
+
+Download from the
+[Releases page](https://github.com/SupermodularAI/agents-wake/releases). Each
+release carries one `tar.gz` per supported platform, a `checksums.txt`, a
+per-archive SBOM, and a signed build provenance attestation.
+
+Download, verify, and place the binary. No `sudo`, and nothing is written outside
+the target directory:
+
+```sh
+tag=v0.1.0
+os=$(uname -s | tr '[:upper:]' '[:lower:]')
+arch=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+archive="wake_${tag#v}_${os}_${arch}.tar.gz"
+base="https://github.com/SupermodularAI/agents-wake/releases/download/$tag"
+curl -fsSLO "$base/$archive" && curl -fsSLO "$base/checksums.txt"
+
+grep " $archive\$" checksums.txt | shasum -a 256 --check -   # macOS
+grep " $archive\$" checksums.txt | sha256sum --check -       # Linux
+
+tar -xzf "$archive" wake
+mkdir -p ~/.local/bin && mv wake ~/.local/bin/wake
+```
+
+If `~/.local/bin` is not already on your `PATH`, add it:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Optionally verify the build provenance:
+
+```sh
+gh attestation verify ~/.local/bin/wake --repo SupermodularAI/agents-wake
+```
+
+Installing places a binary and changes nothing else. Wake writes no harness
+configuration until you run `wake init`.
+
+### From source
+
+Building from source requires Go 1.25 or newer.
 
 ```sh
 git clone https://github.com/SupermodularAI/agents-wake.git
@@ -44,6 +90,11 @@ new terminals. Confirm the installation with:
 wake --version
 ```
 
+An official binary reports its release tag, short commit, and build date. A
+source build reports whatever `git describe` found in your checkout, and
+`dev (commit none, built unknown)` when it was built without the Makefile — so
+you can always tell which of the two you are running.
+
 ## Start Using Wake
 
 From the root of a project with Claude Code history:
@@ -71,7 +122,9 @@ wake serve
 ```
 
 Then open [http://127.0.0.1:8080](http://127.0.0.1:8080). The server binds to
-loopback only.
+loopback only. `wake serve` binds the port before printing the URL, so the
+message appears only once the dashboard is actually listening, and every request
+phase is time-bounded.
 
 In a terminal, running `wake` starts the dashboard on the default port. When
 stdout is not a terminal, it prints deterministic invocation and session counts
