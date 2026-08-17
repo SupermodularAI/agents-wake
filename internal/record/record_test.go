@@ -1,6 +1,8 @@
 package record
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"reflect"
 	"strings"
 	"testing"
@@ -221,7 +223,7 @@ func TestBoundedVersionAcceptsVersionsAndRejectsPaths(t *testing.T) {
 
 func TestDerivedNameLeavesUnscopedIdentitiesUnchanged(t *testing.T) {
 	for _, value := range []string{"pr-review", "plugin:plugin-skill", "atlassian", "mcp__a__b"} {
-		got, err := DerivedName(value)
+		got, err := testNamer().DerivedName(value)
 		if err != nil {
 			t.Errorf("DerivedName(%q) error = %v", value, err)
 			continue
@@ -233,7 +235,7 @@ func TestDerivedNameLeavesUnscopedIdentitiesUnchanged(t *testing.T) {
 }
 
 func TestDerivedNameReplacesAPathScopeWithADigest(t *testing.T) {
-	got, err := DerivedName("apps/web:deploy")
+	got, err := testNamer().DerivedName("apps/web:deploy")
 	if err != nil {
 		t.Fatalf("DerivedName() error = %v", err)
 	}
@@ -254,7 +256,7 @@ func TestDerivedNameIsInjectiveAcrossScopes(t *testing.T) {
 	sources := []string{"apps/web:deploy", "other/web:deploy", "apps-web:deploy", "deploy"}
 	seen := map[Identifier]string{}
 	for _, value := range sources {
-		got, err := DerivedName(value)
+		got, err := testNamer().DerivedName(value)
 		if err != nil {
 			t.Fatalf("DerivedName(%q) error = %v", value, err)
 		}
@@ -269,8 +271,9 @@ func TestDerivedNameRejectsPathsThatAreNotScopedReferences(t *testing.T) {
 	for _, value := range []string{
 		"usr/local/bin", "/etc/passwd", "/etc/passwd:x", "../x:y", "./x:y",
 		"a/../b:y", `C:/Users/me`, "~/x:y", "a:/b", "//x:y", "x/:y", "x/y:z/w",
+		"a/b:", "apps/web:",
 	} {
-		if _, err := DerivedName(value); err == nil {
+		if _, err := testNamer().DerivedName(value); err == nil {
 			t.Errorf("DerivedName(%q) returned no error", value)
 		}
 	}
@@ -290,3 +293,68 @@ func TestValidNameAndValidHarnessAgreeWithValidate(t *testing.T) {
 		t.Fatal("ValidHarness() accepted a non-slug harness")
 	}
 }
+
+func TestScopeDigestIsKeyedRatherThanAPlainHash(t *testing.T) {
+	got, err := testNamer().DerivedName("apps/web:deploy")
+	if err != nil {
+		t.Fatalf("DerivedName() error = %v", err)
+	}
+
+	// The digest an unkeyed implementation would have persisted. A scope is a
+	// handful of directory names, so a plain hash of one is recoverable from a
+	// wordlist — and the spool is what leaves the machine under the remote build
+	// tag. This is the value that must never appear.
+	sum := sha256.Sum256([]byte("apps/web"))
+	unkeyed := Identifier("scope-" + hex.EncodeToString(sum[:])[:scopeDigestLen] + ":deploy")
+	if got == unkeyed {
+		t.Fatalf("DerivedName() persisted an unkeyed digest of the scope: %q", got)
+	}
+
+	other, err := NewNamer([]byte("a different per-machine salt")).DerivedName("apps/web:deploy")
+	if err != nil {
+		t.Fatalf("DerivedName() under a second key error = %v", err)
+	}
+	if other == got {
+		t.Fatalf("DerivedName() ignored the key: both keys produced %q", got)
+	}
+
+	again, err := testNamer().DerivedName("apps/web:deploy")
+	if err != nil {
+		t.Fatalf("second DerivedName() error = %v", err)
+	}
+	if again != got {
+		t.Fatalf("DerivedName() is not stable under one key: %q then %q", got, again)
+	}
+}
+
+func TestNamerWithoutAKeyRefusesAScopedReference(t *testing.T) {
+	var keyless Namer
+	if _, err := keyless.DerivedName("apps/web:deploy"); err == nil {
+		t.Fatal("a keyless Namer digested a scope")
+	}
+	got, err := keyless.DerivedName("pr-review")
+	if err != nil || got != "pr-review" {
+		t.Fatalf("keyless DerivedName(%q) = %q, %v", "pr-review", got, err)
+	}
+}
+
+func TestDerivedNameRefusesAVerbatimDigestShape(t *testing.T) {
+	scoped, err := testNamer().DerivedName("apps/web:deploy")
+	if err != nil {
+		t.Fatalf("DerivedName() error = %v", err)
+	}
+	if _, err := testNamer().DerivedName(string(scoped)); err == nil {
+		t.Fatalf("DerivedName() accepted a verbatim value shaped like its own output: %q", scoped)
+	}
+	// The refusal is the digest shape only, so a real primitive that merely starts
+	// with the same word is still collected.
+	for _, value := range []string{"scope-web:deploy", "scope-3b4e3efd29cd", "scoped:deploy"} {
+		if _, err := testNamer().DerivedName(value); err != nil {
+			t.Errorf("DerivedName(%q) error = %v", value, err)
+		}
+	}
+}
+
+// testNamer keys the scope digest for tests. Production keys it with a subkey of
+// the per-machine salt (config.Repos.NameKey).
+func testNamer() Namer { return NewNamer([]byte("test scope key")) }
