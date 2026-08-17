@@ -32,6 +32,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/SupermodularAI/agents-wake/internal/atomicfile"
 )
 
 // The modes the config root and config.toml are created with. No decision pins a
@@ -262,6 +264,11 @@ func (c *Config) Problems() []Problem {
 //
 // A rejected name or value writes nothing: the file is not created, and an
 // existing one is not touched.
+//
+// The read and the write happen inside one hold of the config lock. Without it two
+// concurrent Sets of two different keys each republish a file decoded before the
+// other's write, so one key is lost — and lost silently, because both calls
+// return the path they wrote.
 func Set(p Paths, name, value string) (string, error) {
 	k, known := lookup(name)
 	if !known {
@@ -270,6 +277,77 @@ func Set(p Paths, name, value string) (string, error) {
 	if err := validate(k, value); err != nil {
 		return "", err
 	}
+
+	// Validation first, outside the lock: a rejected value must create nothing, and
+	// taking the lock would create the lock file.
+	var written string
+	if err := withConfigLock(p.ConfigFile, func() error {
+		var err error
+		written, err = setLocked(p, k, value)
+		return err
+	}); err != nil {
+		return "", err
+	}
+	return written, nil
+}
+
+// AddToList adds one item to a list setting, keeping every item already there,
+// and returns the path it wrote. An item already present is not added twice and
+// nothing is written.
+//
+// It exists because reading the list and setting it back are two calls, and two
+// processes doing that concurrently — two `wake init` runs in two repositories, or
+// one racing a hook-triggered scan — each write a list missing the other's item.
+// The read and the write happen inside one hold of the config lock, so the merge
+// is against what is on disk rather than against a snapshot.
+func AddToList(p Paths, name, item string) (string, error) {
+	k, known := lookup(name)
+	if !known {
+		return "", &UnknownKeyError{Key: name, Known: KeyNames()}
+	}
+	if k.Kind != KindStringList {
+		return "", fmt.Errorf("%s is not a list setting", name)
+	}
+	// A comma is the separator, so an item carrying one would come back as two
+	// members on the next read. The reason names the character and not the value:
+	// a repository id is not secret, but this is the type's contract.
+	if strings.Contains(item, ",") {
+		return "", &InvalidValueError{Key: name, Reason: "an item may not contain a comma, which separates the list's members"}
+	}
+
+	var written string
+	if err := withConfigLock(p.ConfigFile, func() error {
+		// Load only reads, so calling it inside the lock is safe — and necessary:
+		// merging against a list read before the lock is the hole this closes.
+		c, err := Load(p)
+		if err != nil {
+			return err
+		}
+		list, err := c.StringList(name)
+		if err != nil {
+			return err
+		}
+		if slices.Contains(list, item) {
+			written = p.ConfigFile
+			return nil
+		}
+		written, err = setLocked(p, k, strings.Join(append(list, item), ","))
+		return err
+	}); err != nil {
+		return "", err
+	}
+	return written, nil
+}
+
+// setLocked is Set's body with the config lock already held. Separate because
+// AddToList reads the list and writes it back inside one hold, and flock is per
+// open file description: a helper that took the lock itself would deadlock against
+// its own caller.
+//
+// It takes the resolved Key rather than a name so it does not repeat the lookup
+// its callers have already done.
+func setLocked(p Paths, k Key, value string) (string, error) {
+	name := k.Name
 
 	table := map[string]any{}
 	raw, readErr := os.ReadFile(p.ConfigFile)
@@ -291,17 +369,11 @@ func Set(p Paths, name, value string) (string, error) {
 		return "", fmt.Errorf("encoding %s: %w", p.ConfigFile, err)
 	}
 
-	if err := os.MkdirAll(p.ConfigDir, configDirMode); err != nil {
-		return "", fmt.Errorf("creating %s: %w", p.ConfigDir, err)
-	}
-	if err := os.WriteFile(p.ConfigFile, buf.Bytes(), configFileMode); err != nil {
+	// Publishing sets the mode as part of the write, so there is no window in which
+	// a file that can hold scan.repos is readable by anyone else, and no separate
+	// Chmod to forget: a file created by hand does not keep its own mode here.
+	if err := atomicfile.Publish(p.ConfigFile, buf.Bytes(), configFileMode); err != nil {
 		return "", fmt.Errorf("writing %s: %w", p.ConfigFile, err)
-	}
-	// WriteFile leaves an existing file's mode alone, so the mode is set
-	// explicitly: a file that can hold scan.repos should not stay
-	// world-readable because it was created by hand.
-	if err := os.Chmod(p.ConfigFile, configFileMode); err != nil {
-		return "", fmt.Errorf("setting the mode of %s: %w", p.ConfigFile, err)
 	}
 	return p.ConfigFile, nil
 }
