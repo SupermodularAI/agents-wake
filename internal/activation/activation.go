@@ -159,14 +159,18 @@ func DiscoveryScope(paths config.Paths, claudeDir, cwd string) (inventory.Scope,
 
 func discoveryScope(repos *config.Repos, claudeDir, cwd string) (inventory.Scope, record.Namer) {
 	names := record.NewNamer(repos.NameKey())
-	identity, err := repos.Identify(cwd)
+	// The consented root, not cwd: consent was given for a repository, and a
+	// command run in a subdirectory of one must not scope discovery to that
+	// subdirectory — it would collect part of the repository's primitives and then
+	// report a complete pass over them (ADR-0019 §1).
+	root, err := repos.ConsentedRoot(cwd)
 	if err != nil {
 		return inventory.Scope{ClaudeDir: claudeDir, Project: inventory.ProjectUnresolved}, names
 	}
-	if !identity.Matched {
+	if root == "" {
 		return inventory.Scope{ClaudeDir: claudeDir, Project: inventory.ProjectUnconsented}, names
 	}
-	return inventory.Scope{ClaudeDir: claudeDir, Root: cwd, Project: inventory.ProjectConsented}, names
+	return inventory.Scope{ClaudeDir: claudeDir, Root: root, Project: inventory.ProjectConsented}, names
 }
 
 func refreshInventory(paths config.Paths, repos *config.Repos, claudeDir, root string, events *store.Store) error {
