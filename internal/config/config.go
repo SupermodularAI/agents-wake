@@ -291,6 +291,12 @@ func Set(p Paths, name, value string) (string, error) {
 	return written, nil
 }
 
+// listItemCommaReason is why a list member may not contain a comma. Both paths
+// into a list value reject the same input with the same words: AddToList on the way
+// in, canonical on the way back out of a hand-edited file. One string rather than
+// two is what keeps them from drifting into two answers about one file (T112).
+const listItemCommaReason = "an item may not contain a comma, which separates the list's members"
+
 // AddToList adds one item to a list setting, keeping every item already there,
 // and returns the path it wrote. An item already present is not added twice and
 // nothing is written.
@@ -312,7 +318,7 @@ func AddToList(p Paths, name, item string) (string, error) {
 	// members on the next read. The reason names the character and not the value:
 	// a repository id is not secret, but this is the type's contract.
 	if strings.Contains(item, ",") {
-		return "", &InvalidValueError{Key: name, Reason: "an item may not contain a comma, which separates the list's members"}
+		return "", &InvalidValueError{Key: name, Reason: listItemCommaReason}
 	}
 
 	var written string
@@ -399,9 +405,23 @@ func canonical(k Key, v any) (string, string) {
 			if !ok {
 				return "", "must be an array of strings, such as [\"a\", \"b\"]"
 			}
-			parts = append(parts, s)
+			// The canonical form joins the members with a comma, so an element
+			// carrying one is indistinguishable from two members once joined —
+			// silently becoming a list the user never wrote, and for scan.repos two
+			// consented repositories that do not exist. Rejected rather than
+			// repaired, in the same words AddToList uses, so a hand-edited file can
+			// only mean what the command could have written (T112).
+			if strings.Contains(s, ",") {
+				return "", listItemCommaReason
+			}
+			// Trimmed and dropped per element rather than by re-splitting the joined
+			// string: same result for every comma-free value, without a round trip
+			// that has to reinterpret content it just produced.
+			if s = strings.TrimSpace(s); s != "" {
+				parts = append(parts, s)
+			}
 		}
-		return strings.Join(splitList(strings.Join(parts, ",")), ","), ""
+		return strings.Join(parts, ","), ""
 	default:
 		return "", "this key has no value kind; it is registered wrongly"
 	}
