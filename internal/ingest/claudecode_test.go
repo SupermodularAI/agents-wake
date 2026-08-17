@@ -120,7 +120,11 @@ func TestClaudeCodePersistsNoPathShapedValue(t *testing.T) {
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","attributionSkill":"a/../secrets","attributionMcpServer":"plugin:a/../evil:tool","message":{"model":"C:/Users/me","content":[{"type":"tool_use","id":"call-2","name":"Bash"}]}}`,
 		`{"uuid":"entry-4","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:03Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}`,
-		`{"uuid":"entry-5","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:04Z","attributionAgent":"apps/web:reviewer","message":{"stop_reason":"end_turn"}}`,
+		// A directory-scoped subagent reference, carried on the Task call that is the
+		// subagent invocation: only the keyed digest of the scope may be persisted,
+		// never the path fragment it was derived from (ADR-0020).
+		`{"uuid":"entry-5","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:04Z","message":{"content":[{"type":"tool_use","id":"call-3","name":"Task","input":{"subagent_type":"apps/web:reviewer"}}]}}`,
+		`{"uuid":"entry-6","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:05Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-3","is_error":false}]}}`,
 	}, "\n")
 	spool := filepath.Join(t.TempDir(), "events.ndjson")
 	destination := store.New(spool)
