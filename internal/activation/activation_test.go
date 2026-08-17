@@ -34,8 +34,13 @@ func TestInitPreservesHooksAndImportsOnlyConsentedHistory(t *testing.T) {
 		t.Fatalf("WriteFile() transcript error = %v", err)
 	}
 	paths := testPaths(t)
+	executable := testExecutable(t)
+	command, err := hookCommandFor(executable)
+	if err != nil {
+		t.Fatalf("hookCommandFor() error = %v", err)
+	}
 
-	written, err := Init(paths, root, claudeDir)
+	written, err := Init(paths, root, claudeDir, executable)
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -51,10 +56,10 @@ func TestInitPreservesHooksAndImportsOnlyConsentedHistory(t *testing.T) {
 	if err != nil || json.Unmarshal(raw, &persisted) != nil {
 		t.Fatalf("reading settings failed: %v", err)
 	}
-	if string(raw) == settings || !containsCommand(raw, "existing command") || !containsCommand(raw, hookCommand) {
+	if string(raw) == settings || !containsCommand(raw, "existing command") || !containsCommand(raw, command) {
 		t.Fatalf("settings lost existing or Wake hook: %s", raw)
 	}
-	second, err := Init(paths, root, claudeDir)
+	second, err := Init(paths, root, claudeDir, executable)
 	if err != nil || second != 0 {
 		t.Fatalf("second Init() = %d, %v; want 0, nil", second, err)
 	}
@@ -76,7 +81,7 @@ func TestRebuildReplacesOnlyTheDerivedEventStore(t *testing.T) {
 		t.Fatalf("WriteFile() transcript error = %v", err)
 	}
 	paths := testPaths(t)
-	if _, err := Init(paths, root, claudeDir); err != nil {
+	if _, err := Init(paths, root, claudeDir, testExecutable(t)); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 	projectsBefore, err := os.ReadFile(paths.ProjectsFile)
@@ -98,7 +103,19 @@ func TestRebuildReplacesOnlyTheDerivedEventStore(t *testing.T) {
 
 func TestUninstallRemovesOnlyWakeHooksAndKeepsData(t *testing.T) {
 	claudeDir := filepath.Join(t.TempDir(), "claude")
-	settings := `{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"existing command"}]},{"wake":true,"hooks":[{"type":"command","command":"changed wake command"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"` + hookCommand + `"}]}]}}`
+	// The SessionStart marked group carries a command this build would never write,
+	// and it is still removed: ownership is the marker plus the group's shape, never
+	// the command string, so a group an earlier build wrote stays recognisable.
+	//
+	// The SessionEnd group carries Wake's exact command with no marker, and it is
+	// preserved: command equality is not proof of ownership, and a user who copied
+	// that command into their own group owns it. That is the mixed-group case the
+	// ticket names, and hooks_test.go covers it on its own.
+	command, commandErr := hookCommandFor(testExecutable(t))
+	if commandErr != nil {
+		t.Fatalf("hookCommandFor() error = %v", commandErr)
+	}
+	settings := `{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"existing command"}]},{"wake":true,"hooks":[{"type":"command","command":"changed wake command"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":` + quote(command) + `}]}]}}`
 	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
 		t.Fatalf("MkdirAll() error = %v", err)
 	}
@@ -113,12 +130,12 @@ func TestUninstallRemovesOnlyWakeHooksAndKeepsData(t *testing.T) {
 		t.Fatalf("WriteFile() data error = %v", err)
 	}
 
-	removed, err := Uninstall(paths, claudeDir, false)
-	if err != nil || !removed {
-		t.Fatalf("Uninstall() = %t, %v", removed, err)
+	removed, uninstallErr := Uninstall(paths, claudeDir, false)
+	if uninstallErr != nil || !removed {
+		t.Fatalf("Uninstall() = %t, %v", removed, uninstallErr)
 	}
 	raw, err := os.ReadFile(filepath.Join(claudeDir, "settings.json"))
-	if err != nil || !containsCommand(raw, "existing command") || containsCommand(raw, hookCommand) || contains(string(raw), `"wake": true`) {
+	if err != nil || !containsCommand(raw, "existing command") || !containsCommand(raw, command) || contains(string(raw), `"wake": true`) {
 		t.Fatalf("settings after uninstall = %s, error = %v", raw, err)
 	}
 	if _, statErr := os.Stat(filepath.Join(paths.DataDir, "events.ndjson")); statErr != nil {
@@ -211,7 +228,7 @@ func TestIngestFromASubdirectoryInventoriesTheWholeRepository(t *testing.T) {
 	if err := os.MkdirAll(inside, 0o700); err != nil {
 		t.Fatalf("MkdirAll() error = %v", err)
 	}
-	if _, err := Init(paths, root, claudeDir); err != nil {
+	if _, err := Init(paths, root, claudeDir, testExecutable(t)); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 	t.Chdir(inside)
@@ -283,7 +300,7 @@ func TestInitInventoriesTheProjectItJustConsented(t *testing.T) {
 	paths := testPaths(t)
 	claudeDir, root := inventoryFixture(t)
 
-	if _, err := Init(paths, root, claudeDir); err != nil {
+	if _, err := Init(paths, root, claudeDir, testExecutable(t)); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 	raw, err := os.ReadFile(paths.PrimitivesFile)
