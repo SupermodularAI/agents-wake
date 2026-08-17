@@ -39,8 +39,9 @@ type Store struct{ path string }
 func New(path string) *Store { return &Store{path: path} }
 
 // Refresh records all currently discovered primitives and their current usage.
-// Replacing the snapshot removes primitives no longer found by the harness.
-func (s *Store) Refresh(source *store.Store, available []Primitive) error {
+// Replacing the snapshot removes primitives no longer found by the harness — but
+// only the ones this pass was in a position to look for; see available.
+func (s *Store) Refresh(source *store.Store, discovered Discovery) error {
 	entries, err := source.Entries(0)
 	if err != nil {
 		return err
@@ -49,7 +50,38 @@ func (s *Store) Refresh(source *store.Store, available []Primitive) error {
 	for _, entry := range entries {
 		records = append(records, entry.Record)
 	}
-	return s.write(derive(metrics.Aggregate(records), available))
+	return s.write(derive(metrics.Aggregate(records), s.available(discovered)))
+}
+
+// available is what this pass may write: everything it discovered, plus — when
+// project-local discovery was withheld — everything the previous snapshot held.
+//
+// A pass that was not allowed to look inside a consented repository has not
+// learned that its primitives are gone. Replacing the snapshot from that partial
+// view would erase them and their counters from the report and the dashboard until
+// a command happened to run inside that repository again, which is why the ticket
+// asks that an unconsented scan never replace an existing snapshot.
+//
+// Carrying an entry does not freeze it: every counter is re-derived from the event
+// store below, for carried and discovered entries alike, and the event store is
+// already consent-gated. Nothing about the withheld directory is read or written —
+// what is carried is a name Wake had already recorded.
+//
+// A previous snapshot Read refuses is not carried. Fail closed: bytes that do not
+// validate are not worth preserving (plan §3.4).
+func (s *Store) available(discovered Discovery) []Primitive {
+	if discovered.ProjectScanned {
+		return discovered.Primitives
+	}
+	previous, err := s.Read()
+	if err != nil {
+		return discovered.Primitives
+	}
+	carried := slices.Clone(discovered.Primitives)
+	for _, usage := range previous {
+		carried = append(carried, Primitive{Harness: usage.Harness, Kind: usage.Kind, Name: usage.Name})
+	}
+	return carried
 }
 
 // Read returns the last successful inventory snapshot. A missing snapshot is an

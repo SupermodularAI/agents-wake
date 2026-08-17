@@ -21,7 +21,7 @@ func TestRefreshPersistsDiscoveredPrimitivesAndCurrentUsage(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "primitives.json")
 	primitives := New(statePath)
 	available := []Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "used"}, {Harness: "claude-code", Kind: record.KindSkill, Name: "unused"}}
-	if err := primitives.Refresh(events, available); err != nil {
+	if err := primitives.Refresh(events, Discovery{Primitives: available, ProjectScanned: true}); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 
@@ -37,7 +37,7 @@ func TestRefreshPersistsDiscoveredPrimitivesAndCurrentUsage(t *testing.T) {
 	if _, appendErr := events.Append([]record.Record{second}); appendErr != nil {
 		t.Fatalf("Append() error = %v", appendErr)
 	}
-	if refreshErr := primitives.Refresh(events, available[:1]); refreshErr != nil {
+	if refreshErr := primitives.Refresh(events, Discovery{Primitives: available[:1], ProjectScanned: true}); refreshErr != nil {
 		t.Fatalf("second Refresh() error = %v", refreshErr)
 	}
 	items, err = primitives.Read()
@@ -57,7 +57,7 @@ func TestRefreshDropsPrimitivesWithUnsafeNames(t *testing.T) {
 		{Harness: "claude-code", Kind: record.KindSkill, Name: "usr/local/bin"},
 		{Harness: "claude-code", Kind: record.KindSkill, Name: "contains space"},
 	}
-	if err := New(statePath).Refresh(events, available); err != nil {
+	if err := New(statePath).Refresh(events, Discovery{Primitives: available, ProjectScanned: true}); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 
@@ -74,6 +74,47 @@ func TestRefreshDropsPrimitivesWithUnsafeNames(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "usr/local") {
 		t.Fatalf("primitives.json retains a path: %s", raw)
+	}
+}
+
+func TestRefreshCarriesForwardWhatAnUnscannedPassCouldNotSee(t *testing.T) {
+	events := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	first := inventoryRecord("first", "project-skill", time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC))
+	if _, err := events.Append([]record.Record{first}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	statePath := filepath.Join(t.TempDir(), "primitives.json")
+	primitives := New(statePath)
+	discovered := []Primitive{
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "project-skill"},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "global-skill"},
+	}
+	if err := primitives.Refresh(events, Discovery{Primitives: discovered, ProjectScanned: true}); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	second := inventoryRecord("second", "project-skill", first.Timestamp.Add(time.Minute))
+	if _, err := events.Append([]record.Record{second}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	// The project-local half of discovery was withheld, so the pass never saw
+	// project-skill. It must be carried rather than dropped.
+	if err := primitives.Refresh(events, Discovery{Primitives: discovered[1:]}); err != nil {
+		t.Fatalf("partial Refresh() error = %v", err)
+	}
+
+	items, err := primitives.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("inventory = %+v, want both primitives", items)
+	}
+	if items[0].Name != "project-skill" || items[0].Invocations != 2 || !items[0].LastUsed.Equal(second.Timestamp) {
+		t.Fatalf("carried primitive lost its counters: %+v", items[0])
+	}
+	if items[1].Name != "global-skill" {
+		t.Fatalf("inventory = %+v", items)
 	}
 }
 

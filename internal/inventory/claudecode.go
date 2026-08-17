@@ -43,7 +43,7 @@ type Primitive struct {
 //
 // names keys the digest that stands in for a directory-scoped primitive's scope,
 // which a session listing states as a path prefix (ADR-0020).
-func ClaudeCodeInScope(scope Scope, names record.Namer) []Primitive {
+func ClaudeCodeInScope(scope Scope, names record.Namer) Discovery {
 	items := map[primitiveKey]Primitive{}
 	add := func(kind record.Kind, name string) {
 		identifier, err := names.DerivedName(name)
@@ -54,10 +54,11 @@ func ClaudeCodeInScope(scope Scope, names record.Namer) []Primitive {
 	}
 
 	claudeCodeGlobal(scope.ClaudeDir, add)
-	if scope.allowsProject() {
+	scanned := scope.allowsProject()
+	if scanned {
 		claudeCodeProject(scope.ClaudeDir, scope.Root, add)
 	}
-	return sortedPrimitives(items)
+	return Discovery{Primitives: sortedPrimitives(items), ProjectScanned: scanned}
 }
 
 // claudeCodeGlobal scans the harness's own directory and its installed plugins.

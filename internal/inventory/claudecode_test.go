@@ -16,6 +16,9 @@ func TestClaudeCodeInScopeDiscoversProjectPrimitivesWhenConsented(t *testing.T) 
 	claudeDir, root := discoveryFixture(t)
 
 	got := ClaudeCodeInScope(Scope{ClaudeDir: claudeDir, Root: root, Project: ProjectConsented}, names)
+	if !got.ProjectScanned {
+		t.Fatal("a consented pass reported that it did not scan the project")
+	}
 	want := map[primitiveKey]bool{
 		{kind: record.KindSkill, name: "global-skill"}:        true,
 		{kind: record.KindSkill, name: "global"}:              true,
@@ -25,7 +28,7 @@ func TestClaudeCodeInScopeDiscoversProjectPrimitivesWhenConsented(t *testing.T) 
 		{kind: record.KindMCPServer, name: "listed-mcp"}:      true,
 		{kind: record.KindMCPServer, name: "repo-mcp"}:        true,
 	}
-	for _, item := range got {
+	for _, item := range got.Primitives {
 		delete(want, primitiveKey{kind: item.Kind, name: item.Name})
 	}
 	if len(want) != 0 {
@@ -54,7 +57,7 @@ func TestClaudeCodeInScopeSkipsInvalidPrimitiveNames(t *testing.T) {
 	root := t.TempDir()
 	write(t, filepath.Join(claudeDir, "projects", "session.jsonl"), `{"cwd":"`+root+`","attachment":{"type":"skill_listing","content":"- contains space: description\n- ../escape: description\n- /etc/passwd: description"}}`)
 
-	if got := ClaudeCodeInScope(Scope{ClaudeDir: claudeDir, Root: root, Project: ProjectConsented}, names); len(got) != 0 {
+	if got := ClaudeCodeInScope(Scope{ClaudeDir: claudeDir, Root: root, Project: ProjectConsented}, names); len(got.Primitives) != 0 {
 		t.Fatalf("ClaudeCodeInScope() = %+v", got)
 	}
 }
@@ -75,13 +78,17 @@ func discoveryFixture(t *testing.T) (claudeDir, root string) {
 	return claudeDir, root
 }
 
-// assertOnlyGlobalDiscovery pins that the global skill survived and that every
+// assertOnlyGlobalDiscovery pins that the global skill survived, that every
 // primitive reachable only through the project directory or its session listings
-// was withheld.
-func assertOnlyGlobalDiscovery(t *testing.T, got []Primitive) {
+// was withheld, and that the pass reports itself as partial so the snapshot writer
+// does not read the absences as deletions.
+func assertOnlyGlobalDiscovery(t *testing.T, got Discovery) {
 	t.Helper()
+	if got.ProjectScanned {
+		t.Fatalf("a withheld pass reported a scanned project: %+v", got)
+	}
 	found := map[primitiveKey]bool{}
-	for _, item := range got {
+	for _, item := range got.Primitives {
 		found[primitiveKey{kind: item.Kind, name: item.Name}] = true
 	}
 	if !found[primitiveKey{kind: record.KindSkill, name: "global-skill"}] {
