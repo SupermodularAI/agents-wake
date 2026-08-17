@@ -291,6 +291,34 @@ func (d settingsDoc) publish() error {
 	return atomicfile.Publish(d.path, append(data, '\n'), atomicfile.ModeOf(d.path, settingsFileMode))
 }
 
+// checkSettingsShape raises every refusal the settings file's shape decides, and
+// keeps nothing it read.
+//
+// It is installHooks' own read, performed early and thrown away, because every one
+// of these refusals needs claudeDir and nothing else: raised from inside the
+// settings lock they would be raised after consent and scan.repos had been
+// written, and a consent record without a trigger is a repository that from then on
+// collects only what a manual `wake ingest` picks up.
+//
+// Nothing is carried across — not the resolved path, not the decoded document.
+// installHooks has to decide what to write from the bytes it read while holding the
+// settings lock, so a document read out here would be a stale premise dressed as a
+// decision. A settings file that changes shape in between is refused by the second
+// read exactly as it would have been without this one; that is a lost race, not a
+// half-installed state, because nothing has been written when it happens.
+func checkSettingsShape(claudeDir string) error {
+	doc, err := readSettings(claudeDir)
+	if err != nil {
+		return err
+	}
+	for _, event := range hookEvents {
+		if _, groupsErr := doc.groups(event); groupsErr != nil {
+			return groupsErr
+		}
+	}
+	return nil
+}
+
 // installHooks adds Wake's group to every hookEvent, leaving every other hook and
 // every unknown setting exactly as it found them, and returns how many groups it
 // wrote or corrected.

@@ -39,19 +39,17 @@ const ingestLockName = "ingest.lock"
 //
 // Two things are pre-checkable, and both are checked here. executable is the path
 // this process was started from, and a hook command is resolved out of it.
-// claudeDir holds the settings file, and the shapes this build refuses to edit — a
-// non-regular file, a link resolving to nothing — are decided by one Lstat, so
-// leaving them to be raised from inside installHooks would raise them after
-// Register and AddToList had already written.
+// claudeDir holds the settings file, and every shape this build refuses to edit —
+// a non-regular file, a link resolving to nothing, and each of the document shapes
+// its decoding rejects — is decided by claudeDir alone, so leaving any of them to
+// be raised from inside installHooks would raise it after Register and AddToList
+// had already written.
 func Init(paths config.Paths, root, claudeDir, executable string) (int, error) {
 	command, err := hookCommandFor(executable)
 	if err != nil {
 		return 0, err
 	}
-	// The resolved path is deliberately discarded rather than carried into
-	// installHooks: the file it publishes must be the one resolved under the
-	// settings lock, and a path resolved out here is a pre-check, not the decision.
-	if _, settingsErr := settingsFileFor(claudeDir); settingsErr != nil {
+	if settingsErr := checkSettingsShape(claudeDir); settingsErr != nil {
 		return 0, settingsErr
 	}
 	repos, err := config.OpenRepos(paths)
