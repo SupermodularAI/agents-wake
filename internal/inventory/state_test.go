@@ -5,9 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/lockfile"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 	"github.com/SupermodularAI/agents-wake/internal/store"
 )
@@ -126,6 +128,124 @@ func TestReadRejectsAPathShapedPrimitiveName(t *testing.T) {
 	}
 	if _, err := New(statePath).Read(); err == nil {
 		t.Fatal("Read() accepted a path-shaped primitive name")
+	}
+}
+
+// interleaveWindow is how long the stale refresh waits for the newer one. It is
+// generous on purpose: on the passing path it is spent in full, and shortening it
+// is what would make this test flaky. Raise it if CI needs more, never lower it.
+const interleaveWindow = 200 * time.Millisecond
+
+// growingSource returns more of the spool on each read and lets the first read be
+// held open, so the test can force the exact interleaving that made an older
+// snapshot overwrite a newer one: refresh A reads, refresh B reads and publishes,
+// then A publishes what it read before B ran.
+type growingSource struct {
+	mu       sync.Mutex
+	reads    int
+	entries  []store.Entry
+	entered  chan struct{} // closed inside the first read
+	released chan struct{} // closed by the test once the second refresh has finished
+}
+
+func (g *growingSource) Entries(uint64) ([]store.Entry, error) {
+	g.mu.Lock()
+	g.reads++
+	read := g.reads
+	g.mu.Unlock()
+	if read == 1 {
+		close(g.entered)
+		// Serialised, this wait times out because the second refresh cannot start
+		// until this one has published and released the lock. Unserialised, it
+		// returns at once and this refresh republishes what it read first.
+		select {
+		case <-g.released:
+		case <-time.After(interleaveWindow):
+		}
+		return g.entries[:1], nil
+	}
+	return g.entries, nil
+}
+
+func TestRefreshCannotPublishAStaleSnapshotAfterANewerOne(t *testing.T) {
+	first := inventoryRecord("first", "skill-a", time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC))
+	second := inventoryRecord("second", "skill-a", first.Timestamp.Add(time.Minute))
+	source := &growingSource{
+		entries:  []store.Entry{{Position: 1, Record: first}, {Position: 2, Record: second}},
+		entered:  make(chan struct{}),
+		released: make(chan struct{}),
+	}
+	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
+	available := Discovery{
+		Primitives:     []Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "skill-a"}},
+		ProjectScanned: true,
+	}
+
+	stale := make(chan error, 1)
+	go func() { stale <- primitives.Refresh(source, available) }()
+	<-source.entered
+	if err := primitives.Refresh(source, available); err != nil {
+		t.Fatalf("second Refresh() error = %v", err)
+	}
+	close(source.released)
+	if err := <-stale; err != nil {
+		t.Fatalf("first Refresh() error = %v", err)
+	}
+
+	items, err := primitives.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	// The published snapshot must be the one derived from the later read: two
+	// invocations, and the later timestamp.
+	if len(items) != 1 || items[0].Invocations != 2 || !items[0].LastUsed.Equal(second.Timestamp) {
+		t.Fatalf("a stale snapshot was published over a newer one: %+v", items)
+	}
+}
+
+func TestRefreshWaitsForTheStateLock(t *testing.T) {
+	events := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	seed := inventoryRecord("first", "skill-a", time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC))
+	if _, err := events.Append([]record.Record{seed}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
+	available := Discovery{
+		Primitives:     []Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "skill-a"}},
+		ProjectScanned: true,
+	}
+
+	done := make(chan error, 1)
+	// finished records that the channel was already drained, so an unserialised
+	// Refresh fails this test rather than blocking it forever on a second receive.
+	finished := false
+	// t.Errorf rather than t.Fatalf inside the closure, so the lock is released
+	// however these assertions go.
+	if err := lockfile.WithLock(primitives.lockPath, func() error {
+		go func() { done <- primitives.Refresh(events, available) }()
+		select {
+		case err := <-done:
+			finished = true
+			t.Errorf("Refresh() finished while the state lock was held: %v", err)
+		case <-time.After(100 * time.Millisecond):
+		}
+		if _, statErr := os.Stat(primitives.path); !os.IsNotExist(statErr) {
+			t.Errorf("Refresh() published a snapshot while the state lock was held: %v", statErr)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("WithLock() error = %v", err)
+	}
+	if finished {
+		return
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	items, err := primitives.Read()
+	if err != nil || len(items) != 1 {
+		t.Fatalf("Read() = %+v, %v", items, err)
 	}
 }
 

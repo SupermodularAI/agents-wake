@@ -10,8 +10,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"syscall"
 
+	"github.com/SupermodularAI/agents-wake/internal/lockfile"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 )
 
@@ -45,8 +45,9 @@ func New(path string) *Store {
 }
 
 // Append validates all supplied records, drops invalid ones, and appends only
-// IDs not already in the spool. The lock covers both the duplicate check and
-// append so two ingest processes cannot interleave records or double count.
+// IDs not already in the spool. The lock covers the recovery of an interrupted
+// write, the duplicate check and the append, so two ingest processes cannot
+// interleave records, double count, or recover the same tail twice.
 func (s *Store) Append(records []record.Record) (Result, error) {
 	result := Result{}
 	valid := make([]record.Record, 0, len(records))
@@ -64,23 +65,33 @@ func (s *Store) Append(records []record.Record) (Result, error) {
 	if err := os.MkdirAll(filepath.Dir(s.path), dirMode); err != nil {
 		return result, fmt.Errorf("creating store directory: %w", err)
 	}
-	lock, err := os.OpenFile(s.lockPath, os.O_CREATE|os.O_RDWR, fileMode)
-	if err != nil {
-		return result, fmt.Errorf("opening store lock: %w", err)
+
+	locked := Result{}
+	if err := lockfile.WithLock(s.lockPath, func() error {
+		var appendErr error
+		locked, appendErr = s.appendLocked(valid)
+		return appendErr
+	}); err != nil {
+		// Never a false Written: an append that did not land reports only the
+		// records dropped before the lock was taken. A caller that advanced a
+		// cursor on a Written it did not get would lose those records for good.
+		return Result{Dropped: result.Dropped}, err
 	}
-	defer lock.Close()
-	if lockErr := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); lockErr != nil {
-		return result, fmt.Errorf("locking store: %w", lockErr)
+	result.Written, result.Duplicate = locked.Written, locked.Duplicate
+	result.Dropped += locked.Dropped
+	return result, nil
+}
+
+// appendLocked does the read-modify-write the caller holds the lock for.
+func (s *Store) appendLocked(valid []record.Record) (Result, error) {
+	result := Result{}
+	if err := s.recoverPartialTail(); err != nil {
+		return Result{}, err
 	}
-	defer func() {
-		if unlockErr := syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); unlockErr != nil {
-			return
-		}
-	}()
 
 	existing, err := s.ids()
 	if err != nil {
-		return result, err
+		return Result{}, err
 	}
 
 	var appendData bytes.Buffer
@@ -105,16 +116,76 @@ func (s *Store) Append(records []record.Record) (Result, error) {
 
 	spool, err := os.OpenFile(s.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, fileMode)
 	if err != nil {
-		return result, fmt.Errorf("opening store: %w", err)
+		return Result{}, fmt.Errorf("opening store: %w", err)
 	}
 	defer spool.Close()
 	if _, err := spool.Write(appendData.Bytes()); err != nil {
-		return result, fmt.Errorf("appending store: %w", err)
+		return Result{}, fmt.Errorf("appending store: %w", err)
 	}
 	if err := spool.Sync(); err != nil {
-		return result, fmt.Errorf("syncing store: %w", err)
+		return Result{}, fmt.Errorf("syncing store: %w", err)
 	}
 	return result, nil
+}
+
+// recoverPartialTail truncates a final line that no newline terminates, so a new
+// record cannot be concatenated onto the remains of an interrupted write. Only
+// the unterminated tail is removed and the truncation is synced before anything
+// is appended: every preceding complete line stays byte-identical, including one
+// that fails record decoding — that is an invalid record, not damage to repair.
+func (s *Store) recoverPartialTail() error {
+	info, err := os.Stat(s.path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspecting store: %w", err)
+	}
+	if info.Size() == 0 {
+		return nil
+	}
+
+	file, err := os.OpenFile(s.path, os.O_RDWR, fileMode)
+	if err != nil {
+		return fmt.Errorf("opening store for recovery: %w", err)
+	}
+	defer file.Close()
+
+	last := make([]byte, 1)
+	if _, readErr := file.ReadAt(last, info.Size()-1); readErr != nil {
+		return fmt.Errorf("reading store tail: %w", readErr)
+	}
+	if last[0] == '\n' {
+		return nil
+	}
+	boundary, err := lastRecordBoundary(file, info.Size())
+	if err != nil {
+		return err
+	}
+	if err := file.Truncate(boundary); err != nil {
+		return fmt.Errorf("truncating store tail: %w", err)
+	}
+	return file.Sync()
+}
+
+// lastRecordBoundary returns the offset just past the last newline in file, or 0
+// when the whole file is one unterminated line. It scans backwards in a bounded
+// window so recovery does not depend on the spool fitting in memory.
+func lastRecordBoundary(file *os.File, size int64) (int64, error) {
+	const window = 64 * 1024
+	buffer := make([]byte, window)
+	for end := size; end > 0; {
+		start := max(end-window, 0)
+		chunk := buffer[:end-start]
+		if _, err := file.ReadAt(chunk, start); err != nil {
+			return 0, fmt.Errorf("scanning store tail: %w", err)
+		}
+		if index := bytes.LastIndexByte(chunk, '\n'); index >= 0 {
+			return start + int64(index) + 1, nil
+		}
+		end = start
+	}
+	return 0, nil
 }
 
 // Entries returns complete, valid NDJSON records in write order. A trailing

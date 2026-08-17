@@ -3,7 +3,6 @@
 package inventory
 
 import (
-	"bufio"
 	"encoding/json"
 	"io"
 	"os"
@@ -11,10 +10,17 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/SupermodularAI/agents-wake/internal/jsonl"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 )
 
 const claudeCode = record.Identifier("claude-code")
+
+// maxListingLineBytes is the largest session line this discovery pass reads. It
+// stays an internal constant, not a config key: ADR-0014 keeps the config surface
+// deliberately small, and a limit a user can raise is a limit that stops bounding
+// anything.
+const maxListingLineBytes = 2 * 1024 * 1024
 
 // Primitive is a locally available harness primitive. Discovery never persists
 // it; it is merged with the event store only while rendering the dashboard.
@@ -187,9 +193,7 @@ func scanListings(path, root string, add func(record.Kind, string)) {
 }
 
 func readListings(reader io.Reader, root string, add func(record.Kind, string)) {
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
-	for scanner.Scan() {
+	visit := func(line []byte) {
 		var entry struct {
 			CWD        string `json:"cwd"`
 			Attachment struct {
@@ -199,13 +203,13 @@ func readListings(reader io.Reader, root string, add func(record.Kind, string)) 
 				AddedTypes []string `json:"addedTypes"`
 			} `json:"attachment"`
 		}
-		if json.Unmarshal(scanner.Bytes(), &entry) != nil || !underRoot(entry.CWD, root) {
-			continue
+		if json.Unmarshal(line, &entry) != nil || !underRoot(entry.CWD, root) {
+			return
 		}
 		switch entry.Attachment.Type {
 		case "skill_listing":
-			for _, line := range strings.Split(entry.Attachment.Content, "\n") {
-				name, found := strings.CutPrefix(line, "- ")
+			for _, listed := range strings.Split(entry.Attachment.Content, "\n") {
+				name, found := strings.CutPrefix(listed, "- ")
 				if !found {
 					continue
 				}
@@ -223,6 +227,14 @@ func readListings(reader io.Reader, root string, add func(record.Kind, string)) 
 				add(record.KindMCPServer, name)
 			}
 		}
+	}
+	// "Could not read" means "collects nothing", never an error that breaks a
+	// command: this listing contributes what it already produced. The count of
+	// discarded lines is deliberately dropped rather than reported — a per-read
+	// health counter must not enter the snapshot, whose rows are one per change of
+	// state (ADR-0014), and surfacing partial discovery is a later phase's scope.
+	if _, err := jsonl.Lines(reader, maxListingLineBytes, visit); err != nil {
+		return
 	}
 }
 

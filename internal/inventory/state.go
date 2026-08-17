@@ -11,6 +11,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/lockfile"
 	"github.com/SupermodularAI/agents-wake/internal/metrics"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 	"github.com/SupermodularAI/agents-wake/internal/store"
@@ -32,25 +33,44 @@ type Usage struct {
 	LastUsed    time.Time         `json:"last_used,omitempty"`
 }
 
-// Store owns the derived primitive inventory at one local path.
-type Store struct{ path string }
+// EventSource is the read side of the event spool a refresh derives usage from.
+// It is an interface so this package depends on the spool's contents and not on
+// its storage format; *store.Store implements it.
+type EventSource interface {
+	Entries(after uint64) ([]store.Entry, error)
+}
+
+// Store owns the derived primitive inventory at one local path and the lock that
+// serializes a refresh of it.
+type Store struct {
+	path     string
+	lockPath string
+}
 
 // New creates a primitive inventory store. It creates nothing until Refresh.
-func New(path string) *Store { return &Store{path: path} }
+func New(path string) *Store { return &Store{path: path, lockPath: path + ".lock"} }
 
 // Refresh records all currently discovered primitives and their current usage.
 // Replacing the snapshot removes primitives no longer found by the harness — but
 // only the ones this pass was in a position to look for; see available.
-func (s *Store) Refresh(source *store.Store, discovered Discovery) error {
-	entries, err := source.Entries(0)
-	if err != nil {
-		return err
-	}
-	records := make([]record.Record, 0, len(entries))
-	for _, entry := range entries {
-		records = append(records, entry.Record)
-	}
-	return s.write(derive(metrics.Aggregate(records), s.available(discovered)))
+//
+// The lock spans the source read, the carry-forward decision and the publication,
+// not just the write: publication is already atomic, but a refresh republishes the
+// whole snapshot, so one that decided what to publish from an earlier read would
+// erase a newer one. Atomicity and isolation are different properties, and this
+// needs both.
+func (s *Store) Refresh(source EventSource, discovered Discovery) error {
+	return lockfile.WithLock(s.lockPath, func() error {
+		entries, err := source.Entries(0)
+		if err != nil {
+			return err
+		}
+		records := make([]record.Record, 0, len(entries))
+		for _, entry := range entries {
+			records = append(records, entry.Record)
+		}
+		return s.write(derive(metrics.Aggregate(records), s.available(discovered)))
+	})
 }
 
 // available is what this pass may write: everything it discovered, plus — when
