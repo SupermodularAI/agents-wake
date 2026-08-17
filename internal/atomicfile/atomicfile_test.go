@@ -178,6 +178,29 @@ func TestModeOfReportsAnExistingFilesMode(t *testing.T) {
 	}
 }
 
+// A publication replaces a path with a regular file, so the mode of anything that
+// is not one is not a mode it can preserve. A symlink's own bits are 0755 on darwin
+// and 0777 on linux, and reporting them would have a caller publish a file the whole
+// machine can read — or on linux write — over a file that had been private.
+func TestModeOfFallsBackWhenThePathIsNotARegularFile(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "theirs.json")
+	if err := os.WriteFile(target, []byte("theirs"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	link := filepath.Join(dir, "link.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	if got := ModeOf(link, 0o600); got != 0o600 {
+		t.Errorf("ModeOf(a symlink) = %v, want the 0600 fallback — a link's own bits are not a file's mode", got)
+	}
+	if got := ModeOf(dir, 0o600); got != 0o600 {
+		t.Errorf("ModeOf(a directory) = %v, want the 0600 fallback", got)
+	}
+}
+
 // assertNoTemporaryFile fails when dir holds a leftover publication temporary.
 // A leftover is a full copy of whatever was being published that nothing would
 // ever clean up.
