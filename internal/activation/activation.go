@@ -2,7 +2,6 @@
 package activation
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -18,14 +17,23 @@ import (
 	"github.com/SupermodularAI/agents-wake/internal/store"
 )
 
-const (
-	eventsFile  = "events.ndjson"
-	hookCommand = "wake ingest --quiet"
-)
+const eventsFile = "events.ndjson"
 
 // Init records consent, adds Wake's trigger without replacing existing hooks,
 // and imports available Claude Code history.
-func Init(paths config.Paths, root, claudeDir string) (int, error) {
+//
+// executable is the path this process was started from, and resolving a hook
+// command out of it is Init's first act — before consent is recorded, before
+// config.toml is touched and before the settings file is opened. An installation
+// that cannot host a hook command therefore writes nothing at all, which is
+// stronger than rejecting it before modifying the settings: a consent record for a
+// repository whose trigger was never installed is a repository that silently
+// collects only what a manual `wake ingest` picks up.
+func Init(paths config.Paths, root, claudeDir, executable string) (int, error) {
+	command, err := hookCommandFor(executable)
+	if err != nil {
+		return 0, err
+	}
 	repos, err := config.OpenRepos(paths)
 	if err != nil {
 		return 0, err
@@ -38,9 +46,8 @@ func Init(paths config.Paths, root, claudeDir string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	err = installHooks(claudeDir)
-	if err != nil {
-		return 0, err
+	if _, installErr := installHooks(paths, claudeDir, command); installErr != nil {
+		return 0, installErr
 	}
 	events := store.New(filepath.Join(paths.DataDir, eventsFile))
 	written, err := ingestHistory(repos, claudeDir, events)
@@ -83,7 +90,7 @@ func Rebuild(paths config.Paths, claudeDir string) (int, error) {
 // Uninstall removes only Wake's Claude Code hooks. It deliberately keeps local
 // data unless purge is requested, so removing automation never destroys history.
 func Uninstall(paths config.Paths, claudeDir string, purge bool) (bool, error) {
-	removed, err := removeHooks(claudeDir)
+	removed, _, err := removeHooks(paths, claudeDir)
 	if err != nil {
 		return false, err
 	}
@@ -92,7 +99,7 @@ func Uninstall(paths config.Paths, claudeDir string, purge bool) (bool, error) {
 			return false, err
 		}
 	}
-	return removed, nil
+	return removed > 0, nil
 }
 
 func addConsentedRepo(paths config.Paths, id string) error {
@@ -176,153 +183,4 @@ func discoveryScope(repos *config.Repos, claudeDir, cwd string) (inventory.Scope
 func refreshInventory(paths config.Paths, repos *config.Repos, claudeDir, root string, events *store.Store) error {
 	scope, names := discoveryScope(repos, claudeDir, root)
 	return inventory.New(paths.PrimitivesFile).Refresh(events, inventory.ClaudeCodeInScope(scope, names))
-}
-
-func installHooks(claudeDir string) error {
-	path := filepath.Join(claudeDir, "settings.json")
-	settings := map[string]json.RawMessage{}
-	if raw, readErr := os.ReadFile(path); readErr == nil {
-		if err := json.Unmarshal(raw, &settings); err != nil {
-			return errors.New("cannot parse Claude Code settings")
-		}
-	} else if !errors.Is(readErr, fs.ErrNotExist) {
-		return readErr
-	}
-
-	hooks := map[string]json.RawMessage{}
-	if raw, found := settings["hooks"]; found && json.Unmarshal(raw, &hooks) != nil {
-		return errors.New("cannot parse Claude Code hooks")
-	}
-	for _, event := range []string{"SessionStart", "SessionEnd"} {
-		updated, err := appendHook(hooks[event])
-		if err != nil {
-			return err
-		}
-		hooks[event] = updated
-	}
-	encodedHooks, err := json.Marshal(hooks)
-	if err != nil {
-		return err
-	}
-	settings["hooks"] = encodedHooks
-	data, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	return os.WriteFile(path, append(data, '\n'), 0o600)
-}
-
-func appendHook(raw json.RawMessage) (json.RawMessage, error) {
-	entries := []json.RawMessage{}
-	if len(raw) != 0 && json.Unmarshal(raw, &entries) != nil {
-		return nil, errors.New("cannot parse Claude Code hook event")
-	}
-	for _, entry := range entries {
-		var group struct {
-			Hooks []struct {
-				Command string `json:"command"`
-			} `json:"hooks"`
-		}
-		if json.Unmarshal(entry, &group) != nil {
-			return nil, errors.New("cannot parse Claude Code hook group")
-		}
-		if slices.ContainsFunc(group.Hooks, func(hook struct {
-			Command string `json:"command"`
-		}) bool {
-			return hook.Command == hookCommand
-		}) {
-			return json.Marshal(entries)
-		}
-	}
-	owned := json.RawMessage(`{"wake":true,"hooks":[{"type":"command","command":"` + hookCommand + `"}]}`)
-	return json.Marshal(append(entries, owned))
-}
-
-func removeHooks(claudeDir string) (bool, error) {
-	path := filepath.Join(claudeDir, "settings.json")
-	raw, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	settings := map[string]json.RawMessage{}
-	if json.Unmarshal(raw, &settings) != nil {
-		return false, errors.New("cannot parse Claude Code settings")
-	}
-	hooks := map[string]json.RawMessage{}
-	if rawHooks, found := settings["hooks"]; !found {
-		return false, nil
-	} else if json.Unmarshal(rawHooks, &hooks) != nil {
-		return false, errors.New("cannot parse Claude Code hooks")
-	}
-
-	removed := false
-	for event, rawGroups := range hooks {
-		groups := []json.RawMessage{}
-		if json.Unmarshal(rawGroups, &groups) != nil {
-			return false, errors.New("cannot parse Claude Code hook event")
-		}
-		kept := make([]json.RawMessage, 0, len(groups))
-		for _, group := range groups {
-			if wakeHook(group) {
-				removed = true
-				continue
-			}
-			kept = append(kept, group)
-		}
-		if len(kept) == 0 {
-			delete(hooks, event)
-			continue
-		}
-		encoded, marshalErr := json.Marshal(kept)
-		if marshalErr != nil {
-			return false, marshalErr
-		}
-		hooks[event] = encoded
-	}
-	if !removed {
-		return false, nil
-	}
-	if len(hooks) == 0 {
-		delete(settings, "hooks")
-	} else {
-		encoded, marshalErr := json.Marshal(hooks)
-		if marshalErr != nil {
-			return false, marshalErr
-		}
-		settings["hooks"] = encoded
-	}
-	encoded, marshalErr := json.MarshalIndent(settings, "", "  ")
-	if marshalErr != nil {
-		return false, marshalErr
-	}
-	if err := os.WriteFile(path, append(encoded, '\n'), 0o600); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-func wakeHook(raw json.RawMessage) bool {
-	var group struct {
-		Wake  bool `json:"wake"`
-		Hooks []struct {
-			Command string `json:"command"`
-		} `json:"hooks"`
-	}
-	if json.Unmarshal(raw, &group) != nil {
-		return false
-	}
-	if group.Wake {
-		return true
-	}
-	return slices.ContainsFunc(group.Hooks, func(hook struct {
-		Command string `json:"command"`
-	}) bool {
-		return hook.Command == hookCommand
-	})
 }

@@ -33,9 +33,13 @@ func newInitCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
+		self, err := os.Executable()
+		if err != nil {
+			return err
+		}
 		claudeDir := filepath.Join(home, ".claude")
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Wake will modify:\n%s\n%s\n%s\n%s\n", paths.ConfigFile, paths.ProjectsFile, filepath.Join(claudeDir, "settings.json"), filepath.Join(paths.DataDir, "events.ndjson"))
-		written, err := activation.Init(paths, root, claudeDir)
+		written, err := activation.Init(paths, root, claudeDir, self)
 		if err != nil {
 			return err
 		}
