@@ -209,10 +209,6 @@ func (entry transcriptEntry) call(block contentBlock, resolve Resolver, names re
 	if err != nil {
 		return call{}, callSkipped
 	}
-	name, err := primitiveName(block, names)
-	if err != nil {
-		return call{}, callRefusedName
-	}
 	sessionID, err := record.BoundedToken(entry.SessionID)
 	if err != nil {
 		return call{}, callSkipped
@@ -220,6 +216,14 @@ func (entry transcriptEntry) call(block contentBlock, resolve Resolver, names re
 	repo, consented := resolve(entry.CWD)
 	if !consented {
 		return call{}, callSkipped
+	}
+	// Named last, after every reason this call was never Wake's to collect. A
+	// refusal is reported as lost collection, so it may only count a call that
+	// would otherwise have been collected: a nameless call in a directory the user
+	// never consented to is outside collection, not lost from it.
+	name, err := primitiveName(block, names)
+	if err != nil {
+		return call{}, callRefusedName
 	}
 
 	derived := call{
