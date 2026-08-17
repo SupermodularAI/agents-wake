@@ -329,6 +329,124 @@ func TestInstallAndRemoveReturnAnActionableErrorForNullSettings(t *testing.T) {
 	}
 }
 
+// linkedSettings points claudeDir's settings file at a file in a separate store, the
+// way stow, chezmoi and yadm all leave ~/.claude/settings.json. content empty leaves
+// the link dangling, which is what a dotfile store that has not been checked out yet
+// looks like.
+func linkedSettings(t *testing.T, claudeDir, content string) string {
+	t.Helper()
+	store := filepath.Join(t.TempDir(), "dotfiles")
+	if err := os.MkdirAll(store, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	target := filepath.Join(store, "settings.json")
+	if content != "" {
+		// 0644, the mode a file in a checked-out dotfile repository usually has, so
+		// the test can tell a preserved mode from an imposed one.
+		if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
+			t.Fatalf("WriteFile() error = %v", err)
+		}
+	}
+	if err := os.Symlink(target, settingsPath(claudeDir)); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	return target
+}
+
+// A symlinked settings.json has to be written through, not replaced. Replacing it
+// loses the link — so the user's dotfile store keeps the pre-init content and every
+// later change goes to a file nothing reads — and it publishes at the mode Lstat
+// reported for the link, which is 0755 on darwin and 0777 on linux, for a file whose
+// content is a list of commands the harness executes at session start.
+func TestInstallHooksWritesThroughASymlinkedSettingsFile(t *testing.T) {
+	paths, claudeDir := settingsFixture(t, "")
+	target := linkedSettings(t, claudeDir, `{"theme":"dark"}`+"\n")
+
+	if _, err := installHooks(paths, claudeDir, testCommand(t)); err != nil {
+		t.Fatalf("installHooks() error = %v", err)
+	}
+
+	info, err := os.Lstat(settingsPath(claudeDir))
+	if err != nil {
+		t.Fatalf("Lstat() error = %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Error("the settings file is no longer a symlink; the write went somewhere the user's dotfile store will never see")
+	}
+	written := readSettingsFile(t, claudeDir)
+	if !strings.Contains(written, `"theme"`) || !strings.Contains(written, `"wake"`) {
+		t.Errorf("settings = %s, want the user's setting kept and Wake's hooks added", written)
+	}
+	raw, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile(the dotfile store) error = %v", err)
+	}
+	if string(raw) != written {
+		t.Errorf("the dotfile store holds %s, want what the settings path reads back (%s)", raw, written)
+	}
+	targetInfo, err := os.Lstat(target)
+	if err != nil {
+		t.Fatalf("Lstat(the dotfile store) error = %v", err)
+	}
+	if perm := targetInfo.Mode().Perm(); perm != 0o644 {
+		t.Errorf("mode = %v, want the target's own 0644 — never the link's bits, and never wider", perm)
+	}
+}
+
+// A settings path that is not a file and not a link to one is refused, because the
+// alternative is publishing a regular file over whatever it is. The refusal names
+// what was expected and leaves the path as it found it.
+func TestInstallAndRemoveRefuseASettingsPathThatIsNotAFile(t *testing.T) {
+	command := testCommand(t)
+	for _, c := range []struct {
+		name  string
+		build func(t *testing.T, claudeDir string)
+	}{
+		{"a directory", func(t *testing.T, claudeDir string) {
+			if err := os.MkdirAll(settingsPath(claudeDir), 0o700); err != nil {
+				t.Fatalf("MkdirAll() error = %v", err)
+			}
+		}},
+		{"a link to nothing", func(t *testing.T, claudeDir string) {
+			linkedSettings(t, claudeDir, "")
+		}},
+		{"a link to a directory", func(t *testing.T, claudeDir string) {
+			target := filepath.Join(t.TempDir(), "somewhere")
+			if err := os.MkdirAll(target, 0o700); err != nil {
+				t.Fatalf("MkdirAll() error = %v", err)
+			}
+			if err := os.Symlink(target, settingsPath(claudeDir)); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			paths, claudeDir := settingsFixture(t, "")
+			c.build(t, claudeDir)
+
+			_, installErr := installHooks(paths, claudeDir, command)
+			_, _, removeErr := removeHooks(paths, claudeDir)
+
+			for name, err := range map[string]error{"installHooks": installErr, "removeHooks": removeErr} {
+				if err == nil {
+					t.Errorf("%s() error = nil, want a refusal", name)
+					continue
+				}
+				if !strings.Contains(err.Error(), "file") {
+					t.Errorf("%s() error = %q, want a message naming what was expected", name, err)
+				}
+			}
+			info, err := os.Lstat(settingsPath(claudeDir))
+			if err != nil {
+				t.Fatalf("Lstat() error = %v", err)
+			}
+			if info.Mode().IsRegular() {
+				t.Error("the settings path was replaced by a regular file")
+			}
+		})
+	}
+}
+
 func TestHookCommandForAcceptsADocumentedInstallation(t *testing.T) {
 	path := testExecutable(t)
 

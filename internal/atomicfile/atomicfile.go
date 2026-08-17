@@ -100,11 +100,15 @@ func Publish(path string, data []byte, mode fs.FileMode) error {
 //
 // A file this tool did not create is not this tool's to re-permission: forcing a
 // mode onto it would be a side effect of writing one setting. Lstat rather than
-// Stat, so a symlink's own mode is what gets reported and following it cannot
-// pick up the mode of something else entirely.
+// Stat, so following a link cannot pick up the mode of something else entirely —
+// and anything Lstat reports as not a regular file falls back, because Publish
+// replaces a path with a regular file and the bits of a link or a directory are not
+// a mode a regular file can be published at. A symlink carries 0755 on darwin and
+// 0777 on linux, so reporting its bits would hand a caller a settings file the whole
+// machine can read, or on linux write.
 func ModeOf(path string, fallback fs.FileMode) fs.FileMode {
 	info, err := os.Lstat(path)
-	if err != nil {
+	if err != nil || !info.Mode().IsRegular() {
 		return fallback
 	}
 	return info.Mode().Perm()

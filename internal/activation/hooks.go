@@ -37,14 +37,16 @@ const settingsFileName = "settings.json"
 // be a side effect ADR-0010 does not license.
 const settingsFileMode = fs.FileMode(0o600)
 
-// The four shapes a settings file can have that this build refuses to edit. Each
-// says what was expected and where, and quotes nothing out of the file: a hook
-// command is a command line, and plan §4.2 keeps source content out of every error.
+// The shapes a settings file can have that this build refuses to edit. Each says
+// what was expected and where, and quotes nothing out of the file: a hook command is
+// a command line, and plan §4.2 keeps source content out of every error.
 var (
-	errSettingsNotAnObject = errors.New("the Claude Code settings file must hold a JSON object")
-	errSettingsUnreadable  = errors.New("the Claude Code settings file is not valid JSON")
-	errHooksNotAnObject    = errors.New(`the "hooks" setting must hold a JSON object`)
-	errHookEventNotAnArray = errors.New("a hook event must hold an array of hook groups")
+	errSettingsNotAnObject  = errors.New("the Claude Code settings file must hold a JSON object")
+	errSettingsUnreadable   = errors.New("the Claude Code settings file is not valid JSON")
+	errHooksNotAnObject     = errors.New(`the "hooks" setting must hold a JSON object`)
+	errHookEventNotAnArray  = errors.New("a hook event must hold an array of hook groups")
+	errSettingsNotARegular  = errors.New("the Claude Code settings file is not a regular file; move whatever is in its place aside and run wake init again")
+	errSettingsLinkIsBroken = errors.New("the Claude Code settings file is a symbolic link that resolves to no file; restore what it points at, or remove the link, and run wake init again")
 )
 
 // The three ways an installation cannot host a hook command. Each names the
@@ -117,6 +119,52 @@ type settingsDoc struct {
 	hadHooks bool
 }
 
+// settingsFileFor resolves the file the settings document is read from and written
+// back to.
+//
+// A symlink is resolved to its target and the target is what gets published, because
+// publication replaces a path with a regular file: publishing over the link itself
+// would delete it, so a user whose ~/.claude/settings.json is symlinked into a
+// dotfile store — which is what stow, chezmoi and yadm all leave behind — would keep
+// the pre-init content in their store and lose every later change to a file nothing
+// reads. It would also publish at the mode Lstat reports for the link, 0755 on darwin
+// and 0777 on linux, for a file holding commands the harness executes.
+//
+// A path that is neither a regular file nor a link to one is refused rather than
+// replaced: this build cannot know what somebody put there, and the settings file is
+// the harness's, not Wake's. A missing path is not a fault — `init` on a fresh
+// machine has no settings file, and creating it is what installing a hook does.
+func settingsFileFor(claudeDir string) (string, error) {
+	path := filepath.Join(claudeDir, settingsFileName)
+	info, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return path, nil
+	case err != nil:
+		return "", fmt.Errorf("reading the Claude Code settings file: %w", err)
+	case info.Mode().IsRegular():
+		return path, nil
+	case info.Mode()&fs.ModeSymlink == 0:
+		return "", errSettingsNotARegular
+	}
+
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", errSettingsLinkIsBroken
+	}
+	// Lstat again on the resolved path: EvalSymlinks answers where the link leads,
+	// not what is there, and a link to a directory or a socket is as unpublishable as
+	// one at the path itself.
+	target, err := os.Lstat(resolved)
+	if err != nil {
+		return "", errSettingsLinkIsBroken
+	}
+	if !target.Mode().IsRegular() {
+		return "", errSettingsNotARegular
+	}
+	return resolved, nil
+}
+
 // readSettings decodes the settings file, or reports the shape it refuses to edit.
 //
 // A missing file is an empty document rather than an error: `init` on a fresh
@@ -125,8 +173,12 @@ type settingsDoc struct {
 // case that used to panic. null unmarshals into a map without error and leaves the
 // map nil, and the write into it is the crash.
 func readSettings(claudeDir string) (settingsDoc, error) {
+	path, err := settingsFileFor(claudeDir)
+	if err != nil {
+		return settingsDoc{}, err
+	}
 	doc := settingsDoc{
-		path:     filepath.Join(claudeDir, settingsFileName),
+		path:     path,
 		settings: map[string]json.RawMessage{},
 		hooks:    map[string]json.RawMessage{},
 	}
@@ -233,7 +285,9 @@ func (d settingsDoc) publish() error {
 		return fmt.Errorf("encoding the Claude Code settings: %w", err)
 	}
 	// ModeOf, not a fixed mode: settings.json belongs to the harness, and 0600 is
-	// only what a file Wake itself creates starts at.
+	// only what a file Wake itself creates starts at. d.path is a regular file or
+	// nothing — settingsFileFor resolved a link to its target and refused anything
+	// else — so this is the mode of the file being replaced, never a link's.
 	return atomicfile.Publish(d.path, append(data, '\n'), atomicfile.ModeOf(d.path, settingsFileMode))
 }
 
