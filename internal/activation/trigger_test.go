@@ -207,28 +207,75 @@ func TestScanCountersDistinguishAnUnreadableSourceFromACleanZero(t *testing.T) {
 // The ordering constraint the ticket puts on init, in its strongest form: an
 // unsupported installation writes nothing at all, not merely nothing in the
 // settings file.
+//
+// Every refusal decidable from the arguments alone belongs here, not only the hook
+// command's three: a consent record for a repository whose trigger was never
+// installed is a repository that from then on collects only what a manual
+// `wake ingest` picks up, which is the state Init's doc comment exists to prevent.
 func TestInitRejectsAnUnsupportedInstallationBeforeWritingAnything(t *testing.T) {
-	paths := testPaths(t)
-	claudeDir, root := inventoryFixture(t)
-	unsupported := filepath.Join(t.TempDir(), "wake binary")
-	if err := os.WriteFile(unsupported, []byte("x"), 0o700); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
-
-	if _, err := Init(paths, root, claudeDir, unsupported); err == nil {
-		t.Fatal("Init() error = nil, want a refusal for an installation that cannot host a hook command")
-	}
-
-	for _, path := range []string{
-		paths.ConfigFile,
-		paths.ProjectsFile,
-		paths.SaltFile,
-		paths.HealthFile,
-		filepath.Join(claudeDir, "settings.json"),
+	for _, c := range []struct {
+		name    string
+		arrange func(t *testing.T, claudeDir string) (executable string)
+	}{
+		{
+			name: "a binary at a path a hook command cannot carry",
+			arrange: func(t *testing.T, _ string) string {
+				unsupported := filepath.Join(t.TempDir(), "wake binary")
+				if err := os.WriteFile(unsupported, []byte("x"), 0o700); err != nil {
+					t.Fatalf("WriteFile() error = %v", err)
+				}
+				return unsupported
+			},
+		},
+		{
+			// A dotfile store that is not checked out yet, which is the population
+			// write-through publication was written for.
+			name: "a settings file that is a symbolic link resolving to nothing",
+			arrange: func(t *testing.T, claudeDir string) string {
+				if err := os.Symlink(filepath.Join(t.TempDir(), "dotfiles", "settings.json"), settingsPath(claudeDir)); err != nil {
+					t.Fatalf("Symlink() error = %v", err)
+				}
+				return testExecutable(t)
+			},
+		},
+		{
+			name: "a directory in the settings file's place",
+			arrange: func(t *testing.T, claudeDir string) string {
+				if err := os.MkdirAll(settingsPath(claudeDir), 0o700); err != nil {
+					t.Fatalf("MkdirAll() error = %v", err)
+				}
+				return testExecutable(t)
+			},
+		},
 	} {
-		if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
-			t.Errorf("os.Lstat(%q) = %v, want ErrNotExist — a refused init must write nothing", path, err)
-		}
+		t.Run(c.name, func(t *testing.T) {
+			paths := testPaths(t)
+			claudeDir, root := inventoryFixture(t)
+			executable := c.arrange(t, claudeDir)
+
+			if _, err := Init(paths, root, claudeDir, executable); err == nil {
+				t.Fatal("Init() error = nil, want a refusal for an installation that cannot host Wake's trigger")
+			}
+
+			for _, path := range []string{
+				paths.ConfigFile,
+				paths.ProjectsFile,
+				paths.SaltFile,
+				paths.HealthFile,
+			} {
+				if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
+					t.Errorf("os.Lstat(%q) = %v, want ErrNotExist — a refused init must write nothing", path, err)
+				}
+			}
+			// Both stats, because the two ways a settings file could have been
+			// published look different: one replaces the path itself, the other
+			// writes through a link to a target that did not exist.
+			for name, stat := range map[string]func(string) (fs.FileInfo, error){"Lstat": os.Lstat, "Stat": os.Stat} {
+				if info, err := stat(settingsPath(claudeDir)); err == nil && info.Mode().IsRegular() {
+					t.Errorf("os.%s(settings.json) reports a regular file — a refused init published settings it had refused to edit", name)
+				}
+			}
+		})
 	}
 }
 
