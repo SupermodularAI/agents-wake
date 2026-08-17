@@ -1,6 +1,6 @@
 //go:build unix
 
-package config
+package lockfile
 
 import (
 	"errors"
@@ -13,7 +13,7 @@ import (
 //
 // flock rather than a lock file somebody has to delete: the kernel releases it
 // when the descriptor closes, including when the process holding it is killed, so
-// a crash cannot leave registration permanently blocked. It is per open file
+// a crash cannot leave the state permanently blocked. It is per open file
 // description, which is what makes it hold between processes and not only between
 // goroutines.
 func lockExclusive(f *os.File) error {

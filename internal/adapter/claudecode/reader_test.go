@@ -161,6 +161,132 @@ func TestReadSkipsMalformedLine(t *testing.T) {
 	}
 }
 
+// twoCallsInOneEntry is a transcript whose single tool_use entry carries two
+// calls, terminated together by one later entry. Claude Code emits this shape
+// whenever the model calls two tools in one assistant turn.
+const twoCallsInOneEntry = `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"},{"type":"tool_use","id":"call-2","name":"Task"}]}}
+{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false},{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}`
+
+func TestReadDerivesADistinctIDForEachToolCallInOneEntry(t *testing.T) {
+	result, err := Read(strings.NewReader(twoCallsInOneEntry), resolver, names)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 2 {
+		t.Fatalf("Read() records = %+v, want one per tool call", result.Records)
+	}
+	if result.Records[0].EventID == result.Records[1].EventID {
+		t.Errorf("both tool calls derived the same event id %q", result.Records[0].EventID)
+	}
+	run := record.DeriveEventID(harness, record.Identifier("entry-1"))
+	for index, event := range result.Records {
+		if event.EventID == run {
+			t.Errorf("record %d derives the id a terminal run of entry-1 would: %q", index, event.EventID)
+		}
+	}
+}
+
+func TestReadDerivesTheSameToolCallIDsOnReingest(t *testing.T) {
+	first, err := Read(strings.NewReader(twoCallsInOneEntry), resolver, names)
+	if err != nil {
+		t.Fatalf("first Read() error = %v", err)
+	}
+	second, err := Read(strings.NewReader(twoCallsInOneEntry), resolver, names)
+	if err != nil {
+		t.Fatalf("second Read() error = %v", err)
+	}
+	if len(first.Records) != len(second.Records) {
+		t.Fatalf("record counts = %d and %d", len(first.Records), len(second.Records))
+	}
+	for index := range first.Records {
+		if first.Records[index].EventID != second.Records[index].EventID {
+			t.Errorf("record %d id = %q on re-read, was %q", index, second.Records[index].EventID, first.Records[index].EventID)
+		}
+	}
+}
+
+func TestReadDoesNotCollideAToolCallWithATerminalRun(t *testing.T) {
+	input := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"pr-review","message":{"stop_reason":"end_turn","content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+	}, "\n")
+
+	result, err := Read(strings.NewReader(input), resolver, names)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 2 {
+		t.Fatalf("Read() records = %+v, want a terminal run and a tool call", result.Records)
+	}
+	run, call := result.Records[0], result.Records[1]
+	if run.Kind != record.KindSkill || run.Outcome != nil {
+		t.Errorf("first record is not the terminal skill run: %+v", run)
+	}
+	if call.Kind != record.KindBuiltinTool {
+		t.Errorf("second record is not the tool call: %+v", call)
+	}
+	if run.EventID == call.EventID {
+		t.Errorf("a tool call and a terminal run of the same entry share id %q", run.EventID)
+	}
+}
+
+func TestReadRejectsAnEntryIDOutsideTheTokenDomain(t *testing.T) {
+	input := strings.Join([]string{
+		// The first id carries the separator itself and the second is path-shaped.
+		// Either would make a composed tool call identity ambiguous, so both are
+		// refused rather than escaped.
+		fmt.Sprintf(`{"uuid":%s,"sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"pr-review","message":{"stop_reason":"end_turn"}}`, quoted(t, "entry"+callSeparator+"1")),
+		fmt.Sprintf(`{"uuid":%s,"sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","attributionSkill":"pr-review","message":{"stop_reason":"end_turn"}}`, quoted(t, "../escape")),
+	}, "\n")
+
+	result, err := Read(strings.NewReader(input), resolver, names)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 0 {
+		t.Errorf("Read() records = %+v, want none", result.Records)
+	}
+	if result.Malformed != 2 {
+		t.Errorf("Malformed = %d, want 2", result.Malformed)
+	}
+}
+
+func TestReadCountsAnOversizedLineWithoutRetainingIt(t *testing.T) {
+	oversized := `{"uuid":"entry-x","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-x","name":"Bash"}]},"pad":"swordfish` + strings.Repeat("A", 1024*1024) + `"}`
+	input := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+		oversized,
+		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","message":{"content":[{"type":"tool_use","id":"call-2","name":"Task"}]}}`,
+		`{"uuid":"entry-4","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:03Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}`,
+	}, "\n")
+
+	result, err := Read(strings.NewReader(input), resolver, names)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 2 {
+		t.Fatalf("Read() records = %d, want a record on each side of the oversized line: %+v", len(result.Records), result)
+	}
+	if result.Malformed != 1 {
+		t.Errorf("Malformed = %d, want 1", result.Malformed)
+	}
+	if result.Pending != 0 {
+		t.Errorf("Pending = %d, want 0", result.Pending)
+	}
+	for _, event := range result.Records {
+		encoded, marshalErr := record.Marshal(event)
+		if marshalErr != nil {
+			t.Fatalf("Marshal() error = %v", marshalErr)
+		}
+		for _, fragment := range []string{"swordfish", "entry-x"} {
+			if strings.Contains(string(encoded), fragment) {
+				t.Fatalf("record retains %q from the oversized line: %s", fragment, encoded)
+			}
+		}
+	}
+}
+
 func TestReadNeverUsesToolArguments(t *testing.T) {
 	input := strings.Join([]string{
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Skill","input":{"args":"do not retain this secret"}}]}}`,
