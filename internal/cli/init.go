@@ -38,7 +38,20 @@ func newInitCmd() *cobra.Command {
 			return err
 		}
 		claudeDir := filepath.Join(home, ".claude")
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Wake will modify:\n%s\n%s\n%s\n%s\n", paths.ConfigFile, paths.ProjectsFile, filepath.Join(claudeDir, "settings.json"), filepath.Join(paths.DataDir, "events.ndjson"))
+		// The error is returned rather than discarded, and returned before any state
+		// is modified: ADR-0010 rests on `init` disclosing the exact files it will
+		// change, so a disclosure that did not reach the user is a consent step that
+		// did not happen. Every path comes from the resolved Paths rather than a
+		// re-joined literal, so the disclosure cannot drift from where the file goes.
+		if _, discloseErr := fmt.Fprintf(cmd.OutOrStdout(), "Wake will modify:\n%s\n%s\n%s\n%s\n%s\n",
+			paths.ConfigFile,
+			paths.ProjectsFile,
+			paths.HealthFile,
+			filepath.Join(claudeDir, "settings.json"),
+			filepath.Join(paths.DataDir, "events.ndjson"),
+		); discloseErr != nil {
+			return discloseErr
+		}
 		written, err := activation.Init(paths, root, claudeDir, self)
 		if err != nil {
 			return err
