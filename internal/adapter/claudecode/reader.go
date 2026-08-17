@@ -72,8 +72,13 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer) (Result, error
 		for _, block := range entry.Message.Content {
 			switch block.Type {
 			case "tool_use":
-				if pendingCall, ok := entry.call(block, resolve, names); ok {
+				pendingCall, status := entry.call(block, resolve, names)
+				switch status {
+				case callAccepted:
 					pending[pendingCall.id] = pendingCall
+				case callRefusedName:
+					result.Refused++
+				case callSkipped:
 				}
 			case "tool_result":
 				pendingCall, ok := pending[block.ToolUseID]
@@ -186,22 +191,35 @@ type call struct {
 	repo        record.Hash
 }
 
-func (entry transcriptEntry) call(block contentBlock, resolve Resolver, names record.Namer) (call, bool) {
+// callStatus separates a tool_use block whose primitive name was refused from one
+// Wake deliberately does not collect. A refused name is a fail-closed drop worth
+// counting (ADR-0007); an unusable id or an unconsented repository is a clean zero,
+// which activation already reports as a skip rather than a failure, and must not be
+// counted as a refusal.
+type callStatus int
+
+const (
+	callSkipped callStatus = iota
+	callAccepted
+	callRefusedName
+)
+
+func (entry transcriptEntry) call(block contentBlock, resolve Resolver, names record.Namer) (call, callStatus) {
 	id, err := record.BoundedToken(block.ID)
 	if err != nil {
-		return call{}, false
+		return call{}, callSkipped
 	}
 	name, err := primitiveName(block, names)
 	if err != nil {
-		return call{}, false
+		return call{}, callRefusedName
 	}
 	sessionID, err := record.BoundedToken(entry.SessionID)
 	if err != nil {
-		return call{}, false
+		return call{}, callSkipped
 	}
 	repo, consented := resolve(entry.CWD)
 	if !consented {
-		return call{}, false
+		return call{}, callSkipped
 	}
 
 	derived := call{
@@ -229,7 +247,7 @@ func (entry transcriptEntry) call(block contentBlock, resolve Resolver, names re
 	if packageName, ok := packageFromAttribution(entry.AttributionMCPServer); ok {
 		derived.packageName = packageName
 	}
-	return derived, true
+	return derived, callAccepted
 }
 
 // attributedRun records the terminal completion of a skill or subagent. Claude
@@ -282,8 +300,20 @@ func (entry transcriptEntry) attributedRun(resolve Resolver, names record.Namer)
 }
 
 func primitiveName(block contentBlock, names record.Namer) (record.Identifier, error) {
-	if block.Name == "Skill" && block.Input.Skill != "" {
-		return names.DerivedName(block.Input.Skill)
+	switch block.Name {
+	case "Skill":
+		if block.Input.Skill != "" {
+			return names.DerivedName(block.Input.Skill)
+		}
+	case "Task":
+		// Every subagent invocation carries the same tool name, so the tool name is
+		// not the primitive: input.subagent_type is. It is derived, not bounded,
+		// because a subagent can be directory-scoped ("apps/web:reviewer") and only
+		// Namer may digest a scope (ADR-0020). There is no fall-through: a Task call
+		// naming no subagent is refused rather than collected as "Task", which would
+		// merge every distinct subagent into one primitive (ADR-0002) — and
+		// DerivedName already refuses the empty value, so this needs no extra check.
+		return names.DerivedName(block.Input.SubagentType)
 	}
 	return record.BoundedIdentifier(block.Name)
 }
