@@ -37,6 +37,54 @@ func TestClaudeCodeIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestClaudeCodePersistsBothToolCallsFromOneSourceEntry(t *testing.T) {
+	input := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"},{"type":"tool_use","id":"call-2","name":"Task"}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false},{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}`,
+	}, "\n")
+	spool := filepath.Join(t.TempDir(), "events.ndjson")
+	destination := store.New(spool)
+	repo := record.Hash("0123456789abcdef0123456789abcdef")
+	resolve := func(cwd string) (record.Hash, bool) { return repo, cwd == "/repo" }
+
+	first, err := ClaudeCode(strings.NewReader(input), resolve, names, destination)
+	if err != nil {
+		t.Fatalf("first ClaudeCode() error = %v", err)
+	}
+	if first.Written != 2 || first.Duplicate != 0 || first.Dropped != 0 {
+		t.Fatalf("first ClaudeCode() = %+v, want two written records", first)
+	}
+
+	before, err := os.ReadFile(spool)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	second, err := ClaudeCode(strings.NewReader(input), resolve, names, destination)
+	if err != nil {
+		t.Fatalf("second ClaudeCode() error = %v", err)
+	}
+	if second.Written != 0 || second.Duplicate != 2 {
+		t.Fatalf("second ClaudeCode() = %+v, want both records recognised as duplicates", second)
+	}
+	after, err := os.ReadFile(spool)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("re-ingest changed the spool:\nbefore %s\nafter  %s", before, after)
+	}
+
+	lines := 0
+	for _, line := range bytes.Split(after, []byte("\n")) {
+		if len(line) > 0 {
+			lines++
+		}
+	}
+	if lines != 2 {
+		t.Fatalf("events.ndjson holds %d lines, want 2: %s", lines, after)
+	}
+}
+
 func TestClaudeCodePersistsNoPathShapedValue(t *testing.T) {
 	input := strings.Join([]string{
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Skill","input":{"skill":"usr/local/bin"}}]}}`,
