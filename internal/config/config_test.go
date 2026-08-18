@@ -271,6 +271,7 @@ func TestInvalidValueInTheFileFallsBackToTheDefaultAndIsReported(t *testing.T) {
 		{"a negative duration", "[session]\nidle_timeout = \"-5m\"\n", "session.idle_timeout", "30m"},
 		{"a list that is not an array", "[scan]\nharnesses = \"claude-code\"\n", "scan.harnesses", "claude-code,opencode"},
 		{"a list holding a non-string", "[scan]\nharnesses = [1, 2]\n", "scan.harnesses", "claude-code,opencode"},
+		{"a list element containing a comma", "[scan]\nharnesses = [\"claude-code\", \"my,harness\"]\n", "scan.harnesses", "claude-code,opencode"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			p := testPaths(t)
@@ -675,6 +676,135 @@ func TestAddToListRejectsAnItemContainingAComma(t *testing.T) {
 	}
 
 	assertConfigNotCreated(t, p)
+}
+
+// tomlAssignment renders `key = value` inside the table a dotted key names, so a
+// test can define any registered key without hard-coding its group.
+func tomlAssignment(name, value string) string {
+	if i := strings.LastIndex(name, "."); i >= 0 {
+		return fmt.Sprintf("[%s]\n%s = %s\n", name[:i], name[i+1:], value)
+	}
+	return fmt.Sprintf("%s = %s\n", name, value)
+}
+
+// A comma inside one array element of a hand-edited config.toml is valid TOML and
+// is not two members. Splitting it would make the file mean something the user
+// never wrote, and for scan.repos it would mean consenting to two repositories
+// that do not exist. Driven off the kind, not off today's two key names, so a list
+// key added later cannot arrive without the guard (T112).
+func TestAListElementContainingACommaIsRejectedNotSplit(t *testing.T) {
+	const offending = "my,harness"
+
+	exercised := 0
+	for _, k := range Keys() {
+		if k.Kind != KindStringList {
+			continue
+		}
+		exercised++
+		t.Run(k.Name, func(t *testing.T) {
+			p := testPaths(t)
+			writeConfig(t, p, tomlAssignment(k.Name, `["alpha", "`+offending+`"]`))
+
+			cfg := loadOrFail(t, p)
+
+			if got := getOrFail(t, cfg, k.Name); got != k.Default {
+				t.Errorf("Get(%s) = %q, want the default %q", k.Name, got, k.Default)
+			}
+			list, err := cfg.StringList(k.Name)
+			if err != nil {
+				t.Fatalf("StringList(%s) = %v", k.Name, err)
+			}
+			for _, member := range list {
+				if member == "my" || member == "harness" || member == offending {
+					t.Errorf("StringList(%s) = %v; the element was split into extra entries", k.Name, list)
+				}
+			}
+			problem, ok := problemFor(cfg, k.Name)
+			if !ok {
+				t.Fatalf("Problems() does not report %s; got %v", k.Name, cfg.Problems())
+			}
+			// The reason names the key and the character, never the value: this file
+			// is what a user pastes into a bug report (ADR-0019 §4, plan §7.1).
+			if strings.Contains(problem.Reason, offending) || strings.Contains(problem.Reason, "alpha") {
+				t.Errorf("the problem for %s quotes the file's value: %q", k.Name, problem.Reason)
+			}
+		})
+	}
+	if exercised == 0 {
+		t.Fatal("no KindStringList key was exercised; the registry has none and this test proves nothing")
+	}
+}
+
+// Acceptance item 3: the load path and the write path answer the same input the
+// same way. AddToList's rejection is the reference behaviour (T112 out-of-scope),
+// so canonical is held to its exact reason rather than to a lookalike.
+func TestLoadAndAddToListRejectACommaTheSameWay(t *testing.T) {
+	const item = "alpha,beta"
+
+	_, writeErr := AddToList(testPaths(t), "scan.repos", item)
+	var invalid *InvalidValueError
+	if !errors.As(writeErr, &invalid) {
+		t.Fatalf("AddToList() = %v, want an *InvalidValueError", writeErr)
+	}
+
+	p := testPaths(t)
+	writeConfig(t, p, "[scan]\nrepos = [\""+item+"\"]\n")
+	problem, ok := problemFor(loadOrFail(t, p), "scan.repos")
+	if !ok {
+		t.Fatal("Problems() does not report scan.repos for a comma inside an element")
+	}
+
+	if problem.Reason != invalid.Reason {
+		t.Errorf("the load path says %q and the write path says %q; one file, two answers", problem.Reason, invalid.Reason)
+	}
+	if problem.Reason != listItemCommaReason {
+		t.Errorf("reason = %q, want %q", problem.Reason, listItemCommaReason)
+	}
+}
+
+// canonical is the one place a decoded TOML array becomes the canonical
+// comma-joined string. Asserted directly because Get, StringList, AddToList and
+// encoded all consume that string as comma-separated, so its exact shape is the
+// contract and not an implementation detail.
+func TestCanonicalListJoinsTrimsAndDropsBlanks(t *testing.T) {
+	k, known := lookup("scan.harnesses")
+	if !known {
+		t.Fatal("scan.harnesses is not registered; the fixture is wrong")
+	}
+
+	for _, c := range []struct {
+		name       string
+		items      []any
+		want       string
+		wantReason string
+	}{
+		{name: "two members", items: []any{"claude-code", "opencode"}, want: "claude-code,opencode"},
+		{name: "one member", items: []any{"claude-code"}, want: "claude-code"},
+		{name: "spaces and blanks", items: []any{" a ", "", "b"}, want: "a,b"},
+		{name: "the empty array", items: []any{}, want: ""},
+		{name: "a comma inside an element", items: []any{"claude-code", "my,harness"}, wantReason: listItemCommaReason},
+		{name: "a comma as the whole element", items: []any{","}, wantReason: listItemCommaReason},
+		{name: "a non-string member", items: []any{1}, wantReason: "must be an array of strings, such as [\"a\", \"b\"]"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			// c.items is passed as-is: an explicit any(...) conversion here would be
+			// flagged by unconvert, which .golangci.yml enables and does not exclude
+			// for test files.
+			got, reason := canonical(k, c.items)
+			if reason != c.wantReason {
+				t.Errorf("canonical() reason = %q, want %q", reason, c.wantReason)
+			}
+			if c.wantReason != "" {
+				if got != "" {
+					t.Errorf("canonical() = %q with a reason set, want the empty string", got)
+				}
+				return
+			}
+			if got != c.want {
+				t.Errorf("canonical() = %q, want %q", got, c.want)
+			}
+		})
+	}
 }
 
 // Three state files, three locks, three distinct paths. A shared lock would make
