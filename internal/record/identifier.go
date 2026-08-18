@@ -1,13 +1,13 @@
 package record
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/SupermodularAI/agents-wake/internal/keyeddigest"
 )
 
 const (
@@ -170,12 +170,5 @@ func (n Namer) scopeDigest(scope string) (string, error) {
 	if len(n.key) == 0 {
 		return "", errNoScopeKey
 	}
-	mac := hmac.New(sha256.New, n.key)
-	// hash.Hash's contract is that Write never returns an error; errcheck runs
-	// with check-blank, and a violation would digest a prefix of the scope, which
-	// would silently split one primitive's counters across two names.
-	if _, err := mac.Write([]byte(scope)); err != nil {
-		panic("digesting a primitive scope: " + err.Error())
-	}
-	return hex.EncodeToString(mac.Sum(nil))[:scopeDigestLen], nil
+	return hex.EncodeToString(keyeddigest.Sum(n.key, []byte(scope)))[:scopeDigestLen], nil
 }
