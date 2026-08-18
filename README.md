@@ -10,37 +10,17 @@ Code and collects only from projects the developer explicitly enables.
 
 ## Install
 
-Official binaries are available for macOS and Linux on amd64 and arm64. Download
-the matching archive and checksum from the [Releases page](https://github.com/SupermodularAI/agents-wake/releases):
+Official binaries are available for macOS and Linux on amd64 and arm64:
 
 ```sh
-version=v0.1.0
-os=$(uname -s | tr '[:upper:]' '[:lower:]')
-arch=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
-archive="wake_${version#v}_${os}_${arch}.tar.gz"
-base="https://github.com/SupermodularAI/agents-wake/releases/download/$version"
-
-curl -fsSLO "$base/$archive"
-curl -fsSLO "$base/checksums.txt"
-if command -v shasum >/dev/null; then
-  grep " $archive$" checksums.txt | shasum -a 256 --check -
-else
-  grep " $archive$" checksums.txt | sha256sum --check -
-fi
-
-tar -xzf "$archive" wake
-mkdir -p ~/.local/bin
-install -m 0755 wake ~/.local/bin/wake
+curl -fsSL https://raw.githubusercontent.com/SupermodularAI/agents-wake/main/install.sh | sh
 ```
 
-Ensure `~/.local/bin` is on your `PATH`, then confirm the installed build:
+The installer downloads the latest release, verifies its SHA-256 checksum, and
+installs `wake` in `~/.local/bin` without `sudo`. It prints a PATH reminder when
+needed. Releases also include an SBOM and GitHub build provenance.
 
-```sh
-wake --version
-```
-
-Official releases include checksums, an SBOM, and GitHub build provenance. To
-verify provenance with the GitHub CLI:
+To verify the installed binary's provenance with the GitHub CLI:
 
 ```sh
 gh attestation verify ~/.local/bin/wake --repo SupermodularAI/agents-wake
