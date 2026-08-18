@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/SupermodularAI/agents-wake/internal/adapter/claudecode"
+	"github.com/SupermodularAI/agents-wake/internal/inventory"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 	"github.com/SupermodularAI/agents-wake/internal/store"
 )
@@ -18,6 +19,66 @@ import (
 // names keys the scope digest for this package's tests, standing in for the
 // subkey config.Repos.NameKey derives in production.
 var names = record.NewNamer([]byte("test scope key"))
+
+// transcriptInstant is when this file's fixture entries happen. Every test that needs
+// a session judged closed computes its clock from it rather than reading the wall
+// clock: the real threshold errs deliberately long (24h) and must never be shortened
+// to make a test easier to write.
+var transcriptInstant = time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+
+// closingStaleness is a staleness value under which every session in this file's
+// fixtures has gone quiet past the threshold. ADR-0023 makes session close the
+// terminal boundary for an attributed skill run's fallback record, so a test that
+// wants one written has to say the session ended.
+var closingStaleness = claudecode.Staleness{Timeout: time.Hour, Now: transcriptInstant.Add(8 * time.Hour)}
+
+// spoolLines counts the records in the spool at path. A missing spool is zero: a scan
+// that wrote nothing never creates the file.
+func spoolLines(t *testing.T, path string) int {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0
+	}
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	lines := 0
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		if len(line) > 0 {
+			lines++
+		}
+	}
+	return lines
+}
+
+// invocationsOf refreshes the primitive inventory from the spool and returns what the
+// snapshot says about one primitive — the number `wake report` and the dashboard
+// render. Both go through inventory.Read over metrics.Aggregate, so one assertion here
+// covers all three renderers: ADR-0011's single aggregation layer is what makes the
+// reader's collapse inherited rather than re-implemented per output.
+func invocationsOf(t *testing.T, spool *store.Store, statePath string, kind record.Kind, name record.Identifier) uint64 {
+	t.Helper()
+	primitives := inventory.New(statePath)
+	discovery := inventory.Discovery{
+		Primitives:     []inventory.Primitive{{Harness: "claude-code", Kind: kind, Name: name}},
+		ProjectScanned: true,
+	}
+	if err := primitives.Refresh(spool, discovery); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	snapshot, err := primitives.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	for _, usage := range snapshot {
+		if usage.Kind == kind && usage.Name == name {
+			return usage.Invocations
+		}
+	}
+	t.Fatalf("inventory holds no %s named %q: %+v", kind, name, snapshot)
+	return 0
+}
 
 func TestClaudeCodeIsIdempotent(t *testing.T) {
 	input := strings.Join([]string{
@@ -161,6 +222,41 @@ func TestClaudeCodePersistsNoPathShapedValue(t *testing.T) {
 	}
 	if !bytes.Contains(raw, []byte("reviewer")) {
 		t.Fatalf("events.ndjson dropped the safe half of a scoped reference: %s", raw)
+	}
+}
+
+// The accepted limitation ADR-0023 documents, carried to the caller: several
+// attributed end_turn entries for one skill in one session are one record and a count
+// of what was collapsed. The counter is uncertainty about that number and never a
+// second invocation, so the spool holds one line and the inventory reports one.
+func TestClaudeCodeReportsTheAmbiguityCounterWithoutASecondInvocation(t *testing.T) {
+	input := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
+		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
+	}, "\n")
+	spool := filepath.Join(t.TempDir(), "events.ndjson")
+	destination := store.New(spool)
+	repo := record.Hash("0123456789abcdef0123456789abcdef")
+	resolve := func(cwd string) (record.Hash, bool) { return repo, cwd == "/repo" }
+
+	result, err := ClaudeCode(strings.NewReader(input), resolve, names, closingStaleness, destination)
+	if err != nil {
+		t.Fatalf("ClaudeCode() error = %v", err)
+	}
+	if result.Written != 1 {
+		t.Fatalf("ClaudeCode() = %+v, want exactly one record written", result)
+	}
+	if result.AmbiguousSkillRuns != 2 {
+		t.Errorf("AmbiguousSkillRuns = %d, want 2 — the reader's count has to reach the caller", result.AmbiguousSkillRuns)
+	}
+	if lines := spoolLines(t, spool); lines != 1 {
+		t.Errorf("events.ndjson holds %d lines, want 1", lines)
+	}
+	// The renderers' number, not just the store's: what doctor reports as uncertainty
+	// may never appear as an invocation.
+	if got := invocationsOf(t, destination, filepath.Join(t.TempDir(), "primitives.json"), record.KindSkill, "pr-review"); got != 1 {
+		t.Errorf("inventory invocations = %d, want 1", got)
 	}
 }
 
