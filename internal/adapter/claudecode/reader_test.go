@@ -1571,8 +1571,8 @@ func TestReadRetainsNothingFromAnInterruptedCall(t *testing.T) {
 		if event.Outcome == nil || *event.Outcome != record.OutcomeInterrupted {
 			t.Errorf("Read(%q) outcome = %v, want interrupted", value, event.Outcome)
 		}
-		if err := record.Validate(event); err != nil {
-			t.Errorf("Read(%q) Validate() error = %v", value, err)
+		if validateErr := record.Validate(event); validateErr != nil {
+			t.Errorf("Read(%q) Validate() error = %v", value, validateErr)
 		}
 		encoded, err := record.Marshal(event)
 		if err != nil {
