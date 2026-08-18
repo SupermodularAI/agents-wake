@@ -1199,10 +1199,10 @@ func TestReadDerivesTheSameEventIDForAStaleCallAsForACompletedOne(t *testing.T) 
 	}
 }
 
-func TestReadEmitsStaleCallsInSourceOrder(t *testing.T) {
+func TestReadEmitsStaleCallsInADeterministicOrder(t *testing.T) {
 	// The buffer is a map and Go randomises map iteration, while internal/store must
 	// produce byte-identical contents for two scans of one source. So the resolved
-	// calls are sorted, and twenty reads have to agree.
+	// calls are sorted by (tool_use timestamp, block id), and twenty reads have to agree.
 	input := strings.Join([]string{
 		unterminatedCall,
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_use","id":"call-2","name":"Read"}]}}`,

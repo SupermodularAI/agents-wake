@@ -214,8 +214,10 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 // (internal/config/keys.go).
 //
 // The order is sorted rather than the map's: iteration order is randomised, and two
-// scans of one transcript have to produce byte-identical store contents. The block
-// id breaks a timestamp tie and is unique per call, because pending is keyed by it.
+// scans of one transcript have to produce byte-identical store contents. The key is
+// the call's own tool_use timestamp, with the block id breaking a tie — not the
+// line's position in the file, which the buffer does not retain. That is a total
+// order, because the block id is unique per call: pending is keyed by it.
 func resolveStaleCalls(pending map[string]call, sessions *SessionState, stale Staleness) []record.Record {
 	resolved := make([]string, 0, len(pending))
 	for id, buffered := range pending {
