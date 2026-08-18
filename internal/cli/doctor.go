@@ -55,6 +55,12 @@ func newDoctorCmd() *cobra.Command {
 // single number would conflate them. Neither line reports the threshold: it is
 // provisional and uncalibrated (ADR-0014), and printing a duration here would read
 // as a calibrated promise.
+//
+// The ambiguous-skill-run line is a third distinct fact: how many attributed skill runs
+// were collapsed into an already-counted one for the same session and skill (ADR-0023's
+// accepted limitation). It is uncertainty about the invocation numbers and never an
+// invocation total, which is why it stands apart from the counts above it rather than
+// being folded into any of them.
 func writeDiagnosis(out io.Writer, paths config.Paths, claudeDir string) error {
 	report, readErr := health.New(paths.HealthFile).Read()
 
@@ -98,6 +104,7 @@ func writeDiagnosis(out io.Writer, paths config.Paths, claudeDir string) error {
 		{"refused calls", report.Scan.RefusedCalls},
 		{"pending calls", report.Scan.PendingCalls},
 		{"interrupted calls", report.Scan.InterruptedCalls},
+		{"ambiguous skill runs", report.Scan.AmbiguousSkillRuns},
 	} {
 		if _, err := fmt.Fprintf(out, "%s: %d\n", line.key, line.value); err != nil {
 			return err
@@ -148,6 +155,12 @@ func scanTime(report health.Report, readErr error) string {
 // interrupted is an invocation the store has, carrying the outcome that says it
 // never finished (ADR-0015). Both are honest, and neither is a source nobody could
 // read.
+//
+// An ambiguous skill run is not in it either. The transcript was read completely and
+// the collapse is a documented decision (ADR-0023's accepted limitation), not
+// blindness: no transcript signal separates one slash-command run from two with no tool
+// trace. Folding it in would put every session carrying a repeated slash command into
+// "collects nothing", permanently, since nothing about that session will ever change.
 //
 // An input this build cannot read is its own state rather than an error: a
 // diagnostic that failed in the situation it exists for is worse than one that says
