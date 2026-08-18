@@ -83,6 +83,39 @@ func TestEveryCommandResolvesTheSameClaudeCodeDirectory(t *testing.T) {
 		t.Errorf("ingest found no transcript under %q:\n%s", dir, out)
 	}
 
+	// ingest --hook-scan — the detached child the trigger re-execs, and the sixth
+	// call site. It is the highest-consequence one and the least visible: ADR-0016
+	// has it exit 0 in silence whatever happened, so a misresolution here collects
+	// nothing forever and never surfaces an error. Its witness is therefore the
+	// counters it leaves behind rather than anything it prints: a second transcript,
+	// which only a scan of dir can find, and which doctor then reads back.
+	hookScanDir := filepath.Join(dir, "projects", "hook-session")
+	if err = os.MkdirAll(hookScanDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll() hook transcript error = %v", err)
+	}
+	hookTranscript := `{"uuid":"entry-3","sessionId":"session-2","cwd":"` + consented + `","timestamp":"2026-08-17T13:00:00Z","message":{"content":[{"type":"tool_use","id":"call-2","name":"Bash"}]}}
+{"uuid":"entry-4","sessionId":"session-2","cwd":"` + consented + `","timestamp":"2026-08-17T13:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}`
+	if err = os.WriteFile(filepath.Join(hookScanDir, "session.jsonl"), []byte(hookTranscript), 0o600); err != nil {
+		t.Fatalf("WriteFile() hook transcript error = %v", err)
+	}
+	out, stderr, err := runSplit(t, "ingest", "--quiet", "--hook-scan")
+	if err != nil || out != "" || stderr != "" {
+		t.Fatalf("hook scan = (%q, %q, %v), want silence and nil (ADR-0016)", out, stderr, err)
+	}
+	out, _, err = runSplit(t, "doctor")
+	if err != nil {
+		t.Fatalf("doctor after the hook scan error = %v", err)
+	}
+	// Two transcripts read, one event new: the first was already imported above, and
+	// re-scanning it writes nothing twice (ADR-0004). A hook scan resolving anywhere
+	// else walks a directory that does not exist, which is a clean zero on both
+	// counters rather than an error.
+	for _, want := range []string{"transcripts: 2", "events written: 1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the hook scan did not scan %q — doctor reports no %q:\n%s", dir, want, out)
+		}
+	}
+
 	// The discovery scope report and serve share — global primitive discovery reads
 	// <its own directory>/skills and nothing else, so the sentinel appearing in the
 	// snapshot is that directory being dir.
