@@ -2,7 +2,6 @@ package config
 
 import (
 	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -11,6 +10,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/SupermodularAI/agents-wake/internal/keyeddigest"
 )
 
 // errPathNotAbsolute rejects a path that cannot be matched against a recorded
@@ -471,13 +472,7 @@ const nameKeyDomain = "wake/derived-name/v1"
 // already loaded — so this holds ADR-0019 §1's rule that derivation never touches
 // the filesystem.
 func (r *Repos) NameKey() []byte {
-	mac := hmac.New(sha256.New, r.salt)
-	// Checked for the reason hashRoot gives: a short write would key names to a
-	// digest nothing else agrees with.
-	if _, err := mac.Write([]byte(nameKeyDomain)); err != nil {
-		panic("deriving the derived-name key: " + err.Error())
-	}
-	return mac.Sum(nil)
+	return keyeddigest.Sum(r.salt, []byte(nameKeyDomain))
 }
 
 // matchMACDomain separates the match digest from every other use of the salt, for
@@ -508,14 +503,7 @@ func (r *Repos) matchMAC(entry projectEntry) string {
 		buf = append(buf, 0)
 	}
 
-	mac := hmac.New(sha256.New, r.salt)
-	// Checked for the reason hashRoot gives: a short write would key the digest to
-	// a prefix of the entry, and every entry written afterwards would carry a
-	// digest nothing else agrees with.
-	if _, err := mac.Write(buf); err != nil {
-		panic("hashing a project entry: " + err.Error())
-	}
-	return hex.EncodeToString(mac.Sum(nil))
+	return hex.EncodeToString(keyeddigest.Sum(r.salt, buf))
 }
 
 // signed returns entry with the match digest this build derives for it. Every write
@@ -538,17 +526,7 @@ func (r *Repos) signed(entry projectEntry) projectEntry {
 // a repository name that is often public — so an unsalted hash of a path is not
 // one-way, and under the remote build tag it is the id that leaves the machine.
 func (r *Repos) hashRoot(root string) string {
-	mac := hmac.New(sha256.New, r.salt)
-	// hash.Hash's contract is that Write never returns an error. It is checked
-	// anyway — errcheck runs with check-blank, and there is no honest way to
-	// discard it — and a violation would produce an id over a prefix of the root,
-	// which is the one outcome worth stopping the process for: every record and
-	// every table entry written afterwards would be keyed to a hash nothing else
-	// agrees with.
-	if _, err := mac.Write([]byte(root)); err != nil {
-		panic("hashing a repository root: " + err.Error())
-	}
-	return hex.EncodeToString(mac.Sum(nil))[:idHexLen]
+	return hex.EncodeToString(keyeddigest.Sum(r.salt, []byte(root)))[:idHexLen]
 }
 
 // NestedRootError is returned when a root would nest with one already recorded.
