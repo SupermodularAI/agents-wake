@@ -108,6 +108,29 @@ func TestReadDerivesNoSubagentRecordFromAttributionAlone(t *testing.T) {
 	}
 }
 
+// A subagent's own sidechain turn inherits the parent skill's attributionSkill, so
+// it meets the attributed-run condition without being a skill invocation at all —
+// 183 of 258 real attributed entries are this shape, all isSidechain: true
+// (ADR-0023 Context). It is excluded on sight, before any session-close buffering:
+// nothing about it is deferred or uncertain.
+func TestReadNeverCountsASidechainTurnAsASkillInvocation(t *testing.T) {
+	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","isSidechain":true,"attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`
+
+	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 0 {
+		t.Fatalf("Read() records = %+v, want none: a sidechain turn is not a skill invocation", result.Records)
+	}
+	// Not a refusal and not an unusable line either: the entry is perfectly readable
+	// and Wake deliberately collects nothing from it, which must not read as lost
+	// collection in doctor.
+	if result.Refused != 0 || result.Malformed != 0 {
+		t.Errorf("Read() = %+v, want no refusal and no malformed line", result)
+	}
+}
+
 func TestReadRecordsAttributingAgentForPrimitiveCalls(t *testing.T) {
 	input := strings.Join([]string{
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionAgent":"sdlc-implement","message":{"content":[{"type":"tool_use","id":"call-1","name":"Skill","input":{"skill":"commit-message"}}]}}`,
@@ -1017,6 +1040,13 @@ func TestReadPreservesRealClaudeCodeIdentityFormats(t *testing.T) {
 // rather than reading the wall clock: the threshold's real default errs deliberately
 // long (24h) and must never be shortened to make a test easier to write.
 var callInstant = time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+
+// closedSession is a staleness value under which every session in this file's
+// fixtures — all stamped at or just after callInstant — has gone quiet past the
+// threshold. ADR-0023 makes session close the terminal boundary for a Shape-A skill
+// record, so a test that wants one emitted has to say the session ended; the zero
+// Staleness deliberately emits nothing (see Staleness's own comment).
+var closedSession = Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
 
 // unterminatedCall is one tool_use with no tool_result anywhere after it — the
 // transcript a session killed mid-call leaves behind.
