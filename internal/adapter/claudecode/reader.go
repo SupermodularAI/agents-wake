@@ -72,7 +72,7 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer) (Result, error
 	// callResult), so buffering one before the call's repository consent is known
 	// retains nothing.
 	earlyResults := map[string]callResult{}
-	skipped, err := jsonl.Lines(reader, maxLineBytes, func(line []byte) {
+	skipped, err := jsonl.Lines(reader, maxLineBytes, func(_ int64, line []byte) {
 		var entry transcriptEntry
 		if unmarshalErr := json.Unmarshal(line, &entry); unmarshalErr != nil {
 			result.Malformed++

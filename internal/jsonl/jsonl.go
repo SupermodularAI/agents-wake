@@ -28,14 +28,24 @@ const readBuffer = 64 * 1024
 // delivered at all — never a prefix of one — and the lines before and after it
 // are still delivered. line aliases the read buffer and is valid only until visit
 // returns, so visit must copy anything it keeps.
-func Lines(reader io.Reader, maxLine int, visit func(line []byte)) (int, error) {
+//
+// offset is the byte position of the line's first byte, counted from the first
+// byte reader delivered — so for a file opened at its start it is the file offset
+// ADR-0015's append-only cursor is expressed in. A line that is skipped for
+// exceeding maxLine is not delivered, but the bytes it occupied still advance the
+// offsets after it.
+func Lines(reader io.Reader, maxLine int, visit func(offset int64, line []byte)) (int, error) {
 	buffered := bufio.NewReaderSize(reader, readBuffer)
 	skipped := 0
 	// pending holds the head of a line one buffer fill could not return whole.
 	var pending []byte
+	// offset is where the line in hand starts; span is how many bytes of it have
+	// been read so far, terminator included.
+	var offset, span int64
 	oversized := false
 	for {
 		chunk, err := buffered.ReadSlice('\n')
+		span += int64(len(chunk))
 		if errors.Is(err, bufio.ErrBufferFull) {
 			if oversized || len(pending)+len(chunk) > maxLine {
 				// Stop accumulating: the line is already too long to deliver, and
@@ -65,12 +75,13 @@ func Lines(reader io.Reader, maxLine int, visit func(line []byte)) (int, error) 
 			case oversized || len(line) > maxLine:
 				skipped++
 			default:
-				visit(line)
+				visit(offset, line)
 			}
 		}
 		if !terminated {
 			return skipped, nil
 		}
+		offset, span = offset+span, 0
 		oversized, pending = false, pending[:0]
 	}
 }
