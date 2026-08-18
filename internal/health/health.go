@@ -85,10 +85,16 @@ type Scan struct {
 	// that was lost (ADR-0015). It is deliberately not one of integrationState's
 	// "collects nothing" reasons.
 	PendingCalls int `json:"pending_calls"`
-	// InterruptedCalls counts calls the last scan resolved to outcome interrupted
-	// because their session had gone quiet past the threshold. A call that resolves
-	// this way is a fact worth surfacing rather than lost collection: the invocation is
-	// in the store, carrying the outcome that says it never finished.
+	// InterruptedCalls counts calls resolved to outcome interrupted because their
+	// session had gone quiet past the threshold. A call that resolves this way is a
+	// fact worth surfacing rather than lost collection: the invocation is in the store,
+	// carrying the outcome that says it never finished.
+	//
+	// Like every counter here it describes the window the last scan read, not the work
+	// that scan newly did — and until an incremental cursor lands (T020, T102) that
+	// window is the whole history, so a scan that resolved nothing new still reports
+	// what earlier scans resolved. Reading it as "this scan interrupted N calls" would
+	// overstate it.
 	InterruptedCalls int `json:"interrupted_calls"`
 }
 
