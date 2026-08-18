@@ -71,6 +71,19 @@ type Result struct {
 	// time. The value that was refused is never carried — only the count (plan
 	// §4.2).
 	Refused int
+	// AmbiguousSkillRuns counts attributed skill runs this scan collapsed into an
+	// already-emitted fallback record for the same (session, skill name) pair.
+	// ADR-0023 names that collapse an accepted limitation: no transcript signal
+	// separates "one slash-command run" from "two with no tool trace", and inferring
+	// one would need either a model call (ADR-0008 forbids) or an entry-ordinal
+	// heuristic already shown unreliable.
+	//
+	// It is uncertainty about a count, never a count of invocations, and doctor renders
+	// it as its own line for that reason. It carries no skill name, no session id, no
+	// path and no transcript value — only how many times the question came up (plan
+	// §4.2, ADR-0007). A run the tool_use/tool_result pair already described
+	// contributes nothing here: that run is not uncertain, it is covered.
+	AmbiguousSkillRuns int
 }
 
 // Resolver maps a recorded working directory to a consented repository hash.
@@ -112,6 +125,18 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 	// callResult), so buffering one before the call's repository consent is known
 	// retains nothing.
 	earlyResults := map[string]callResult{}
+	// skillsInvoked and skillCandidates are the session-grain extension of pending that
+	// ADR-0023 §2 asks for: which skills a session invoked through a Skill tool_use, and
+	// the attributed end_turn runs this read has not yet proved are duplicates of one.
+	//
+	// Per-Read state next to pending, for the reason pending is: it is unresolved source
+	// state a cursor floor must be able to see (ADR-0015, ADR-0023 §5). Deliberately not
+	// fields on SessionState, which holds a session id, a timestamp and a byte offset and
+	// no value derived from a transcript's content — the session-close determination is
+	// consumed from there rather than duplicated, which is what ADR-0023 §3's "no second
+	// threshold" requires.
+	skillsInvoked := map[skillRun]struct{}{}
+	skillCandidates := map[skillRun]skillCandidate{}
 	// unreadable counts the lines this read could not use *and could not rule out* as
 	// the terminator of a buffered call, which is the only blindness that bears on the
 	// staleness rule: a line too long to be delivered, a line whose JSON leaves nothing
@@ -153,8 +178,8 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 			}
 			return
 		}
-		if event, ok := entry.attributedRun(resolve, names); ok {
-			result.Records = append(result.Records, event)
+		if event, ok := entry.attributedSkillCandidate(resolve, names); ok {
+			deferSkillCandidate(skillCandidates, skillRun{session: event.SessionID, name: event.Name}, event)
 		}
 		for _, block := range entry.Message.Content {
 			switch block.Type {
@@ -167,6 +192,18 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 				pendingCall, status := entry.call(block, resolve, names)
 				switch status {
 				case callAccepted:
+					if pendingCall.kind == record.KindSkill {
+						// Recorded on sight rather than on termination: ADR-0023 §2 asks which
+						// skills the session invoked, and a Skill call that never terminates
+						// still becomes its own record through the staleness rule. The name is
+						// the one primitiveName derived, which is the same names.DerivedName
+						// output a candidate carries.
+						//
+						// On callAccepted only: a refused or skipped call means the identical
+						// name and consent gates also refuse the candidate, so no candidate
+						// exists for that name either.
+						skillsInvoked[skillRun{session: pendingCall.sessionID, name: pendingCall.name}] = struct{}{}
+					}
 					if early, terminated := earlyResults[pendingCall.id]; terminated {
 						delete(earlyResults, pendingCall.id)
 						result.Records = append(result.Records, pendingCall.complete(early))
@@ -240,8 +277,62 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 	result.Records = append(result.Records, interrupted...)
 	result.Interrupted = len(interrupted)
 	result.Pending = len(pending)
+	// judged, not stale: a read that could not rule out one of its lines may not
+	// conclude any session went silent, and a Shape-A fallback emitted from a blind
+	// read is permanent (ADR-0015 rejects upsert, ADR-0004 deduplicates the correction
+	// away). The cost is deferral to a later scan, which ADR-0023's Consequences
+	// already name as this record's latency profile.
+	fallbacks, ambiguous := resolveSessionSkills(skillCandidates, skillsInvoked, sessions, judged)
+	result.Records = append(result.Records, fallbacks...)
+	result.AmbiguousSkillRuns = ambiguous
 	result.OpenSessions, result.CursorFloor = sessions.CursorFloor(judged)
 	return result, nil
+}
+
+// resolveSessionSkills emits the one Shape-A fallback record for every deferred
+// candidate whose session has closed and whose skill name that session never invoked
+// through a Skill tool_use, and reports how many extra candidates it collapsed to do
+// so.
+//
+// A closed session is the terminal boundary for this record exactly as a tool_result
+// is for a tool call (ADR-0023 §3), and it is decided by SessionState.Closed rather
+// than by a comparison of its own: "no second threshold is introduced" holds only
+// while there is one implementation of it. A candidate whose session is still open
+// stays buffered and is visible through OpenSessions and CursorFloor, not through
+// Pending, which counts tool calls.
+//
+// A candidate whose name is in invoked is dropped rather than emitted: the
+// tool_use/tool_result pair already produced the one true record and describes the run
+// better (T111's precedent, attributedSkillCandidate's comment). Its collapsed extras
+// are not counted as ambiguity either — nothing about that run is uncertain.
+//
+// The order is sorted rather than the map's, for the reason resolveStaleCalls gives:
+// iteration order is randomised and two scans of one transcript have to produce
+// byte-identical store contents. The key is the chosen candidate's own (timestamp,
+// event id), a total order because one transcript entry yields at most one candidate.
+func resolveSessionSkills(buffer map[skillRun]skillCandidate, invoked map[skillRun]struct{}, sessions *SessionState, stale Staleness) ([]record.Record, int) {
+	resolved := make([]skillRun, 0, len(buffer))
+	for key := range buffer {
+		if sessions.Closed(key.session, stale) {
+			resolved = append(resolved, key)
+		}
+	}
+	slices.SortFunc(resolved, func(a, b skillRun) int {
+		left, right := buffer[a].chosen, buffer[b].chosen
+		return cmp.Or(left.Timestamp.Compare(right.Timestamp), cmp.Compare(string(left.EventID), string(right.EventID)))
+	})
+	records := make([]record.Record, 0, len(resolved))
+	ambiguous := 0
+	for _, key := range resolved {
+		candidate := buffer[key]
+		delete(buffer, key)
+		if _, matched := invoked[key]; matched {
+			continue
+		}
+		records = append(records, candidate.chosen)
+		ambiguous += candidate.extra
+	}
+	return records, ambiguous
 }
 
 // resolveStaleCalls emits the terminal record for every buffered call whose session
@@ -423,8 +514,8 @@ func (entry transcriptEntry) carriesToolResult() bool {
 // unit separator, which neither half can contain — valid bounds the entry id to
 // the token domain and call bounds the block id — so the split is unambiguous: no
 // two distinct (entry, block) pairs share a composed identity, and no composed
-// identity can equal a bare entry id, which is what attributedRun derives a
-// terminal run from.
+// identity can equal a bare entry id, which is what attributedSkillCandidate
+// derives a terminal run from.
 const callSeparator = "\x1f"
 
 // callSourceEvent identifies one tool_use block by the source event carrying it
@@ -433,6 +524,55 @@ const callSeparator = "\x1f"
 // re-derives the same ids forever and re-ingestion stays a no-op (ADR-0004).
 func callSourceEvent(entryUUID string, blockID record.Identifier) record.Identifier {
 	return record.Identifier(entryUUID + callSeparator + string(blockID))
+}
+
+// skillRun keys one session's view of one skill primitive. It is the pair ADR-0023
+// §3 resolves and the pair §4 bounds to a single fallback record.
+//
+// The session half is what keeps the count independent of how many transcripts a scan
+// reads. The name half is record.Namer's output on both sides of the comparison — a
+// Skill tool_use's name goes through primitiveName and a candidate's through
+// attributedSkillCandidate, both landing on names.DerivedName — so a directory-scoped
+// reference compares as its keyed digest and never as the path fragment behind it
+// (ADR-0020). Two normalisations here would misclassify a matched run as having no
+// tool call and reinstate the exact double count this exists to remove.
+type skillRun struct {
+	session record.Identifier
+	name    record.Identifier
+}
+
+// skillCandidate is one deferred attributed skill run: the record it would emit, and
+// how many further candidates for the same skillRun this read collapsed into it.
+//
+// It holds the record rather than the entry it came from, so every gate
+// attributedSkillCandidate applies has already run and what is buffered carries only
+// allowlisted fields — the record type is the allowlist (ADR-0007).
+type skillCandidate struct {
+	chosen record.Record
+	extra  int
+}
+
+// deferSkillCandidate folds one candidate into the buffer for its skillRun, keeping
+// the earliest by (timestamp, event id) and counting the rest.
+//
+// Earliest by a total order over values the source event supplies, never by arrival:
+// nothing in the transcript format promises the entries are ordered — the reason
+// SessionState.Observe folds a max and a min rather than last-wins — and a first-wins
+// fold would let line order decide which id and timestamp the one emitted record
+// carries, while two scans of one transcript have to produce byte-identical store
+// contents (ADR-0004). The order is total because one entry yields at most one
+// candidate, so no two candidates share an event id.
+func deferSkillCandidate(buffer map[skillRun]skillCandidate, key skillRun, event record.Record) {
+	current, seen := buffer[key]
+	if !seen {
+		buffer[key] = skillCandidate{chosen: event}
+		return
+	}
+	current.extra++
+	if cmp.Or(event.Timestamp.Compare(current.chosen.Timestamp), cmp.Compare(string(event.EventID), string(current.chosen.EventID))) < 0 {
+		current.chosen = event
+	}
+	buffer[key] = current
 }
 
 type call struct {
@@ -514,9 +654,18 @@ func (entry transcriptEntry) call(block contentBlock, resolve Resolver, names re
 	return derived, callAccepted
 }
 
-// attributedRun records the terminal completion of an attributed skill run.
-// Claude Code puts that identity on every entry of the turn it belongs to, and the
-// final end_turn entry is the safe completion boundary.
+// attributedSkillCandidate derives the record an attributed skill run *would* emit.
+// It is a candidate, not a record: Claude Code puts a skill's identity on every entry
+// of the turn it belongs to, and an end_turn entry alone does not say whether that run
+// was already described by a Skill tool_use/tool_result pair. Only the session says,
+// and only once it has closed (ADR-0023 §2-§3) — so Read buffers what this returns and
+// resolveSessionSkills decides its fate.
+//
+// Building the whole record here rather than at resolution time is what keeps the
+// fail-closed guarantee cheap: consent, the token domain and the name grammar are all
+// checked before anything is buffered, so a candidate that exists has already passed
+// every gate and nothing can be emitted past a failed one (ADR-0007, ADR-0019,
+// ADR-0020).
 //
 // A sidechain entry is excluded outright. A subagent's own turn inherits the
 // parent's attributionSkill, so it meets this condition without being a skill
@@ -537,7 +686,7 @@ func (entry transcriptEntry) call(block contentBlock, resolve Resolver, names re
 // so the collapse has to happen here rather than at write time. plan §5.1 names
 // the Task call as the subagent primitive's source; attributionAgent's own role is
 // via_agent attribution on the calls a subagent makes (see call).
-func (entry transcriptEntry) attributedRun(resolve Resolver, names record.Namer) (record.Record, bool) {
+func (entry transcriptEntry) attributedSkillCandidate(resolve Resolver, names record.Namer) (record.Record, bool) {
 	if entry.Message.StopReason != "end_turn" || entry.AttributionSkill == "" || entry.IsSidechain {
 		return record.Record{}, false
 	}
