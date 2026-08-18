@@ -150,7 +150,7 @@ func TestDoctorReportsTheLiveHookCountNotTheRecordedOne(t *testing.T) {
 
 	// The hooks are deleted by hand, and nothing re-records anything. The recorded
 	// count still says init installed two; the live count is the honest answer.
-	settings := filepath.Join(realHome(t), ".claude", "settings.json")
+	settings := filepath.Join(claudeHome(t), "settings.json")
 	if writeErr := os.WriteFile(settings, []byte(`{"model":"opus"}`), 0o600); writeErr != nil {
 		t.Fatalf("WriteFile() error = %v", writeErr)
 	}
@@ -187,7 +187,7 @@ func TestDoctorReportsTheKeptOwnedCount(t *testing.T) {
 // looking in the wrong place.
 func TestDoctorReportsAnUnreadableSettingsFile(t *testing.T) {
 	isolate(t)
-	claudeDir := filepath.Join(realHome(t), ".claude")
+	claudeDir := claudeHome(t)
 	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
 		t.Fatalf("MkdirAll() error = %v", err)
 	}
@@ -203,17 +203,6 @@ func TestDoctorReportsAnUnreadableSettingsFile(t *testing.T) {
 	if !strings.Contains(out, "integration: hooks unreadable") {
 		t.Errorf("output is missing the unreadable-hooks state:\n%s", out)
 	}
-}
-
-// realHome resolves the HOME isolate set, which is where the Claude Code directory
-// lives. WAKE_DIR moves the data root only, never HOME.
-func realHome(t *testing.T) string {
-	t.Helper()
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatalf("UserHomeDir() error = %v", err)
-	}
-	return home
 }
 
 // doctor reporting a diagnostic failure as a command failure would make it useless
