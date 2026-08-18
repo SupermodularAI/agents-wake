@@ -40,6 +40,22 @@ func isolate(t *testing.T) config.Paths {
 	return paths
 }
 
+// claudeHome resolves the Claude Code directory under the HOME isolate is set to,
+// through the same function every command uses.
+//
+// A fixture that joined ".claude" itself could seed a directory the commands do
+// not read, and the test would then pass on a resolver pointed somewhere else
+// entirely. Going through the resolver means a fixture and the command under test
+// cannot disagree about where the harness's files are.
+func claudeHome(t *testing.T) string {
+	t.Helper()
+	dir, err := config.ClaudeCodeDir()
+	if err != nil {
+		t.Fatalf("ClaudeCodeDir() error = %v", err)
+	}
+	return dir
+}
+
 // recordHookChild replaces the detached spawn with a recorder, so the test does not
 // start a background copy of the test binary.
 func recordHookChild(t *testing.T, err error) *[]string {
