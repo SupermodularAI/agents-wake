@@ -3,6 +3,7 @@ package claudecode
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1105,6 +1106,11 @@ func TestReadDoesNotInterruptACallWhenALineWasUnusable(t *testing.T) {
 	cases := map[string]string{
 		"oversized": oversizedResult(t),
 		"malformed": `{"uuid":"entry-2","sessionId":"session-1",`,
+		// Decodes, and the reader can see a tool_result for the buffered call in it —
+		// but the entry's own identity is unusable, so the result could not be attributed
+		// and the call stayed buffered. That is blindness about this call's fate just as
+		// much as a line that never arrived, however well the line parsed.
+		"unusable identity carrying a tool_result": `{"sessionId":"session-1","cwd":"/repo","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
 
@@ -1165,6 +1171,64 @@ func TestReadStillResolvesStaleCallsWhenEveryLineWasUsable(t *testing.T) {
 
 	if result.Malformed != 0 || result.Interrupted != 1 || result.Pending != 0 || result.OpenSessions != 0 {
 		t.Fatalf("Read() = %+v", result)
+	}
+}
+
+// bookkeepingLines are the per-session housekeeping shapes a real Claude Code
+// transcript carries alongside its entries. They are not transcript entries: they
+// decode cleanly and name their session, but they have no uuid and mostly no
+// timestamp, so entry.valid() rejects them and they land in Malformed.
+//
+// They are routine rather than exotic — sampling ~/.claude/projects found all three
+// present in every transcript examined, hundreds of lines against hundreds of
+// entries. That is what makes them the load-bearing case here: a staleness gate
+// keyed on "this read rejected a line" is a gate that is always closed on real
+// input, so ADR-0015's rule would never run outside a hand-written fixture.
+var bookkeepingLines = map[string]string{
+	"ai-title":        `{"type":"ai-title","aiTitle":"reader staleness","sessionId":"session-1"}`,
+	"last-prompt":     `{"type":"last-prompt","lastPrompt":"run the tests","leafUuid":"entry-1","sessionId":"session-1"}`,
+	"queue-operation": `{"type":"queue-operation","operation":"enqueue","sessionId":"session-1","timestamp":"2026-08-13T12:00:00Z"}`,
+}
+
+func TestReadStillResolvesAStaleCallOnATranscriptCarryingBookkeepingLines(t *testing.T) {
+	// A line the reader decoded is a line it can rule out: it holds no tool_result, so
+	// it cannot be the terminator of a buffered call and nothing about this session's
+	// fate is hidden by it. The rule therefore still applies, on each shape alone and
+	// on all of them together — which is the shape of every real transcript.
+	inputs := map[string]string{}
+	all := []string{unterminatedCall}
+	for name, line := range bookkeepingLines {
+		inputs[name] = unterminatedCall + "\n" + line
+		all = append(all, line)
+	}
+	slices.Sort(all[1:])
+	inputs["every shape at once"] = strings.Join(all, "\n")
+	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
+
+	for name, input := range inputs {
+		t.Run(name, func(t *testing.T) {
+			result, err := Read(strings.NewReader(input), resolver, names, stale)
+			if err != nil {
+				t.Fatalf("Read() error = %v", err)
+			}
+			if result.Interrupted != 1 || result.Pending != 0 || result.OpenSessions != 0 || len(result.Records) != 1 {
+				t.Fatalf("Read() = %+v", result)
+			}
+			event := result.Records[0]
+			if event.Outcome == nil || *event.Outcome != record.OutcomeInterrupted {
+				t.Fatalf("Outcome = %v, want interrupted", event.Outcome)
+			}
+			if err := record.Validate(event); err != nil {
+				t.Errorf("Validate() error = %v", err)
+			}
+			// These lines are still counted as lines this read had no entry for, which is
+			// what doctor's drift signal reports today. Splitting that counter so doctor
+			// stops calling a healthy machine "collects nothing" is its own change; what
+			// this pins is that the count does not decide whether the rule runs.
+			if want := strings.Count(input, "\n"); result.Malformed != want {
+				t.Errorf("Malformed = %d, want %d", result.Malformed, want)
+			}
+		})
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -447,7 +448,18 @@ func TestIngestSurfacesPendingAndInterruptedCalls(t *testing.T) {
 	if err := os.MkdirAll(transcriptDir, 0o700); err != nil {
 		t.Fatalf("MkdirAll() transcript error = %v", err)
 	}
-	stale := `{"uuid":"entry-1","sessionId":"session-stale","cwd":"` + root + `","timestamp":"2020-01-01T00:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`
+	// The stale transcript carries the per-session bookkeeping lines a real Claude Code
+	// transcript is full of — ai-title, last-prompt, queue-operation, none of them a
+	// transcript entry and none carrying a uuid. They are here because the reader
+	// counts them as lines it had no entry for, and a staleness rule gated on that
+	// count would resolve nothing on any real machine while a fixture of clean entries
+	// stayed green. This test is the end-to-end criterion, so it reads like real input.
+	stale := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-stale","cwd":"` + root + `","timestamp":"2020-01-01T00:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
+		`{"type":"ai-title","aiTitle":"an old session","sessionId":"session-stale"}`,
+		`{"type":"last-prompt","lastPrompt":"run it","leafUuid":"entry-1","sessionId":"session-stale"}`,
+		`{"type":"queue-operation","operation":"enqueue","sessionId":"session-stale","timestamp":"2020-01-01T00:00:00Z"}`,
+	}, "\n")
 	if err := os.WriteFile(filepath.Join(transcriptDir, "stale.jsonl"), []byte(stale), 0o600); err != nil {
 		t.Fatalf("WriteFile() stale transcript error = %v", err)
 	}
