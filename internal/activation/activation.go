@@ -259,6 +259,10 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 		// Neither is lost collection, so neither joins doctor's "collects nothing" arm.
 		scan.PendingCalls += result.Pending
 		scan.InterruptedCalls += result.Interrupted
+		// Uncertainty, not lost collection and not an invocation: the record is in the
+		// store, and this says how many further attributed runs for the same session and
+		// skill it stood in for (ADR-0023).
+		scan.AmbiguousSkillRuns += result.AmbiguousSkillRuns
 		if result.Parsed == 0 && result.Refused == 0 {
 			// Read successfully and yielded no terminal event — most often because
 			// its working directory belongs to no consented repository, sometimes
