@@ -264,11 +264,10 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 			// its working directory belongs to no consented repository, sometimes
 			// because every call in it is still unterminated and not yet stale
 			// (ADR-0015) — a transcript whose stale calls did resolve has parsed
-			// records and is not skipped. Either way
-			// it is a clean zero, not a failure, and the two must not share a counter.
-			// A transcript whose every call was refused is deliberately not one of
-			// those: doctor reports Skipped as an honest zero, and that transcript is
-			// the opposite of one.
+			// records and is not skipped. Either way it is a clean zero, not a
+			// failure, and the two must not share a counter. A transcript whose every
+			// call was refused is deliberately not one of those: doctor reports
+			// Skipped as an honest zero, and that transcript is the opposite of one.
 			scan.Skipped++
 		}
 		scan.EventsWritten += result.Written

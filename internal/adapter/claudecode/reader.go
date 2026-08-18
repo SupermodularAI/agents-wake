@@ -228,10 +228,10 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 	// last-prompt, queue-operation) has no uuid, so valid() rejects it, and a message's
 	// content arriving as a type this struct does not declare fails json.Unmarshal — and
 	// gating on that count switched ADR-0015's rule off on every machine while every
-	// hand-written fixture stayed green. Keeping this read's own two
-	// questions apart ("did I have an entry for that line" and "could that line have
-	// terminated a call") is what makes the rule run in production and stop only for
-	// blindness that could actually mislead it.
+	// hand-written fixture stayed green. Keeping this read's own two questions apart
+	// ("did I have an entry for that line" and "could that line have terminated a
+	// call") is what makes the rule run in production and stop only for blindness that
+	// could actually mislead it.
 	judged := stale
 	if unreadable > 0 {
 		judged = Staleness{}
