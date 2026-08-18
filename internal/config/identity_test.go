@@ -1290,6 +1290,60 @@ func TestTheKeyedDigestSitesMatchTheConstructionWrittenLonghand(t *testing.T) {
 	}
 }
 
+// A table whose digests were derived by the construction written out longhand —
+// which is what every build before T119 wrote — still resolves.
+//
+// readProjects verifies each entry's id and match digest against freshly derived
+// values and refuses the entry when either differs (trustworthy, ADR-0019 §7), so
+// this is the whole compatibility question in one assertion: had the refactor
+// shifted a digest by one byte, the entry would be dropped, the directory would
+// hash as itself with Matched false, and every repository already in projects.json
+// would silently stop being recognised on upgrade.
+func TestATableDigestedByTheLonghandConstructionStillResolves(t *testing.T) {
+	p := testPaths(t)
+	// Opened once so the salt exists, then read directly: the expected digests must
+	// come from the salt rather than from the code under test.
+	openRepos(t, p)
+	salt, err := os.ReadFile(p.SaltFile)
+	if err != nil {
+		t.Fatalf("reading the salt: %v", err)
+	}
+	longhand := func(data []byte) []byte {
+		mac := hmac.New(sha256.New, salt)
+		if _, writeErr := mac.Write(data); writeErr != nil {
+			t.Fatalf("writing to the MAC: %v", writeErr)
+		}
+		return mac.Sum(nil)
+	}
+
+	const root = "/a/longhand"
+	id := hex.EncodeToString(longhand([]byte(root)))[:idHexLen]
+	buf := append([]byte(matchMACDomain), 0, 0)
+	buf = append(buf, root...)
+	buf = append(buf, 0)
+	mac := hex.EncodeToString(longhand(buf))
+
+	writeProjectsJSON(t, p, fmt.Sprintf(`{
+  "version": 1,
+  "projects": [
+    {"id": %q, "label": "longhand", "root": %q, "case_insensitive": false, "match_mac": %q}
+  ]
+}
+`, id, root, mac))
+
+	r := openRepos(t, p)
+	if dropped := r.DroppedEntries(); dropped != 0 {
+		t.Fatalf("DroppedEntries() = %d, want 0 — this build refused a table the longhand construction signed", dropped)
+	}
+	identity, err := r.Identify(root + "/pkg")
+	if err != nil {
+		t.Fatalf("Identify() error = %v", err)
+	}
+	if !identity.Matched || identity.ID != id {
+		t.Fatalf("Identify() = %+v, want the recorded id %s matched", identity, id)
+	}
+}
+
 func TestConsentedRootAnswersWithTheRecordedRoot(t *testing.T) {
 	paths := testPaths(t)
 	repos, err := OpenRepos(paths)
