@@ -1111,12 +1111,6 @@ func TestReadDoesNotInterruptACallWhenALineWasUnusable(t *testing.T) {
 		// and the call stayed buffered. That is blindness about this call's fate just as
 		// much as a line that never arrived, however well the line parsed.
 		"unusable identity carrying a tool_result": `{"sessionId":"session-1","cwd":"/repo","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
-		// The real shape of a completed call the reader cannot read today: the result block
-		// is right there, but toolUseResult is a string rather than the object the struct
-		// expects, so the entry is rejected and the call is never terminated. Whether the
-		// reader should decode this shape is a separate question; while it does not, it is
-		// blind to this call's fate and may not call the call interrupted.
-		"partly decoded line carrying a tool_result": `{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","toolUseResult":"ok: 12 files","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
 
@@ -1133,6 +1127,50 @@ func TestReadDoesNotInterruptACallWhenALineWasUnusable(t *testing.T) {
 			}
 			if len(result.Records) != 0 || result.Interrupted != 0 || result.Pending != 1 {
 				t.Fatalf("Read() = %+v", result)
+			}
+		})
+	}
+}
+
+func TestReadDoesNotInterruptACallTerminatedByAnyResultShape(t *testing.T) {
+	// The commonest terminator on a real machine: the result block is there and
+	// toolUseResult carries whatever shape the tool returned — a bare string for Bash,
+	// an array of content blocks for Task. The reader reads those (see
+	// transcriptEntry.ToolUseResult), so the call terminates normally and the staleness
+	// rule has nothing left to resolve.
+	//
+	// It is pinned here, under a window wide open, because the failure it guards against
+	// is silent and permanent: a shape that stopped terminating its call would leave the
+	// call buffered, and this rule would then write it as outcome interrupted — a call
+	// that in fact succeeded, uncorrectable because ADR-0004 deduplicates and ADR-0015
+	// rejects upsert.
+	shapes := map[string]string{
+		"a bare string":              `"ok: 12 files"`,
+		"an array of content blocks": `[{"type":"text","text":"done"}]`,
+		"an object":                  `{"interrupted":false}`,
+	}
+	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
+
+	for name, payload := range shapes {
+		t.Run(name, func(t *testing.T) {
+			terminator := `{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","toolUseResult":` +
+				payload +
+				`,"message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`
+
+			result, err := Read(strings.NewReader(unterminatedCall+"\n"+terminator+"\n"), resolver, names, stale)
+			if err != nil {
+				t.Fatalf("Read() error = %v", err)
+			}
+
+			if result.Malformed != 0 || result.Interrupted != 0 || result.Pending != 0 {
+				t.Fatalf("Read() = %+v", result)
+			}
+			if len(result.Records) != 1 {
+				t.Fatalf("Read() records = %+v, want exactly one", result.Records)
+			}
+			outcome := result.Records[0].Outcome
+			if outcome == nil || *outcome != record.OutcomeOK {
+				t.Errorf("Outcome = %v, want ok — the call finished, it was not interrupted", outcome)
 			}
 		})
 	}
@@ -1244,13 +1282,17 @@ func TestReadStillResolvesAStaleCallOnATranscriptCarryingBookkeepingLines(t *tes
 // block, so neither can be the terminator of a buffered call.
 //
 // They are the common case, not an edge: sampling ~/.claude/projects, message.content
-// arrives as a plain string on thousands of user turns and toolUseResult as a string
-// or an array on thousands more, together touching 1020 of 1023 transcripts. A gate
-// keyed on "json.Unmarshal returned an error" would therefore be as permanently
-// closed as one keyed on Malformed was.
+// arrives as a plain string on thousands of user turns, touching almost every
+// transcript. A gate keyed on "json.Unmarshal returned an error" would therefore be as
+// permanently closed as one keyed on Malformed was.
+//
+// A non-object toolUseResult used to belong here and no longer does: the field is read
+// raw, so such a line decodes whole (see transcriptEntry.ToolUseResult). It is covered
+// as an ordinary readable line instead — by
+// TestReadDoesNotInterruptACallTerminatedByAnyResultShape when it terminates a call,
+// and by the case below when it does not.
 var partlyDecodedLines = map[string]string{
 	"a user turn whose content is text rather than blocks": `{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","type":"user","message":{"role":"user","content":"carry on"}}`,
-	"an entry whose toolUseResult is not an object":        `{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","toolUseResult":["one","two"],"message":{"content":[{"type":"text"}]}}`,
 }
 
 func TestReadStillResolvesAStaleCallWhenALineOnlyPartlyDecoded(t *testing.T) {
@@ -1269,6 +1311,24 @@ func TestReadStillResolvesAStaleCallWhenALineOnlyPartlyDecoded(t *testing.T) {
 				t.Errorf("Malformed = %d, want 1 — the line still yielded no entry", result.Malformed)
 			}
 		})
+	}
+}
+
+func TestReadStillResolvesAStaleCallPastANonObjectToolUseResult(t *testing.T) {
+	// An entry whose toolUseResult is an array and which carries no tool_result block:
+	// fully readable, so it is not blindness, and not a terminator, so it resolves
+	// nothing. The rule must still run, and the line must not be counted as a line the
+	// reader had no entry for.
+	line := `{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","toolUseResult":["one","two"],"message":{"content":[{"type":"text"}]}}`
+	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
+
+	result, err := Read(strings.NewReader(unterminatedCall+"\n"+line), resolver, names, stale)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+
+	if result.Malformed != 0 || result.Interrupted != 1 || result.Pending != 0 || result.OpenSessions != 0 {
+		t.Fatalf("Read() = %+v", result)
 	}
 }
 
