@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -24,7 +23,7 @@ import (
 // label (plan §3.4, ADR-0019 §7), and it goes to stderr so a non-TTY stdout stays
 // the deterministic text plan §7.3 promises.
 func resolveDiscoveryScope(cmd *cobra.Command, paths config.Paths) (inventory.Scope, record.Namer, error) {
-	home, err := os.UserHomeDir()
+	claudeDir, err := config.ClaudeCodeDir()
 	if err != nil {
 		return inventory.Scope{}, record.Namer{}, err
 	}
@@ -32,7 +31,7 @@ func resolveDiscoveryScope(cmd *cobra.Command, paths config.Paths) (inventory.Sc
 	if err != nil {
 		return inventory.Scope{}, record.Namer{}, err
 	}
-	scope, names := activation.DiscoveryScope(paths, filepath.Join(home, ".claude"), cwd)
+	scope, names := activation.DiscoveryScope(paths, claudeDir, cwd)
 	switch scope.Project {
 	case inventory.ProjectUnconsented:
 		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Project-local primitives were not collected: this directory is not a consented repository. Run 'wake init' here to include it.")

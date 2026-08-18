@@ -174,7 +174,7 @@ func reportFixture(t *testing.T) (config.Paths, string) {
 	for _, name := range []string{"report", "unused"} {
 		writeSkill(t, filepath.Join(root, ".claude", "skills", name))
 	}
-	writeSkill(t, filepath.Join(home, ".claude", "skills", "global-skill"))
+	writeSkill(t, filepath.Join(claudeHome(t), "skills", "global-skill"))
 	paths, err := config.ResolvePaths()
 	if err != nil {
 		t.Fatalf("ResolvePaths() error = %v", err)

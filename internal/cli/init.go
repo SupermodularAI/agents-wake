@@ -29,15 +29,14 @@ func newInitCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return err
-		}
 		self, err := os.Executable()
 		if err != nil {
 			return err
 		}
-		claudeDir := filepath.Join(home, ".claude")
+		claudeDir, err := config.ClaudeCodeDir()
+		if err != nil {
+			return err
+		}
 		// The error is returned rather than discarded, and returned before any state
 		// is modified: ADR-0010 rests on `init` disclosing the exact files it will
 		// change, so a disclosure that did not reach the user is a consent step that
