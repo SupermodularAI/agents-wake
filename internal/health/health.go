@@ -11,7 +11,9 @@
 // field that could hold one: `doctor` output is what people paste into issues, so a
 // counter carries a count and never a line, a path, or a label (ADR-0019 §7,
 // ADR-0007 applied to diagnostics). A test asserts the field types, because the
-// temptation a later change will feel is to add "and here is why" as a string.
+// temptation a later change will feel is to add "and here is why" as a string. The
+// state word `doctor` prints is Diagnose's return value derived over these counters
+// on every read, and never a field in the file.
 //
 // The file is derived and non-precious. It lives under the data root, and deleting
 // the data root stays safe (ADR-0014): what is lost is one scan's worth of
@@ -82,7 +84,7 @@ type Scan struct {
 	RefusedCalls int `json:"refused_calls"`
 	// PendingCalls counts tool calls the last scan found unterminated whose session is
 	// still inside the staleness window: a number that is not final yet, not collection
-	// that was lost (ADR-0015). It is deliberately not one of integrationState's
+	// that was lost (ADR-0015). It is deliberately not one of Diagnose's
 	// "collects nothing" reasons.
 	PendingCalls int `json:"pending_calls"`
 	// InterruptedCalls counts calls resolved to outcome interrupted because their
