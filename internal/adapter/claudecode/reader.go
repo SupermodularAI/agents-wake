@@ -121,8 +121,10 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 	// It is narrower than Malformed on purpose. A line the reader could inspect and
 	// found no tool_result in cannot have terminated anything, so nothing about any
 	// call's fate is hidden by it. That distinction is what keeps a real transcript's
-	// routine lines — bookkeeping shapes with no uuid, and entries whose message
-	// content or toolUseResult is not the type this struct declares — out of the gate.
+	// routine lines — bookkeeping shapes with no uuid, and entries whose message content
+	// is not the type this struct declares — out of the gate. A result payload cannot
+	// put a line here at all: ToolUseResult is captured raw, so its shape never costs
+	// the reader the entry that terminates a call.
 	unreadable := 0
 	skipped, err := jsonl.Lines(reader, maxLineBytes, func(offset int64, line []byte) {
 		var entry transcriptEntry
@@ -224,9 +226,9 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 	// The gate is unreadable and not Malformed. Every real transcript carries lines
 	// Malformed counts that hide nothing — per-session bookkeeping (ai-title,
 	// last-prompt, queue-operation) has no uuid, so valid() rejects it, and a message's
-	// content or a toolUseResult arriving as a type this struct does not declare fails
-	// json.Unmarshal — and gating on that count switched ADR-0015's rule off on every
-	// machine while every hand-written fixture stayed green. Keeping this read's own two
+	// content arriving as a type this struct does not declare fails json.Unmarshal — and
+	// gating on that count switched ADR-0015's rule off on every machine while every
+	// hand-written fixture stayed green. Keeping this read's own two
 	// questions apart ("did I have an entry for that line" and "could that line have
 	// terminated a call") is what makes the rule run in production and stop only for
 	// blindness that could actually mislead it.
@@ -380,9 +382,9 @@ func (entry transcriptEntry) valid() bool {
 // inspectable reports whether a decode that ended in err still left the entry worth
 // looking at. A type mismatch does: encoding/json records it and carries on with the
 // remaining keys, so a field this reader does not model arriving as some other type —
-// a message's content as a plain string, a toolUseResult as a string or an array, both
-// ordinary in real transcripts — costs the entry but not the reader's view of the
-// line. Anything else, a syntax error above all, leaves nothing to look at.
+// a message's content as a plain string, ordinary in real transcripts — costs the entry
+// but not the reader's view of the line. Anything else, a syntax error above all, leaves
+// nothing to look at.
 //
 // Whether such an entry should be salvaged rather than rejected is a separate
 // question, and a bigger one than the staleness rule: today the reader derives nothing
