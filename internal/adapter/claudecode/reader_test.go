@@ -658,8 +658,13 @@ func TestReadTerminatesEveryCallInATranscriptShapedLikeARealOne(t *testing.T) {
 	}
 }
 
+// consentedPath is the one working directory resolver consents to. It is named so a
+// retention test can assert the path itself never reaches a record: only the hash
+// does (plan §3.4).
+const consentedPath = "/repo"
+
 func resolver(cwd string) (record.Hash, bool) {
-	return repo, cwd == "/repo"
+	return repo, cwd == consentedPath
 }
 
 // names keys the scope digest for this package's tests. Production keys it with a
@@ -1451,6 +1456,133 @@ func TestReadReportsTheCursorFloorOfTheEarliestOpenSession(t *testing.T) {
 	// The closed session's call resolved; the open session's stayed buffered.
 	if result.Interrupted != 1 || result.Pending != 1 {
 		t.Errorf("Read() = %+v", result)
+	}
+}
+
+func TestReadReleasesTheCursorFloorWhenEverySessionClosed(t *testing.T) {
+	// Nothing is left unresolved, so a cursor may advance freely and the floor means
+	// nothing: OpenSessions at zero is what says so, and CursorFloor is only meaningful
+	// while it is positive (see Result.CursorFloor).
+	second := `{"uuid":"entry-2","sessionId":"session-2","cwd":"/repo","timestamp":"2026-08-13T12:00:05Z","message":{"content":[{"type":"tool_use","id":"call-2","name":"Read"}]}}`
+	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
+
+	result, err := Read(strings.NewReader(unterminatedCall+"\n"+second), resolver, names, stale)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+
+	if result.OpenSessions != 0 || result.CursorFloor != 0 {
+		t.Errorf("Read() = %+v, want no open session and no floor", result)
+	}
+	if result.Interrupted != 2 || result.Pending != 0 {
+		t.Errorf("Read() = %+v, want both calls resolved", result)
+	}
+}
+
+func TestReadPinsTheCursorFloorForAnOpenSessionWithNothingBuffered(t *testing.T) {
+	// ADR-0023 §5 pins the floor at the earliest line of any session that has not
+	// closed, not at the earliest line holding a buffered call. A session still open may
+	// yet write the tool_use whose result arrives later in the same file, so advancing
+	// past its first line loses the pairing — while a floor that is too low only costs a
+	// re-read, which writes nothing twice (ADR-0004).
+	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(30 * time.Minute)}
+
+	result, err := Read(strings.NewReader(unterminatedCall+"\n"+resultForUnterminatedCall), resolver, names, stale)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+
+	if result.Pending != 0 || result.Interrupted != 0 || len(result.Records) != 1 {
+		t.Fatalf("Read() = %+v, want the call terminated the ordinary way", result)
+	}
+	if result.OpenSessions != 1 || result.CursorFloor != 0 {
+		t.Errorf("Read() = %+v, want the open session pinned at its first line", result)
+	}
+}
+
+func TestReadDoesNotInterruptACallItNeverCollected(t *testing.T) {
+	// The staleness rule may only resolve what the reader actually buffered. A call
+	// outside collection — an unconsented repository, a session id outside the token
+	// domain — was never Wake's to collect, and a call whose name was refused is a
+	// fail-closed drop (ADR-0007). None of them may become a record because a clock
+	// moved: that would widen consent, or substitute a placeholder name, permanently
+	// (ADR-0004 deduplicates, ADR-0015 rejects upsert).
+	cases := map[string]struct {
+		transcript  string
+		wantRefused int
+	}{
+		"an unconsented repository": {
+			transcript: `{"uuid":"entry-1","sessionId":"session-1","cwd":"/elsewhere","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
+		},
+		"a session id outside the token domain": {
+			transcript: `{"uuid":"entry-1","sessionId":"` + strings.Repeat("s", 1024) + `","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
+		},
+		"a subagent call naming no subagent": {
+			transcript:  `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Task"}]}}`,
+			wantRefused: 1,
+		},
+	}
+	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
+
+	for name, test := range cases {
+		t.Run(name, func(t *testing.T) {
+			result, err := Read(strings.NewReader(test.transcript), resolver, names, stale)
+			if err != nil {
+				t.Fatalf("Read() error = %v", err)
+			}
+
+			if len(result.Records) != 0 || result.Interrupted != 0 || result.Pending != 0 {
+				t.Fatalf("Read() = %+v, want nothing emitted and nothing buffered", result)
+			}
+			if result.Refused != test.wantRefused {
+				t.Errorf("Refused = %d, want %d", result.Refused, test.wantRefused)
+			}
+		})
+	}
+}
+
+// The adapter's hostile-payload assertion for the interrupted path. ADR-0007 requires
+// one per adapter and per input shape, and this is a new way for a record to be built:
+// no result line contributes to it, so every field comes out of the retained call.
+func TestReadRetainsNothingFromAnInterruptedCall(t *testing.T) {
+	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
+
+	for _, value := range hostileValues {
+		// The hostile value goes only in fields no record field is derived from: a denial
+		// kind, an unmodelled sibling key, and the working directory — which the resolver
+		// turns into a hash and which may never travel as a path (plan §3.4). The
+		// allowlisted fields carry their own bounded values, and what they admit is bounded
+		// by record's own domains rather than by this test.
+		transcript := fmt.Sprintf(
+			`{"uuid":"entry-1","sessionId":"session-1","cwd":%s,"timestamp":"2026-08-13T12:00:00Z","toolDenialKind":%s,"pad":%s,"message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
+			quoted(t, consentedPath), quoted(t, value), quoted(t, "swordfish-"+value))
+
+		result, err := Read(strings.NewReader(transcript), resolver, names, stale)
+		if err != nil {
+			t.Fatalf("Read() error = %v", err)
+		}
+		if result.Interrupted != 1 || len(result.Records) != 1 {
+			t.Fatalf("Read(%q) = %+v, want one interrupted record", value, result)
+		}
+		event := result.Records[0]
+		// The outcome is the rule's, not the transcript's: a hostile toolDenialKind is
+		// neither permission-rule nor user-rejected, and nothing about a session going
+		// quiet is negotiable from the line.
+		if event.Outcome == nil || *event.Outcome != record.OutcomeInterrupted {
+			t.Errorf("Read(%q) outcome = %v, want interrupted", value, event.Outcome)
+		}
+		if err := record.Validate(event); err != nil {
+			t.Errorf("Read(%q) Validate() error = %v", value, err)
+		}
+		encoded, err := record.Marshal(event)
+		if err != nil {
+			t.Fatalf("Marshal() error = %v", err)
+		}
+		for _, fragment := range []string{"swordfish", consentedPath, value} {
+			if strings.Contains(string(encoded), fragment) {
+				t.Fatalf("interrupted record retains %q: %s", fragment, encoded)
+			}
+		}
 	}
 }
 
