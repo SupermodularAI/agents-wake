@@ -66,9 +66,10 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer) (Result, error
 	//
 	// It is per-Read state next to pending, not package state, for the same reason
 	// pending is: it is unresolved source state a cursor floor must be able to see
-	// (ADR-0015), so the derived count cannot depend on where a scan started. It
-	// carries no consent-bearing and no free-text value (see callResult), so
-	// buffering one before the call's repository consent is known retains nothing.
+	// (ADR-0015, ADR-0023), so the derived count cannot depend on where a scan
+	// started. It carries no consent-bearing and no free-text value (see
+	// callResult), so buffering one before the call's repository consent is known
+	// retains nothing.
 	earlyResults := map[string]callResult{}
 	skipped, err := jsonl.Lines(reader, maxLineBytes, func(line []byte) {
 		var entry transcriptEntry
