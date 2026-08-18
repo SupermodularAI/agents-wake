@@ -33,7 +33,13 @@ import (
 // reportVersion is stamped on every write. A file from a future format read as this
 // one would report counters that mean something else, so an unrecognised version
 // stops the read instead.
-const reportVersion = 1
+//
+// Bumped to 2 when the scan gained the pending and interrupted counters (T114): a
+// version-1 file read as this format would report 0 for two counters nobody
+// measured, which is the "collects zero for a state nobody measured" failure this
+// package's comment forbids. The file is derived and non-precious (ADR-0014), so
+// refusing it costs one scan's diagnostics.
+const reportVersion = 2
 
 // reportFileMode is the mode the counter file is written with. It holds no path and
 // no label, but it is state about this user's machine and the rest of the local
@@ -74,6 +80,16 @@ type Scan struct {
 	// an honest zero — this one is collection that was lost, and it is what a
 	// harness renaming the field a primitive's identity lives in looks like.
 	RefusedCalls int `json:"refused_calls"`
+	// PendingCalls counts tool calls the last scan found unterminated whose session is
+	// still inside the staleness window: a number that is not final yet, not collection
+	// that was lost (ADR-0015). It is deliberately not one of integrationState's
+	// "collects nothing" reasons.
+	PendingCalls int `json:"pending_calls"`
+	// InterruptedCalls counts calls the last scan resolved to outcome interrupted
+	// because their session had gone quiet past the threshold. A call that resolves
+	// this way is a fact worth surfacing rather than lost collection: the invocation is
+	// in the store, carrying the outcome that says it never finished.
+	InterruptedCalls int `json:"interrupted_calls"`
 }
 
 // Hooks is what the last `init` or `remove` managed to do. KeptOwned is the partial
