@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/SupermodularAI/agents-wake/internal/metrics"
 	"github.com/SupermodularAI/agents-wake/internal/record"
@@ -313,6 +314,59 @@ func TestReadNeverUsesToolArguments(t *testing.T) {
 	if strings.Contains(string(encoded), "do not retain") {
 		t.Fatalf("record contains source argument: %s", encoded)
 	}
+}
+
+// forwardOrderPair is the canonical terminated Bash call: the tool_use line, then
+// the tool_result line that terminates it. reversedOrderPair is the same two lines
+// in the order Claude Code writes them in a small fraction of transcripts — the
+// result first. Each line keeps its own uuid and timestamp in both orders, so the
+// only difference between the two transcripts is arrival order.
+var (
+	toolUseLine    = `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","version":"1.0.0","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`
+	toolResultLine = `{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`
+
+	forwardOrderPair  = toolUseLine + "\n" + toolResultLine
+	reversedOrderPair = toolResultLine + "\n" + toolUseLine
+)
+
+// A tool_result line can precede its own tool_use line. That is an out-of-order
+// write, not a malformed one, and the forward-only pairing loop used to drop the
+// result and then buffer the call forever — which, once the staleness path is live,
+// writes a call that genuinely succeeded as outcome: interrupted, permanently
+// (ADR-0004 dedup never upserts, ADR-0015).
+func TestReadCompletesACallWhoseResultLinePrecedesIt(t *testing.T) {
+	result, err := Read(strings.NewReader(reversedOrderPair), resolver, names)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 1 || result.Pending != 0 || result.Malformed != 0 || result.Refused != 0 {
+		t.Fatalf("Read() = %+v, want one record and no counter moved", result)
+	}
+	event := result.Records[0]
+	if event.Outcome == nil || *event.Outcome != record.OutcomeOK {
+		t.Errorf("Outcome = %v, want the real outcome the result line carries", event.Outcome)
+	}
+	if event.Kind != record.KindBuiltinTool || event.Name != "Bash" {
+		t.Errorf("record = %+v, want the Bash call", event)
+	}
+	// The tool_use entry is what the call's own metadata comes from, in either order.
+	if event.HarnessVersion != "1.0.0" || event.Model != "sonnet" {
+		t.Errorf("HarnessVersion = %q, Model = %q, want them from the tool_use entry", event.HarnessVersion, event.Model)
+	}
+	// And the result entry is what stamps the timestamp, exactly as complete has
+	// always stamped it.
+	if want := record.NormalizedTimestamp(parsedTime(t, "2026-08-13T12:00:01Z")); !event.Timestamp.Equal(want) {
+		t.Errorf("Timestamp = %v, want the result entry's %v", event.Timestamp, want)
+	}
+}
+
+func parsedTime(t *testing.T, value string) time.Time {
+	t.Helper()
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		t.Fatalf("Parse(%q) error = %v", value, err)
+	}
+	return parsed
 }
 
 func resolver(cwd string) (record.Hash, bool) {

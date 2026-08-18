@@ -1,6 +1,7 @@
 // Package claudecode derives safe terminal records from Claude Code JSONL
 // transcripts. It retains pending call metadata only until a matching result
-// arrives and never persists transcript content.
+// arrives, and a result's derived outcome only until its matching call arrives,
+// and never persists transcript content.
 package claudecode
 
 import (
@@ -56,6 +57,19 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer) (Result, error
 
 	result := Result{}
 	pending := map[string]call{}
+	// earlyResults holds a tool_result whose tool_use line has not been read yet.
+	// Claude Code writes the pair out of order in a small fraction of transcripts,
+	// and a forward-only pairing loop drops the result and then buffers the call
+	// forever — which, once the staleness path is live, writes a completed call as
+	// outcome: interrupted permanently, because the store deduplicates on event_id
+	// and never upserts (ADR-0004, ADR-0015).
+	//
+	// It is per-Read state next to pending, not package state, for the same reason
+	// pending is: it is unresolved source state a cursor floor must be able to see
+	// (ADR-0015), so the derived count cannot depend on where a scan started. It
+	// carries no consent-bearing and no free-text value (see callResult), so
+	// buffering one before the call's repository consent is known retains nothing.
+	earlyResults := map[string]callResult{}
 	skipped, err := jsonl.Lines(reader, maxLineBytes, func(line []byte) {
 		var entry transcriptEntry
 		if unmarshalErr := json.Unmarshal(line, &entry); unmarshalErr != nil {
@@ -72,17 +86,39 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer) (Result, error
 		for _, block := range entry.Message.Content {
 			switch block.Type {
 			case "tool_use":
+				// Every branch below runs after the full entry.call gate, so an early
+				// result can never bypass a consent, id-domain or naming check: the
+				// refused and skipped branches discard the buffered result instead of
+				// leaving it to be matched by anything. They key the discard by the raw
+				// block id because pendingCall.id is empty on those paths.
 				pendingCall, status := entry.call(block, resolve, names)
 				switch status {
 				case callAccepted:
-					pending[pendingCall.id] = pendingCall
+					if early, terminated := earlyResults[pendingCall.id]; terminated {
+						delete(earlyResults, pendingCall.id)
+						result.Records = append(result.Records, pendingCall.complete(early))
+					} else {
+						pending[pendingCall.id] = pendingCall
+					}
 				case callRefusedName:
 					result.Refused++
+					delete(earlyResults, block.ID)
 				case callSkipped:
+					delete(earlyResults, block.ID)
 				}
 			case "tool_result":
-				pendingCall, ok := pending[block.ToolUseID]
-				if !ok {
+				pendingCall, open := pending[block.ToolUseID]
+				if !open {
+					// The tool_use line has not been read yet, or this id was already
+					// completed, skipped or refused. Retain the first result per id and
+					// nothing else: a second result for one id is a no-op here exactly as
+					// it was before, and a result whose tool_use never arrives yields no
+					// record at all — there is no name, kind, invoker or consented repo to
+					// build one from, and only a terminal event may be emitted (ADR-0015,
+					// ADR-0007).
+					if _, seen := earlyResults[block.ToolUseID]; !seen {
+						earlyResults[block.ToolUseID] = resultOf(entry, block)
+					}
 					continue
 				}
 				delete(pending, block.ToolUseID)
