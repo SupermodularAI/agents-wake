@@ -5,10 +5,12 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/SupermodularAI/agents-wake/internal/config"
 	"github.com/SupermodularAI/agents-wake/internal/health"
 	"github.com/SupermodularAI/agents-wake/internal/inventory"
+	"github.com/SupermodularAI/agents-wake/internal/record"
 	"github.com/SupermodularAI/agents-wake/internal/store"
 )
 
@@ -415,6 +417,74 @@ func writeFixture(t *testing.T, path, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
+	}
+}
+
+// TestIngestSurfacesPendingAndInterruptedCalls is the ticket's end-to-end
+// criterion: a call left unterminated by a dead session eventually reaches the
+// store as outcome interrupted, and a call whose session may still be running stays
+// buffered and is reported as pending instead of vanishing.
+//
+// The two transcripts pick their timestamps rather than fixing them. The stale one
+// is deliberately historical, so the provisional 24h default resolves it on any sane
+// clock; the live one is generated from time.Now, so it is inside the window by
+// construction. A fixed near-today date would make this test's meaning depend on
+// when it runs, and the threshold itself must never be shortened to make the
+// feature easier to demonstrate — an interrupted record cannot be taken back.
+func TestIngestSurfacesPendingAndInterruptedCalls(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("MkdirAll() root error = %v", err)
+	}
+	claudeDir := filepath.Join(t.TempDir(), "claude")
+	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll() Claude dir error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("WriteFile() settings error = %v", err)
+	}
+	transcriptDir := filepath.Join(claudeDir, "projects", "project")
+	if err := os.MkdirAll(transcriptDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll() transcript error = %v", err)
+	}
+	stale := `{"uuid":"entry-1","sessionId":"session-stale","cwd":"` + root + `","timestamp":"2020-01-01T00:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`
+	if err := os.WriteFile(filepath.Join(transcriptDir, "stale.jsonl"), []byte(stale), 0o600); err != nil {
+		t.Fatalf("WriteFile() stale transcript error = %v", err)
+	}
+	live := `{"uuid":"entry-2","sessionId":"session-live","cwd":"` + root + `","timestamp":"` + time.Now().UTC().Format(time.RFC3339) + `","message":{"content":[{"type":"tool_use","id":"call-2","name":"Read"}]}}`
+	if err := os.WriteFile(filepath.Join(transcriptDir, "live.jsonl"), []byte(live), 0o600); err != nil {
+		t.Fatalf("WriteFile() live transcript error = %v", err)
+	}
+	paths := testPaths(t)
+
+	written, err := Init(paths, root, claudeDir, testExecutable(t))
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	if written != 1 {
+		t.Fatalf("Init() wrote %d events, want 1 — the stale call resolved and the live one did not", written)
+	}
+
+	report, err := health.New(paths.HealthFile).Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if report.Scan.InterruptedCalls != 1 {
+		t.Errorf("Scan.InterruptedCalls = %d, want 1", report.Scan.InterruptedCalls)
+	}
+	if report.Scan.PendingCalls != 1 {
+		t.Errorf("Scan.PendingCalls = %d, want 1 — a call whose session may still be running is not lost", report.Scan.PendingCalls)
+	}
+
+	entries, err := store.New(filepath.Join(paths.DataDir, eventsFile)).Entries(0)
+	if err != nil {
+		t.Fatalf("Entries() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("Entries() = %+v, want exactly one record", entries)
+	}
+	if outcome := entries[0].Record.Outcome; outcome == nil || *outcome != record.OutcomeInterrupted {
+		t.Fatalf("Outcome = %v, want interrupted", outcome)
 	}
 }
 
