@@ -1,6 +1,7 @@
 package record
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"reflect"
@@ -352,6 +353,29 @@ func TestDerivedNameRefusesAVerbatimDigestShape(t *testing.T) {
 		if _, err := testNamer().DerivedName(value); err != nil {
 			t.Errorf("DerivedName(%q) error = %v", value, err)
 		}
+	}
+}
+
+// The persisted scope digest, pinned against the construction written out
+// longhand. T119 moved the HMAC step into internal/keyeddigest; a digest that
+// shifts by one byte renames every scoped primitive already in the spool and
+// splits its counters in two (ADR-0020, ADR-0022, ADR-0017). crypto/hmac is
+// spelled out rather than calling the shared helper, so this asserts the
+// construction and not the helper against itself.
+func TestDerivedNameCarriesTheKeyedHMACSHA256DigestOfTheScope(t *testing.T) {
+	namer := testNamer()
+	mac := hmac.New(sha256.New, namer.key)
+	if _, err := mac.Write([]byte("apps/web")); err != nil {
+		t.Fatalf("writing to the MAC: %v", err)
+	}
+	want := Identifier(scopePrefix + hex.EncodeToString(mac.Sum(nil))[:scopeDigestLen] + ":deploy")
+
+	got, err := namer.DerivedName("apps/web:deploy")
+	if err != nil {
+		t.Fatalf("DerivedName() error = %v", err)
+	}
+	if got != want {
+		t.Fatalf("DerivedName() = %q, want %q", got, want)
 	}
 }
 
