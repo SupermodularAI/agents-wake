@@ -67,12 +67,12 @@ func TestEveryCommandResolvesTheSameClaudeCodeDirectory(t *testing.T) {
 	// ingest — one terminal call, in a transcript written under dir after init
 	// imported nothing, so the import can only be this event.
 	transcriptDir := filepath.Join(dir, "projects", "session")
-	if err := os.MkdirAll(transcriptDir, 0o700); err != nil {
+	if err = os.MkdirAll(transcriptDir, 0o700); err != nil {
 		t.Fatalf("MkdirAll() transcript error = %v", err)
 	}
 	transcript := `{"uuid":"entry-1","sessionId":"session-1","cwd":"` + consented + `","timestamp":"2026-08-17T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}
 {"uuid":"entry-2","sessionId":"session-1","cwd":"` + consented + `","timestamp":"2026-08-17T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`
-	if err := os.WriteFile(filepath.Join(transcriptDir, "session.jsonl"), []byte(transcript), 0o600); err != nil {
+	if err = os.WriteFile(filepath.Join(transcriptDir, "session.jsonl"), []byte(transcript), 0o600); err != nil {
 		t.Fatalf("WriteFile() transcript error = %v", err)
 	}
 	out, _, err = runSplit(t, "ingest")
@@ -87,7 +87,8 @@ func TestEveryCommandResolvesTheSameClaudeCodeDirectory(t *testing.T) {
 	// <its own directory>/skills and nothing else, so the sentinel appearing in the
 	// snapshot is that directory being dir.
 	writeSkill(t, filepath.Join(dir, "skills", "resolver-sentinel"))
-	if out, err := run(t, "report"); err != nil {
+	out, err = run(t, "report")
+	if err != nil {
 		t.Fatalf("report error = %v: %s", err, out)
 	}
 	if raw := readPrimitives(t, paths); !strings.Contains(raw, `"name": "resolver-sentinel"`) {
