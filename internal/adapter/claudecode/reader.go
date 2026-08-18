@@ -5,6 +5,7 @@
 package claudecode
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -139,18 +140,28 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer) (Result, error
 }
 
 type transcriptEntry struct {
-	UUID                 string     `json:"uuid"`
-	SessionID            string     `json:"sessionId"`
-	CWD                  string     `json:"cwd"`
-	Timestamp            time.Time  `json:"timestamp"`
-	Version              string     `json:"version"`
-	AttributionMCPServer string     `json:"attributionMcpServer"`
-	AttributionMCPTool   string     `json:"attributionMcpTool"`
-	AttributionAgent     string     `json:"attributionAgent"`
-	AttributionSkill     string     `json:"attributionSkill"`
-	ToolDenialKind       string     `json:"toolDenialKind"`
-	ToolUseResult        toolResult `json:"toolUseResult"`
-	Message              message    `json:"message"`
+	UUID                 string    `json:"uuid"`
+	SessionID            string    `json:"sessionId"`
+	CWD                  string    `json:"cwd"`
+	Timestamp            time.Time `json:"timestamp"`
+	Version              string    `json:"version"`
+	AttributionMCPServer string    `json:"attributionMcpServer"`
+	AttributionMCPTool   string    `json:"attributionMcpTool"`
+	AttributionAgent     string    `json:"attributionAgent"`
+	AttributionSkill     string    `json:"attributionSkill"`
+	ToolDenialKind       string    `json:"toolDenialKind"`
+	// ToolUseResult stays raw because real Claude Code writes whatever shape the
+	// tool returned: an object for a structured result, a bare string for Bash, an
+	// array of content blocks for Task. A typed field type-errors the whole line —
+	// and that line is the only thing that terminates its call, so the call it
+	// should have completed stays buffered forever and is never emitted (ADR-0015).
+	//
+	// The bytes are read, never retained: interruptedResult takes one boolean from
+	// them and they reach no record field, no error and no log line (plan §4.2).
+	// Reading a payload is not persisting one — the record type is still the
+	// allowlist (ADR-0007).
+	ToolUseResult json.RawMessage `json:"toolUseResult"`
+	Message       message         `json:"message"`
 }
 
 type message struct {
@@ -195,6 +206,25 @@ type callResult struct {
 // one function, so line order cannot change a derived outcome.
 func resultOf(entry transcriptEntry, block contentBlock) callResult {
 	return callResult{timestamp: entry.Timestamp, outcome: outcomeFor(entry, block)}
+}
+
+// interruptedResult reports the one signal this reader takes from a tool result
+// payload. It reads the boolean only when the payload is an object: a string, an
+// array, a number or null carries no structured result, and inferring one from it
+// would be exactly the "infer structure and keep counting" plan §3.3 forbids. A
+// payload that is an object but does not decode — no interrupted field, or one at
+// the wrong type — is not interrupted either: a terminal verdict is promoted only
+// on a positive boolean, never guessed (ADR-0005).
+func (entry transcriptEntry) interruptedResult() bool {
+	raw := bytes.TrimSpace(entry.ToolUseResult)
+	if len(raw) == 0 || raw[0] != '{' {
+		return false
+	}
+	var result toolResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return false
+	}
+	return result.Interrupted
 }
 
 // valid bounds the entry id to the opaque-token domain rather than only requiring
@@ -442,7 +472,7 @@ func outcomeFor(entry transcriptEntry, block contentBlock) *record.Outcome {
 		outcome := record.OutcomeDeniedUser
 		return &outcome
 	}
-	if entry.ToolUseResult.Interrupted {
+	if entry.interruptedResult() {
 		outcome := record.OutcomeInterrupted
 		return &outcome
 	}
