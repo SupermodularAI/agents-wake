@@ -137,6 +137,45 @@ func TestDoctorDoesNotCallPendingCallsLostCollection(t *testing.T) {
 	}
 }
 
+func TestDoctorReportsAmbiguousSkillRuns(t *testing.T) {
+	// Its own line, because it is its own fact: how many attributed skill runs were
+	// collapsed into an already-counted one, which is uncertainty about the invocation
+	// numbers rather than a number of invocations (ADR-0023's accepted limitation).
+	paths := isolate(t)
+	if err := health.New(paths.HealthFile).RecordScan(health.Scan{At: time.Now().UTC(), Transcripts: 1, AmbiguousSkillRuns: 2}); err != nil {
+		t.Fatalf("RecordScan() error = %v", err)
+	}
+
+	out, _, err := runSplit(t, "doctor")
+	if err != nil {
+		t.Fatalf("doctor error = %v", err)
+	}
+	if !strings.Contains(out, "ambiguous skill runs: 2") {
+		t.Errorf("output is missing the ambiguous-skill-run count:\n%s", out)
+	}
+}
+
+// The collapse ADR-0023 accepts is uncertainty about a number, not a source nobody
+// could read. Reporting it as lost collection would make every session with a repeated
+// slash-command read as broken, and would never clear.
+func TestDoctorDoesNotCallAmbiguousSkillRunsLostCollection(t *testing.T) {
+	paths := isolate(t)
+	if err := health.New(paths.HealthFile).RecordScan(health.Scan{At: time.Now().UTC(), EventsWritten: 1, AmbiguousSkillRuns: 3}); err != nil {
+		t.Fatalf("RecordScan() error = %v", err)
+	}
+
+	out, _, err := runSplit(t, "doctor")
+	if err != nil {
+		t.Fatalf("doctor error = %v", err)
+	}
+	if !strings.Contains(out, "integration: collecting") {
+		t.Errorf("integration state is not collecting:\n%s", out)
+	}
+	if strings.Contains(out, "collects nothing") {
+		t.Errorf("a collapsed skill run was reported as lost collection:\n%s", out)
+	}
+}
+
 // doctor output is what people paste into issues. It carries counts and one state
 // word, and never a path, a label or an id.
 func TestDoctorOutputNamesNoPathOrLabel(t *testing.T) {

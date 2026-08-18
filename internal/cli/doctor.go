@@ -56,6 +56,12 @@ func newDoctorCmd() *cobra.Command {
 // provisional and uncalibrated (ADR-0014), and printing a duration here would read
 // as a calibrated promise.
 //
+// The ambiguous-skill-run line is a third distinct fact: how many attributed skill runs
+// were collapsed into an already-counted one for the same session and skill (ADR-0023's
+// accepted limitation). It is uncertainty about the invocation numbers and never an
+// invocation total, which is why it stands apart from the counts above it rather than
+// being folded into any of them.
+//
 // The interpretation of these counters lives in health.Diagnose, because
 // internal/cli only parses and prints (ADR-0001, plan §6.2). This function is the
 // print loop and holds no decision about what the numbers mean.
@@ -108,6 +114,7 @@ func writeDiagnosis(out io.Writer, paths config.Paths, claudeDir string) error {
 		{"refused calls", report.Scan.RefusedCalls},
 		{"pending calls", report.Scan.PendingCalls},
 		{"interrupted calls", report.Scan.InterruptedCalls},
+		{"ambiguous skill runs", report.Scan.AmbiguousSkillRuns},
 	} {
 		if _, err := fmt.Fprintf(out, "%s: %d\n", line.key, line.value); err != nil {
 			return err

@@ -32,9 +32,15 @@ type Result struct {
 	// exists so doctor can say the transition happened, which is new information
 	// rather than lost collection.
 	Interrupted int
-	Written     int
-	Duplicate   int
-	Dropped     int
+	// AmbiguousSkillRuns is the reader's count of attributed skill runs it collapsed
+	// into an already-emitted fallback for the same session and skill. It is not an
+	// invocation count and never joins one: activation folds it into
+	// health.Scan.AmbiguousSkillRuns, which doctor renders as its own line so the
+	// accepted collapse ADR-0023 documents is visible rather than presented as exact.
+	AmbiguousSkillRuns int
+	Written            int
+	Duplicate          int
+	Dropped            int
 }
 
 // ClaudeCode reads one already-authorized Claude Code transcript and persists
@@ -56,13 +62,14 @@ func ClaudeCode(reader io.Reader, resolve claudecode.Resolver, names record.Name
 		return Result{}, err
 	}
 	return Result{
-		Parsed:      len(derived.Records),
-		Malformed:   derived.Malformed,
-		Pending:     derived.Pending,
-		Refused:     derived.Refused,
-		Interrupted: derived.Interrupted,
-		Written:     written.Written,
-		Duplicate:   written.Duplicate,
-		Dropped:     written.Dropped,
+		Parsed:             len(derived.Records),
+		Malformed:          derived.Malformed,
+		Pending:            derived.Pending,
+		Refused:            derived.Refused,
+		Interrupted:        derived.Interrupted,
+		AmbiguousSkillRuns: derived.AmbiguousSkillRuns,
+		Written:            written.Written,
+		Duplicate:          written.Duplicate,
+		Dropped:            written.Dropped,
 	}, nil
 }

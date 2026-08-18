@@ -69,6 +69,12 @@ type Diagnosis struct {
 // never finished (ADR-0015). Both are honest, and neither is a source nobody could
 // read.
 //
+// An ambiguous skill run is not in it either. The transcript was read completely and
+// the collapse is a documented decision (ADR-0023's accepted limitation), not
+// blindness: no transcript signal separates one slash-command run from two with no tool
+// trace. Folding it in would put every session carrying a repeated slash command into
+// "collects nothing", permanently, since nothing about that session will ever change.
+//
 // An input this build cannot read is its own state rather than an error: a
 // diagnostic that failed in the situation it exists for is worse than one that says
 // what it could not determine. Both unreadable states come first, because a number
