@@ -500,6 +500,70 @@ func TestIngestSurfacesPendingAndInterruptedCalls(t *testing.T) {
 	}
 }
 
+// TestIngestSurfacesAmbiguousSkillRuns is the other half of the same criterion at the
+// session grain: several attributed end_turn entries for one skill in one session are
+// one invocation in the store and a count of what was collapsed in the health report.
+// The counter is uncertainty about that number and never a second invocation
+// (ADR-0023's accepted limitation).
+//
+// The transcript is deliberately historical, so the provisional 24h default closes its
+// session on any sane clock — the threshold itself must never be shortened to make the
+// feature easier to demonstrate.
+func TestIngestSurfacesAmbiguousSkillRuns(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("MkdirAll() root error = %v", err)
+	}
+	claudeDir := filepath.Join(t.TempDir(), "claude")
+	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll() Claude dir error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("WriteFile() settings error = %v", err)
+	}
+	transcriptDir := filepath.Join(claudeDir, "projects", "project")
+	if err := os.MkdirAll(transcriptDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll() transcript error = %v", err)
+	}
+	transcript := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"` + root + `","timestamp":"2020-01-01T00:00:00Z","attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"` + root + `","timestamp":"2020-01-01T00:00:01Z","attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
+		`{"uuid":"entry-3","sessionId":"session-1","cwd":"` + root + `","timestamp":"2020-01-01T00:00:02Z","attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(transcriptDir, "slash-commands.jsonl"), []byte(transcript), 0o600); err != nil {
+		t.Fatalf("WriteFile() transcript error = %v", err)
+	}
+	paths := testPaths(t)
+
+	written, err := Init(paths, root, claudeDir, testExecutable(t))
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	if written != 1 {
+		t.Fatalf("Init() wrote %d events, want 1 — three attributed runs of one skill in one session are one record", written)
+	}
+
+	report, err := health.New(paths.HealthFile).Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if report.Scan.AmbiguousSkillRuns != 2 {
+		t.Errorf("Scan.AmbiguousSkillRuns = %d, want 2 — every candidate collapsed after the first", report.Scan.AmbiguousSkillRuns)
+	}
+
+	entries, err := store.New(filepath.Join(paths.DataDir, eventsFile)).Entries(0)
+	if err != nil {
+		t.Fatalf("Entries() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("Entries() = %+v, want exactly one record", entries)
+	}
+	// An end_turn entry describes no result, and unknown is never success (ADR-0005).
+	if outcome := entries[0].Record.Outcome; outcome != nil {
+		t.Errorf("Outcome = %v, want none", outcome)
+	}
+}
+
 // stalenessFixture activates paths on root and leaves one unterminated call, aged
 // `age` before now, as the only thing in Claude Code's history. Every test below turns
 // on whether that one call resolves.
