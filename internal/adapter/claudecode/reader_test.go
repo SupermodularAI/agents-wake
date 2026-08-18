@@ -1111,6 +1111,12 @@ func TestReadDoesNotInterruptACallWhenALineWasUnusable(t *testing.T) {
 		// and the call stayed buffered. That is blindness about this call's fate just as
 		// much as a line that never arrived, however well the line parsed.
 		"unusable identity carrying a tool_result": `{"sessionId":"session-1","cwd":"/repo","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+		// The real shape of a completed call the reader cannot read today: the result block
+		// is right there, but toolUseResult is a string rather than the object the struct
+		// expects, so the entry is rejected and the call is never terminated. Whether the
+		// reader should decode this shape is a separate question; while it does not, it is
+		// blind to this call's fate and may not call the call interrupted.
+		"partly decoded line carrying a tool_result": `{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","toolUseResult":"ok: 12 files","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
 
@@ -1227,6 +1233,74 @@ func TestReadStillResolvesAStaleCallOnATranscriptCarryingBookkeepingLines(t *tes
 			// this pins is that the count does not decide whether the rule runs.
 			if want := strings.Count(input, "\n"); result.Malformed != want {
 				t.Errorf("Malformed = %d, want %d", result.Malformed, want)
+			}
+		})
+	}
+}
+
+// partlyDecodedLines are real transcript shapes that do not fit this reader's struct
+// in exactly one field. encoding/json reports the mismatch and keeps decoding the
+// rest, so the line is still inspectable — and neither of these carries a tool_result
+// block, so neither can be the terminator of a buffered call.
+//
+// They are the common case, not an edge: sampling ~/.claude/projects, message.content
+// arrives as a plain string on thousands of user turns and toolUseResult as a string
+// or an array on thousands more, together touching 1020 of 1023 transcripts. A gate
+// keyed on "json.Unmarshal returned an error" would therefore be as permanently
+// closed as one keyed on Malformed was.
+var partlyDecodedLines = map[string]string{
+	"a user turn whose content is text rather than blocks": `{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","type":"user","message":{"role":"user","content":"carry on"}}`,
+	"an entry whose toolUseResult is not an object":        `{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","toolUseResult":["one","two"],"message":{"content":[{"type":"text"}]}}`,
+}
+
+func TestReadStillResolvesAStaleCallWhenALineOnlyPartlyDecoded(t *testing.T) {
+	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
+
+	for name, line := range partlyDecodedLines {
+		t.Run(name, func(t *testing.T) {
+			result, err := Read(strings.NewReader(unterminatedCall+"\n"+line), resolver, names, stale)
+			if err != nil {
+				t.Fatalf("Read() error = %v", err)
+			}
+			if result.Interrupted != 1 || result.Pending != 0 || result.OpenSessions != 0 || len(result.Records) != 1 {
+				t.Fatalf("Read() = %+v", result)
+			}
+			if result.Malformed != 1 {
+				t.Errorf("Malformed = %d, want 1 — the line still yielded no entry", result.Malformed)
+			}
+		})
+	}
+}
+
+func TestReadTreatsALineWithNoEntryAsActivityForItsSession(t *testing.T) {
+	// The reader has no entry for either line, but both name their session and carry a
+	// timestamp — which is the whole of what the staleness rule asks. Reading the
+	// session's last activity from the tool_use instead would call a session that wrote
+	// something half an hour ago dead, and ADR-0004's dedup makes that permanent.
+	//
+	// This is what the narrowed gate makes load-bearing: these lines no longer stop the
+	// rule, so the rule has to take account of them rather than not see them.
+	lines := map[string]string{
+		"bookkeeping line":  `{"type":"queue-operation","operation":"enqueue","sessionId":"session-1","timestamp":"2026-08-13T19:30:00Z"}`,
+		"partly decoded":    `{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T19:30:00Z","type":"user","message":{"role":"user","content":"carry on"}}`,
+		"unusable entry id": `{"uuid":"not/a/token","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T19:30:00Z","message":{"content":[{"type":"text"}]}}`,
+	}
+	// 20:00 against a 19:30 line: half an hour inside a one-hour window.
+	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
+
+	for name, line := range lines {
+		t.Run(name, func(t *testing.T) {
+			result, err := Read(strings.NewReader(unterminatedCall+"\n"+line), resolver, names, stale)
+			if err != nil {
+				t.Fatalf("Read() error = %v", err)
+			}
+			if result.Interrupted != 0 || result.Pending != 1 || result.OpenSessions != 1 {
+				t.Fatalf("Read() = %+v", result)
+			}
+			// The floor is the session's earliest line, which is still the tool_use at the
+			// start of the source.
+			if result.CursorFloor != 0 {
+				t.Errorf("CursorFloor = %d, want 0", result.CursorFloor)
 			}
 		})
 	}
