@@ -28,12 +28,19 @@ const maxLineBytes = 1024 * 1024
 
 // Result contains safe derived records plus collection health counters.
 type Result struct {
-	Records   []record.Record
+	Records []record.Record
+	// Malformed counts source lines this read could not use: a line that does not
+	// parse, one whose entry id or timestamp is outside the domain, and one too long
+	// to deliver. It is doctor's drift signal, and it also gates the staleness rule —
+	// a positive value means this read was blind somewhere, so it may not conclude a
+	// session went silent (see Read).
 	Malformed int
-	// Pending counts calls still unterminated when the scan finished whose session
-	// is still inside the staleness window. It is a number that is not final yet
-	// rather than collection that was lost (ADR-0015), which is why doctor renders it
-	// as its own line and not as "collects nothing".
+	// Pending counts calls still unterminated when the scan finished that the
+	// staleness rule did not resolve — because their session is still inside the
+	// window, or because Malformed is positive and this read could not apply the rule
+	// at all. It is a number that is not final yet rather than collection that was
+	// lost (ADR-0015), which is why doctor renders it as its own line and not as
+	// "collects nothing".
 	Pending int
 	// Interrupted counts calls this scan resolved by the staleness rule: their
 	// session went quiet past the threshold, so they were emitted as terminal records
@@ -41,7 +48,8 @@ type Result struct {
 	// in Records and are also counted by Parsed upstream.
 	Interrupted int
 	// OpenSessions counts the sessions this transcript's entries belong to that have
-	// not closed under the staleness rule.
+	// not closed under the staleness rule. When Malformed is positive no session is
+	// reported closed, for the same reason no call is resolved.
 	OpenSessions int
 	// CursorFloor is the byte offset of the earliest line belonging to any session
 	// still open. A future incremental cursor (T020, T102) must not advance past it
@@ -169,11 +177,29 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 	// parse is: counted as malformed so doctor can report blindness, and nothing is
 	// synthesised from it — no call is opened, so no result can terminate one.
 	result.Malformed += skipped
-	interrupted := resolveStaleCalls(pending, sessions, stale)
+	// A read that was blind on any line may not judge a session silent. The line it
+	// could not use may be the tool_result that terminated a buffered call, and it was
+	// not observed as activity either — so last activity is known-understated, not
+	// merely old. Concluding "interrupted" from that would infer a terminal outcome
+	// from blindness, which plan §3.3 forbids, and would write a permanent failure for
+	// a call that succeeded: ADR-0015 rejects upsert and ADR-0004 deduplicates, so no
+	// later scan can take it back. ADR-0015 scopes interrupted to a session that
+	// actually died; this reader cannot tell that apart from one line it cannot read.
+	//
+	// Disabling the rule for the whole read rather than for one session is the
+	// practical grain: internal/jsonl cannot attribute a line it never delivered to a
+	// session, so there is no session to exempt. The cost is a call that stays Pending
+	// and a cursor floor that does not move — a slower scan, never wrong data, which is
+	// the direction Staleness's zero value already takes.
+	judged := stale
+	if result.Malformed > 0 {
+		judged = Staleness{}
+	}
+	interrupted := resolveStaleCalls(pending, sessions, judged)
 	result.Records = append(result.Records, interrupted...)
 	result.Interrupted = len(interrupted)
 	result.Pending = len(pending)
-	result.OpenSessions, result.CursorFloor = sessions.CursorFloor(stale)
+	result.OpenSessions, result.CursorFloor = sessions.CursorFloor(judged)
 	return result, nil
 }
 
