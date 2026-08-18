@@ -73,9 +73,15 @@ func TestReadUsesSkillNameInsteadOfToolName(t *testing.T) {
 	}
 }
 
+// The Shape-A fallback: a skill run Claude Code left no Skill tool call for, which
+// is what a slash-command invocation looks like in the transcript. The record exists
+// only because the session closed — until then the reader cannot tell this run apart
+// from one a Skill tool_use already described, so it defers rather than counts
+// (ADR-0023 §2-§3), which is why this reads under closedSession and not the zero
+// Staleness.
 func TestReadDerivesTerminalAttributedSkill(t *testing.T) {
 	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"run-sdlc","message":{"model":"sonnet","stop_reason":"end_turn"}}`
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -105,6 +111,117 @@ func TestReadDerivesNoSubagentRecordFromAttributionAlone(t *testing.T) {
 	// collects nothing from it, which must not read as lost collection in doctor.
 	if result.Refused != 0 || result.Malformed != 0 {
 		t.Errorf("Read() = %+v, want no refusal and no malformed line", result)
+	}
+}
+
+// A Shape-A candidate is deferred, not emitted, until its session closes. ADR-0023
+// §3 makes session close the terminal boundary for this record exactly as a
+// tool_result is for a tool call: ADR-0015 permits only terminal events, and a
+// candidate the reader has not finished ruling on is not one.
+func TestReadDefersASkillCandidateUntilItsSessionCloses(t *testing.T) {
+	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"run-sdlc","message":{"model":"sonnet","stop_reason":"end_turn"}}`
+
+	inside := Staleness{Timeout: time.Hour, Now: callInstant.Add(30 * time.Minute)}
+	buffered, err := Read(strings.NewReader(input), resolver, names, inside)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(buffered.Records) != 0 {
+		t.Fatalf("Read() records = %+v, want none while the session may still be running", buffered.Records)
+	}
+	// Reported through the session grain rather than through Pending, which counts
+	// tool calls: a deferred candidate is unresolved source state a cursor floor must
+	// see (ADR-0023 §5), and it is not a call.
+	if buffered.OpenSessions != 1 || buffered.Pending != 0 || buffered.Interrupted != 0 {
+		t.Errorf("Read() = %+v, want the session open and no call buffered", buffered)
+	}
+
+	closed, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(closed.Records) != 1 {
+		t.Fatalf("Read() records = %+v, want exactly one once the session closed", closed.Records)
+	}
+	event := closed.Records[0]
+	// No outcome: an end_turn entry carries none, and unknown is never success
+	// (ADR-0005).
+	if event.Kind != record.KindSkill || event.Name != "run-sdlc" || event.Outcome != nil {
+		t.Errorf("record = %+v", event)
+	}
+	if closed.OpenSessions != 0 || closed.AmbiguousSkillRuns != 0 {
+		t.Errorf("Read() = %+v, want the session closed and nothing collapsed", closed)
+	}
+}
+
+// One skill run is one invocation, even though Claude Code's storage describes it
+// twice: the Skill tool_use/tool_result pair, and the attributed end_turn entry the
+// run's own turn leaves behind. The pair wins — it is the only one of the two bounded
+// by a start and an end, and the only one carrying an outcome (T111's precedent,
+// ADR-0023 §3).
+func TestReadCountsOneSkillRunAsOneInvocation(t *testing.T) {
+	input := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-1","name":"Skill","input":{"skill":"pr-review"}}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
+		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+	}, "\n")
+
+	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 1 {
+		t.Fatalf("Read() records = %+v, want exactly one for one skill run", result.Records)
+	}
+	event := result.Records[0]
+	if event.Kind != record.KindSkill || event.Name != "pr-review" || event.Outcome == nil || *event.Outcome != record.OutcomeOK {
+		t.Fatalf("surviving record = %+v, want the paired call carrying an outcome", event)
+	}
+	// A dropped candidate is not ambiguity: the pair produced the one true record and
+	// nothing about that run is uncertain.
+	if result.AmbiguousSkillRuns != 0 {
+		t.Errorf("AmbiguousSkillRuns = %d, want 0 — the run is covered, not uncertain", result.AmbiguousSkillRuns)
+	}
+
+	// Through the real aggregation layer rather than by inspection: the double count
+	// this fixes was visible only after metrics keyed the two records into separate
+	// accumulators.
+	summary := metrics.Aggregate(result.Records)
+	if len(summary.Primitives) != 1 {
+		t.Fatalf("Aggregate() primitives = %+v, want exactly one", summary.Primitives)
+	}
+	if got := summary.Primitives[0]; got.Invocations != 1 || got.Kind != record.KindSkill {
+		t.Errorf("usage = %+v, want 1 invocation of a skill", got)
+	}
+}
+
+// The collapse is per (session, skill), not per skill: two sessions that each ran the
+// same slash-command skill are two invocations, and one buffer keyed by name alone
+// would report one.
+func TestReadCollapsesASkillCandidatePerSessionNotPerTranscript(t *testing.T) {
+	input := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
+		`{"uuid":"entry-2","sessionId":"session-2","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
+	}, "\n")
+
+	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 2 {
+		t.Fatalf("Read() records = %+v, want one per session", result.Records)
+	}
+	first, second := result.Records[0], result.Records[1]
+	for _, event := range result.Records {
+		if event.Kind != record.KindSkill || event.Name != "pr-review" {
+			t.Errorf("record = %+v, want the same skill in both sessions", event)
+		}
+	}
+	if first.EventID == second.EventID {
+		t.Errorf("both sessions derived the same event id %q", first.EventID)
+	}
+	if result.AmbiguousSkillRuns != 0 {
+		t.Errorf("AmbiguousSkillRuns = %d, want 0 — different sessions are not one collapsed run", result.AmbiguousSkillRuns)
 	}
 }
 
@@ -249,19 +366,24 @@ func TestReadDoesNotCollideAToolCallWithATerminalRun(t *testing.T) {
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
 	if len(result.Records) != 2 {
 		t.Fatalf("Read() records = %+v, want a terminal run and a tool call", result.Records)
 	}
-	run, call := result.Records[0], result.Records[1]
-	if run.Kind != record.KindSkill || run.Outcome != nil {
-		t.Errorf("first record is not the terminal skill run: %+v", run)
-	}
+	// The paired tool call is appended during the scan and the Shape-A fallback only
+	// after the session is judged closed, so the call comes first (ADR-0023 §3). The
+	// entry carries attributionSkill "pr-review" and a Bash tool_use with no Skill
+	// tool_use anywhere, so it is genuinely a run with no tool trace and the fallback
+	// is correct here.
+	call, run := result.Records[0], result.Records[1]
 	if call.Kind != record.KindBuiltinTool {
-		t.Errorf("second record is not the tool call: %+v", call)
+		t.Errorf("first record is not the tool call: %+v", call)
+	}
+	if run.Kind != record.KindSkill || run.Outcome != nil {
+		t.Errorf("second record is not the terminal skill run: %+v", run)
 	}
 	if run.EventID == call.EventID {
 		t.Errorf("a tool call and a terminal run of the same entry share id %q", run.EventID)
@@ -947,12 +1069,18 @@ func TestReadDropsAttributedRunWithPathShapedAttribution(t *testing.T) {
 	for _, field := range []string{"attributionSkill", "attributionAgent"} {
 		for _, value := range hostileValues {
 			input := fmt.Sprintf(`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z",%q:%s,"message":{"model":"sonnet","stop_reason":"end_turn"}}`, field, quoted(t, value))
-			result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+			// Read under closedSession, the staleness value that does emit a Shape-A
+			// fallback: under the zero Staleness this assertion would pass vacuously,
+			// because nothing is emitted for any reason at all.
+			result, err := Read(strings.NewReader(input), resolver, names, closedSession)
 			if err != nil {
 				t.Fatalf("Read() error = %v", err)
 			}
-			if len(result.Records) != 0 {
-				t.Errorf("Read(%s=%q) records = %+v", field, value, result.Records)
+			// Nothing emitted and nothing collapsed: a name that fails the grammar
+			// produces no candidate at all, so there is no ambiguity to report either
+			// (fail closed, ADR-0007).
+			if len(result.Records) != 0 || result.AmbiguousSkillRuns != 0 {
+				t.Errorf("Read(%s=%q) = %+v", field, value, result)
 			}
 		}
 	}
