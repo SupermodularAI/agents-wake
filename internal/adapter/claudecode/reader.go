@@ -29,18 +29,23 @@ const maxLineBytes = 1024 * 1024
 // Result contains safe derived records plus collection health counters.
 type Result struct {
 	Records []record.Record
-	// Malformed counts source lines this read could not use: a line that does not
-	// parse, one whose entry id or timestamp is outside the domain, and one too long
-	// to deliver. It is doctor's drift signal, and it also gates the staleness rule —
-	// a positive value means this read was blind somewhere, so it may not conclude a
-	// session went silent (see Read).
+	// Malformed counts source lines this read had no transcript entry for: a line
+	// that does not parse, one whose entry id or timestamp is outside the domain, and
+	// one too long to deliver. It is doctor's drift signal.
+	//
+	// It is deliberately not the gate on the staleness rule. It is a broad counter —
+	// a real transcript's routine per-session bookkeeping lines (ai-title,
+	// last-prompt, queue-operation, which carry no uuid) are counted here on every
+	// machine — and a rule gated on it would never run outside a hand-written
+	// fixture. The gate is the narrower "could not be ruled out as a terminator"
+	// signal computed inside Read.
 	Malformed int
 	// Pending counts calls still unterminated when the scan finished that the
 	// staleness rule did not resolve — because their session is still inside the
-	// window, or because Malformed is positive and this read could not apply the rule
-	// at all. It is a number that is not final yet rather than collection that was
-	// lost (ADR-0015), which is why doctor renders it as its own line and not as
-	// "collects nothing".
+	// window, or because this read hit a line it could not rule out as their
+	// terminator and so could not apply the rule at all. It is a number that is not
+	// final yet rather than collection that was lost (ADR-0015), which is why doctor
+	// renders it as its own line and not as "collects nothing".
 	Pending int
 	// Interrupted counts calls this scan resolved by the staleness rule: their
 	// session went quiet past the threshold, so they were emitted as terminal records
@@ -48,8 +53,8 @@ type Result struct {
 	// in Records and are also counted by Parsed upstream.
 	Interrupted int
 	// OpenSessions counts the sessions this transcript's entries belong to that have
-	// not closed under the staleness rule. When Malformed is positive no session is
-	// reported closed, for the same reason no call is resolved.
+	// not closed under the staleness rule. When this read hit a line it could not rule
+	// out no session is reported closed, for the same reason no call is resolved.
 	OpenSessions int
 	// CursorFloor is the byte offset of the earliest line belonging to any session
 	// still open. A future incremental cursor (T020, T102) must not advance past it
@@ -107,14 +112,31 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 	// callResult), so buffering one before the call's repository consent is known
 	// retains nothing.
 	earlyResults := map[string]callResult{}
+	// unreadable counts the lines this read could not use *and could not rule out* as
+	// the terminator of a buffered call, which is the only blindness that bears on the
+	// staleness rule. Three shapes qualify: a line that does not parse at all, a line
+	// too long to be delivered, and a line that parses but whose entry identity is
+	// unusable while it still carries a tool_result block.
+	//
+	// It is narrower than Malformed on purpose. A line that parses is inspectable: if
+	// it holds no tool_result it cannot have terminated anything, so nothing about any
+	// call's fate is hidden by it. That distinction is what keeps a real transcript's
+	// routine bookkeeping lines out of the gate.
+	unreadable := 0
 	skipped, err := jsonl.Lines(reader, maxLineBytes, func(offset int64, line []byte) {
 		var entry transcriptEntry
 		if unmarshalErr := json.Unmarshal(line, &entry); unmarshalErr != nil {
 			result.Malformed++
+			unreadable++
 			return
 		}
 		if !entry.valid() {
 			result.Malformed++
+			// The entry could not be attributed, so a result it carries could not terminate
+			// the call it names — and the reader can see whether it carries one.
+			if entry.carriesToolResult() {
+				unreadable++
+			}
 			return
 		}
 		// Every valid entry is activity, whether or not it carries a tool call: the last
@@ -175,14 +197,16 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 	}
 	// A line too long to deliver is unusable in the same way a line that does not
 	// parse is: counted as malformed so doctor can report blindness, and nothing is
-	// synthesised from it — no call is opened, so no result can terminate one.
+	// synthesised from it — no call is opened, so no result can terminate one. It was
+	// never delivered, so its contents could not be ruled out either.
 	result.Malformed += skipped
-	// A read that was blind on any line may not judge a session silent. The line it
-	// could not use may be the tool_result that terminated a buffered call, and it was
-	// not observed as activity either — so last activity is known-understated, not
-	// merely old. Concluding "interrupted" from that would infer a terminal outcome
-	// from blindness, which plan §3.3 forbids, and would write a permanent failure for
-	// a call that succeeded: ADR-0015 rejects upsert and ADR-0004 deduplicates, so no
+	unreadable += skipped
+	// A read that could not rule out one of its lines may not judge a session silent.
+	// That line may be the tool_result that terminated a buffered call, and it was not
+	// observed as activity either — so last activity is known-understated, not merely
+	// old. Concluding "interrupted" from that would infer a terminal outcome from
+	// blindness, which plan §3.3 forbids, and would write a permanent failure for a
+	// call that succeeded: ADR-0015 rejects upsert and ADR-0004 deduplicates, so no
 	// later scan can take it back. ADR-0015 scopes interrupted to a session that
 	// actually died; this reader cannot tell that apart from one line it cannot read.
 	//
@@ -191,8 +215,16 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 	// session, so there is no session to exempt. The cost is a call that stays Pending
 	// and a cursor floor that does not move — a slower scan, never wrong data, which is
 	// the direction Staleness's zero value already takes.
+	//
+	// The gate is unreadable and not Malformed. Every real transcript carries lines
+	// Malformed counts that hide nothing — per-session bookkeeping (ai-title,
+	// last-prompt, queue-operation) has no uuid, so valid() rejects it — and gating on
+	// that count switched ADR-0015's rule off on every machine while every test fixture
+	// stayed green. Keeping this read's own two questions apart ("did I have an entry
+	// for that line" and "could that line have terminated a call") is what makes the
+	// rule run in production and stop only for blindness that could actually mislead it.
 	judged := stale
-	if result.Malformed > 0 {
+	if unreadable > 0 {
 		judged = Staleness{}
 	}
 	interrupted := resolveStaleCalls(pending, sessions, judged)
@@ -336,6 +368,21 @@ func (entry transcriptEntry) valid() bool {
 	}
 	_, err := record.BoundedToken(entry.UUID)
 	return err == nil
+}
+
+// carriesToolResult reports whether this entry holds a tool_result block, which is
+// the only thing that can terminate a buffered call. Read asks it about an entry
+// valid rejected: such an entry cannot be attributed, so a result it carries is a
+// call whose fate this read could not see, and the staleness rule must not run.
+//
+// A line the reader decoded and found no tool_result in is the opposite case — it is
+// unusable and harmless, and must not stop the rule. That is most of what valid
+// rejects on a real transcript: bookkeeping lines carrying a title, a queued
+// operation or the last prompt's leaf, none of them a transcript entry at all.
+func (entry transcriptEntry) carriesToolResult() bool {
+	return slices.ContainsFunc(entry.Message.Content, func(block contentBlock) bool {
+		return block.Type == "tool_result"
+	})
 }
 
 // callSeparator delimits the two halves of a tool call's source identity. It is a
