@@ -288,6 +288,13 @@ type transcriptEntry struct {
 	AttributionAgent     string    `json:"attributionAgent"`
 	AttributionSkill     string    `json:"attributionSkill"`
 	ToolDenialKind       string    `json:"toolDenialKind"`
+	// IsSidechain marks a subagent's own turn. It is read for exactly one purpose:
+	// excluding such a turn from ever being considered a skill invocation (ADR-0023
+	// §1). It is never a discriminator between "already covered by a Skill tool_use"
+	// and "no tool_use exists" — ADR-0023's Context measured both of those at 100%
+	// false, twice, so it cannot do that job. It adds no record.Record field and
+	// persists nothing: reading a flag is not retaining it (ADR-0007).
+	IsSidechain bool `json:"isSidechain"`
 	// ToolUseResult stays raw because real Claude Code writes whatever shape the
 	// tool returned: an object for a structured result, a bare string for Bash, an
 	// array of content blocks for Task. A typed field type-errors the whole line —
@@ -511,6 +518,12 @@ func (entry transcriptEntry) call(block contentBlock, resolve Resolver, names re
 // Claude Code puts that identity on every entry of the turn it belongs to, and the
 // final end_turn entry is the safe completion boundary.
 //
+// A sidechain entry is excluded outright. A subagent's own turn inherits the
+// parent's attributionSkill, so it meets this condition without being a skill
+// invocation at all — the commonest attributed shape on a real machine (ADR-0023 §1
+// and its Context). Nothing about such a turn is uncertain, so it is dropped on
+// sight rather than deferred.
+//
 // It deliberately derives nothing from attributionAgent, which Claude Code stamps
 // on a subagent's entries the same way. A subagent is entered through the Task
 // tool, so the parent's tool_use/tool_result pair already describes that same run —
@@ -525,7 +538,7 @@ func (entry transcriptEntry) call(block contentBlock, resolve Resolver, names re
 // the Task call as the subagent primitive's source; attributionAgent's own role is
 // via_agent attribution on the calls a subagent makes (see call).
 func (entry transcriptEntry) attributedRun(resolve Resolver, names record.Namer) (record.Record, bool) {
-	if entry.Message.StopReason != "end_turn" || entry.AttributionSkill == "" {
+	if entry.Message.StopReason != "end_turn" || entry.AttributionSkill == "" || entry.IsSidechain {
 		return record.Record{}, false
 	}
 
