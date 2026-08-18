@@ -3,8 +3,9 @@
 //
 // It answers three questions and nothing else:
 //
-//   - where things live — ResolvePaths, the XDG layout and the one override, and
-//     ClaudeCodeDir for the harness's own directory;
+//   - where things live — ResolvePaths, the XDG layout and the one override wake
+//     has, and ClaudeCodeDir for the harness's own directory and the one variable
+//     the harness relocates it with;
 //   - what the settings are — the key registry, with Load, Get and Set over
 //     config.toml;
 //   - which repository an observed working directory belongs to — OpenRepos and

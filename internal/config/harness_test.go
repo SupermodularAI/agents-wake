@@ -20,6 +20,7 @@ func TestClaudeCodeDirIsTheHomeRelativeHarnessDirectory(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv(EnvDataDir, "")
+	t.Setenv(EnvClaudeConfigDir, "")
 
 	dir, err := ClaudeCodeDir()
 	if err != nil {
@@ -39,6 +40,7 @@ func TestWakeDirDoesNotMoveTheHarnessDirectory(t *testing.T) {
 	elsewhere := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv(EnvDataDir, elsewhere)
+	t.Setenv(EnvClaudeConfigDir, "")
 
 	dir, err := ClaudeCodeDir()
 	if err != nil {
@@ -52,16 +54,107 @@ func TestWakeDirDoesNotMoveTheHarnessDirectory(t *testing.T) {
 	}
 }
 
-// Relocating the harness's directory is out of scope and would need a decision of
-// its own (ADR-0014), so the absence of every candidate variable is asserted
-// rather than assumed. Mirrors TestNoSecondEnvOverrideIsHonoured.
-func TestNoEnvOverrideRelocatesTheHarnessDirectory(t *testing.T) {
+// The relocation mechanism Claude Code itself has, honoured (T118 § Scope). A
+// resolver that ignored it would point every command at a directory the harness
+// never writes, and each one would then report collecting *zero* rather than
+// collecting nothing — the drift this ticket exists to prevent.
+func TestClaudeConfigDirRelocatesTheHarnessDirectory(t *testing.T) {
+	home := t.TempDir()
+	relocated := filepath.Join(t.TempDir(), "claude-config")
+	t.Setenv("HOME", home)
+	t.Setenv(EnvDataDir, "")
+	t.Setenv(EnvClaudeConfigDir, relocated)
+
+	dir, err := ClaudeCodeDir()
+	if err != nil {
+		t.Fatalf("ClaudeCodeDir() error = %v", err)
+	}
+	if dir != relocated {
+		t.Errorf("ClaudeCodeDir() = %q, want %q — %s is the harness's own mechanism", dir, relocated, EnvClaudeConfigDir)
+	}
+	if strings.HasPrefix(dir, home) {
+		t.Errorf("ClaudeCodeDir() = %q stayed under HOME; the relocated directory replaces the home-relative one, it is not joined under it", dir)
+	}
+}
+
+// A trailing separator or a stray newline is the same directory, because
+// `export CLAUDE_CONFIG_DIR=$(cat somefile)` is how one arrives.
+func TestClaudeConfigDirIsCleanedAndTrimmed(t *testing.T) {
+	home := t.TempDir()
+	relocated := filepath.Join(t.TempDir(), "claude-config")
+	t.Setenv("HOME", home)
+	t.Setenv(EnvClaudeConfigDir, "  "+relocated+string(filepath.Separator)+"\n")
+
+	dir, err := ClaudeCodeDir()
+	if err != nil {
+		t.Fatalf("ClaudeCodeDir() error = %v", err)
+	}
+	if dir != relocated {
+		t.Errorf("ClaudeCodeDir() = %q, want %q", dir, relocated)
+	}
+}
+
+// Set to nothing means unset, which is what Claude Code's own `||` fallback does
+// with the empty string, and what ResolvePaths does with WAKE_DIR.
+func TestBlankClaudeConfigDirIsTheSameAsUnset(t *testing.T) {
+	for _, value := range []string{"", "   ", "\n"} {
+		t.Run(strconv.Quote(value), func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv(EnvClaudeConfigDir, value)
+
+			dir, err := ClaudeCodeDir()
+			if err != nil {
+				t.Fatalf("ClaudeCodeDir() error = %v", err)
+			}
+			if want := filepath.Join(home, ".claude"); dir != want {
+				t.Errorf("ClaudeCodeDir() = %q, want %q", dir, want)
+			}
+		})
+	}
+}
+
+// A relative value is refused rather than resolved. Claude Code resolves it
+// against whatever working directory its own process had; wake's differs — and the
+// detached hook scan's is arbitrary (ADR-0016) — so resolving it here would read,
+// and on `init` write, a directory that depends on where the binary was invoked
+// from. The message names the variable and never its value, because the value is a
+// path (plan §4.2).
+func TestRelativeClaudeConfigDirIsRefusedWithoutNamingItsValue(t *testing.T) {
+	relative := filepath.Join("relative", "claude-config")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(EnvClaudeConfigDir, relative)
+
+	dir, err := ClaudeCodeDir()
+	if !errors.Is(err, ErrClaudeConfigDirNotAbsolute) {
+		t.Fatalf("ClaudeCodeDir() = (%q, %v), want ErrClaudeConfigDirNotAbsolute", dir, err)
+	}
+	if dir != "" {
+		t.Errorf("ClaudeCodeDir() = %q alongside its error, want the empty string", dir)
+	}
+	message := err.Error()
+	if !strings.Contains(message, EnvClaudeConfigDir) {
+		t.Errorf("error = %q, want it to name the variable so the user can fix it", message)
+	}
+	for _, forbidden := range []string{relative, ".claude", string(filepath.Separator)} {
+		if strings.Contains(message, forbidden) {
+			t.Errorf("error = %q carries %q; it names the variable, never a path", message, forbidden)
+		}
+	}
+}
+
+// Only the mechanism the harness actually has. Every other candidate is a variable
+// wake would be inventing, and inventing one is a decision of its own (ADR-0014's
+// "deliberately small" surface): each one added is another way for six commands to
+// disagree about one directory.
+func TestNoInventedEnvOverrideRelocatesTheHarnessDirectory(t *testing.T) {
 	home := t.TempDir()
 	decoy := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv(EnvDataDir, "")
-	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(decoy, "config"))
+	t.Setenv(EnvClaudeConfigDir, "")
 	t.Setenv("CLAUDE_HOME", filepath.Join(decoy, "home"))
+	t.Setenv("CLAUDE_DIR", filepath.Join(decoy, "claude"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(decoy, "xdg"))
 
 	dir, err := ClaudeCodeDir()
@@ -69,7 +162,7 @@ func TestNoEnvOverrideRelocatesTheHarnessDirectory(t *testing.T) {
 		t.Fatalf("ClaudeCodeDir() error = %v", err)
 	}
 	if want := filepath.Join(home, ".claude"); dir != want {
-		t.Errorf("ClaudeCodeDir() = %q, want %q — an environment override was honoured", dir, want)
+		t.Errorf("ClaudeCodeDir() = %q, want %q — an invented environment override was honoured", dir, want)
 	}
 }
 
@@ -78,22 +171,35 @@ func TestNoEnvOverrideRelocatesTheHarnessDirectory(t *testing.T) {
 // Claude Code install must leave that home exactly as it found it.
 func TestClaudeCodeDirCreatesNothing(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	relocation := t.TempDir()
+	for name, override := range map[string]string{
+		"home-relative": "",
+		"relocated":     filepath.Join(relocation, "claude-config"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			parent := home
+			if override != "" {
+				parent = relocation
+			}
+			t.Setenv("HOME", home)
+			t.Setenv(EnvClaudeConfigDir, override)
 
-	dir, err := ClaudeCodeDir()
-	if err != nil {
-		t.Fatalf("ClaudeCodeDir() error = %v", err)
-	}
+			dir, err := ClaudeCodeDir()
+			if err != nil {
+				t.Fatalf("ClaudeCodeDir() error = %v", err)
+			}
 
-	entries, err := os.ReadDir(home)
-	if err != nil {
-		t.Fatalf("reading HOME: %v", err)
-	}
-	if len(entries) != 0 {
-		t.Errorf("ClaudeCodeDir() created %d entries under HOME, want none", len(entries))
-	}
-	if _, err := os.Lstat(dir); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("os.Lstat(%q) = %v, want ErrNotExist — ClaudeCodeDir must create nothing", dir, err)
+			entries, err := os.ReadDir(parent)
+			if err != nil {
+				t.Fatalf("reading %s: %v", name, err)
+			}
+			if len(entries) != 0 {
+				t.Errorf("ClaudeCodeDir() created %d entries under the %s parent, want none", len(entries), name)
+			}
+			if _, err := os.Lstat(dir); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("os.Lstat(%q) = %v, want ErrNotExist — ClaudeCodeDir must create nothing", dir, err)
+			}
+		})
 	}
 }
 
@@ -103,6 +209,7 @@ func TestClaudeCodeDirCreatesNothing(t *testing.T) {
 // under it this function would have returned.
 func TestClaudeCodeDirErrorNamesNoPath(t *testing.T) {
 	t.Setenv("HOME", "")
+	t.Setenv(EnvClaudeConfigDir, "")
 
 	dir, err := ClaudeCodeDir()
 	if err == nil {
@@ -120,11 +227,14 @@ func TestClaudeCodeDirErrorNamesNoPath(t *testing.T) {
 }
 
 // harnessDirUse is what one Go source file does about the harness's directory:
-// whether it spells the directory's name in a string, and whether it resolves the
-// home directory. A file doing both is constructing ~/.claude for itself.
+// whether it spells the directory's name in a string, whether it resolves the home
+// directory, and whether it spells the harness's relocation variable. A file doing
+// the first two is constructing ~/.claude for itself; a file doing the third is
+// resolving the harness's directory whatever it joins afterwards.
 type harnessDirUse struct {
 	namesDir     bool
 	resolvesHome bool
+	namesEnv     bool
 }
 
 // scanHarnessDirUse reads one file's *parsed* source rather than its bytes.
@@ -158,6 +268,9 @@ func scanHarnessDirUse(t *testing.T, path string) harnessDirUse {
 			}
 			if strings.Contains(value, claudeCodeDirName) {
 				use.namesDir = true
+			}
+			if strings.Contains(value, EnvClaudeConfigDir) {
+				use.namesEnv = true
 			}
 		case *ast.Ident:
 			if n.Name == "UserHomeDir" {
@@ -230,8 +343,17 @@ func TestOnlyOneFunctionResolvesTheClaudeCodeDirectory(t *testing.T) {
 		if allowed[relative] {
 			return
 		}
-		if use := scanHarnessDirUse(t, path); use.namesDir && use.resolvesHome {
+		use := scanHarnessDirUse(t, path)
+		if use.namesDir && use.resolvesHome {
 			t.Errorf("%s resolves the home directory and names the harness's directory itself; call config.ClaudeCodeDir instead", relative)
+		}
+		// The relocation variable is half of the resolution, and the half that is
+		// easiest to add a second reader of: someone honouring it next to a hand-joined
+		// default has written a second resolver that agrees with this one only until one
+		// of them changes. Spelled as a string exactly once; every other file that needs
+		// it reads config.EnvClaudeConfigDir, which is an identifier and not a literal.
+		if use.namesEnv {
+			t.Errorf("%s spells %s itself; the harness's relocation variable is read in config.ClaudeCodeDir and named by config.EnvClaudeConfigDir", relative, EnvClaudeConfigDir)
 		}
 	})
 }

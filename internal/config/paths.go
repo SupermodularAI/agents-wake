@@ -19,9 +19,11 @@ const AppName = "wake"
 // a repo id one-way, so a variable that moved it would silently re-identify
 // every repo on the next run.
 //
-// This is the whole override surface. XDG_CONFIG_HOME, XDG_STATE_HOME and
-// XDG_DATA_HOME are deliberately not read: no decision grants a second variable,
-// and each one added is another way for the salt to move.
+// This is the whole override surface over wake's own paths. XDG_CONFIG_HOME,
+// XDG_STATE_HOME and XDG_DATA_HOME are deliberately not read: no decision grants a
+// second variable, and each one added is another way for the salt to move. The one
+// other variable this package reads is EnvClaudeConfigDir, which is the harness's
+// own and moves nothing of wake's.
 const EnvDataDir = "WAKE_DIR"
 
 // ErrDataDirNotAbsolute is returned when EnvDataDir is set to a relative path.
