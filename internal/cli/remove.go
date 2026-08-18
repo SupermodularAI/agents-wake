@@ -2,8 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -20,11 +18,11 @@ func newRemoveCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		home, err := os.UserHomeDir()
+		claudeDir, err := config.ClaudeCodeDir()
 		if err != nil {
 			return err
 		}
-		removed, err := activation.Uninstall(paths, filepath.Join(home, ".claude"), purge)
+		removed, err := activation.Uninstall(paths, claudeDir, purge)
 		if err != nil {
 			return err
 		}
