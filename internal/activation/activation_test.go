@@ -4,11 +4,14 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/SupermodularAI/agents-wake/internal/config"
 	"github.com/SupermodularAI/agents-wake/internal/health"
 	"github.com/SupermodularAI/agents-wake/internal/inventory"
+	"github.com/SupermodularAI/agents-wake/internal/record"
 	"github.com/SupermodularAI/agents-wake/internal/store"
 )
 
@@ -415,6 +418,230 @@ func writeFixture(t *testing.T, path, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
+	}
+}
+
+// TestIngestSurfacesPendingAndInterruptedCalls is the ticket's end-to-end
+// criterion: a call left unterminated by a dead session eventually reaches the
+// store as outcome interrupted, and a call whose session may still be running stays
+// buffered and is reported as pending instead of vanishing.
+//
+// The two transcripts pick their timestamps rather than fixing them. The stale one
+// is deliberately historical, so the provisional 24h default resolves it on any sane
+// clock; the live one is generated from time.Now, so it is inside the window by
+// construction. A fixed near-today date would make this test's meaning depend on
+// when it runs, and the threshold itself must never be shortened to make the
+// feature easier to demonstrate — an interrupted record cannot be taken back.
+func TestIngestSurfacesPendingAndInterruptedCalls(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("MkdirAll() root error = %v", err)
+	}
+	claudeDir := filepath.Join(t.TempDir(), "claude")
+	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll() Claude dir error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("WriteFile() settings error = %v", err)
+	}
+	transcriptDir := filepath.Join(claudeDir, "projects", "project")
+	if err := os.MkdirAll(transcriptDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll() transcript error = %v", err)
+	}
+	// The stale transcript carries the per-session bookkeeping lines a real Claude Code
+	// transcript is full of — ai-title, last-prompt, queue-operation, none of them a
+	// transcript entry and none carrying a uuid. They are here because the reader
+	// counts them as lines it had no entry for, and a staleness rule gated on that
+	// count would resolve nothing on any real machine while a fixture of clean entries
+	// stayed green. This test is the end-to-end criterion, so it reads like real input.
+	stale := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-stale","cwd":"` + root + `","timestamp":"2020-01-01T00:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
+		`{"type":"ai-title","aiTitle":"an old session","sessionId":"session-stale"}`,
+		`{"type":"last-prompt","lastPrompt":"run it","leafUuid":"entry-1","sessionId":"session-stale"}`,
+		`{"type":"queue-operation","operation":"enqueue","sessionId":"session-stale","timestamp":"2020-01-01T00:00:00Z"}`,
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(transcriptDir, "stale.jsonl"), []byte(stale), 0o600); err != nil {
+		t.Fatalf("WriteFile() stale transcript error = %v", err)
+	}
+	live := `{"uuid":"entry-2","sessionId":"session-live","cwd":"` + root + `","timestamp":"` + time.Now().UTC().Format(time.RFC3339) + `","message":{"content":[{"type":"tool_use","id":"call-2","name":"Read"}]}}`
+	if err := os.WriteFile(filepath.Join(transcriptDir, "live.jsonl"), []byte(live), 0o600); err != nil {
+		t.Fatalf("WriteFile() live transcript error = %v", err)
+	}
+	paths := testPaths(t)
+
+	written, err := Init(paths, root, claudeDir, testExecutable(t))
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	if written != 1 {
+		t.Fatalf("Init() wrote %d events, want 1 — the stale call resolved and the live one did not", written)
+	}
+
+	report, err := health.New(paths.HealthFile).Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if report.Scan.InterruptedCalls != 1 {
+		t.Errorf("Scan.InterruptedCalls = %d, want 1", report.Scan.InterruptedCalls)
+	}
+	if report.Scan.PendingCalls != 1 {
+		t.Errorf("Scan.PendingCalls = %d, want 1 — a call whose session may still be running is not lost", report.Scan.PendingCalls)
+	}
+
+	entries, err := store.New(filepath.Join(paths.DataDir, eventsFile)).Entries(0)
+	if err != nil {
+		t.Fatalf("Entries() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("Entries() = %+v, want exactly one record", entries)
+	}
+	if outcome := entries[0].Record.Outcome; outcome == nil || *outcome != record.OutcomeInterrupted {
+		t.Fatalf("Outcome = %v, want interrupted", outcome)
+	}
+}
+
+// stalenessFixture activates paths on root and leaves one unterminated call, aged
+// `age` before now, as the only thing in Claude Code's history. Every test below turns
+// on whether that one call resolves.
+func stalenessFixture(t *testing.T, age time.Duration) (config.Paths, string) {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("MkdirAll() root error = %v", err)
+	}
+	claudeDir := filepath.Join(t.TempDir(), "claude")
+	transcriptDir := filepath.Join(claudeDir, "projects", "project")
+	if err := os.MkdirAll(transcriptDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll() transcript error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("WriteFile() settings error = %v", err)
+	}
+	line := `{"uuid":"entry-1","sessionId":"session-1","cwd":"` + root + `","timestamp":"` +
+		time.Now().UTC().Add(-age).Format(time.RFC3339) +
+		`","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`
+	if err := os.WriteFile(filepath.Join(transcriptDir, "session-1.jsonl"), []byte(line), 0o600); err != nil {
+		t.Fatalf("WriteFile() transcript error = %v", err)
+	}
+
+	paths := testPaths(t)
+	if _, err := Init(paths, root, claudeDir, testExecutable(t)); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	return paths, claudeDir
+}
+
+// scanOf reads back what the last scan recorded, which is where doctor reads it from.
+func scanOf(t *testing.T, paths config.Paths) health.Scan {
+	t.Helper()
+	report, err := health.New(paths.HealthFile).Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	return report.Scan
+}
+
+func TestIngestResolvesAStaleCallUnderTheConfiguredThreshold(t *testing.T) {
+	// The threshold is the config value, not a constant in the reader (ADR-0015: it
+	// "belongs in config, not in constants"). A call one minute old is well inside the
+	// 24h default and stays buffered; the same call resolves once the user shortens the
+	// key. If the reader ever hard-coded a threshold, one of these two halves would fail.
+	paths, claudeDir := stalenessFixture(t, time.Minute)
+
+	if scan := scanOf(t, paths); scan.PendingCalls != 1 || scan.InterruptedCalls != 0 {
+		t.Fatalf("under the default threshold: Scan = %+v, want the call pending", scan)
+	}
+
+	if _, err := config.Set(paths, "scan.stale_call_timeout", "1s"); err != nil {
+		t.Fatalf("Set() error = %v", err)
+	}
+	if _, err := Ingest(paths, claudeDir); err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+
+	scan := scanOf(t, paths)
+	if scan.InterruptedCalls != 1 || scan.PendingCalls != 0 {
+		t.Fatalf("under a 1s threshold: Scan = %+v, want the call resolved", scan)
+	}
+	entries, err := store.New(filepath.Join(paths.DataDir, eventsFile)).Entries(0)
+	if err != nil {
+		t.Fatalf("Entries() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("Entries() = %+v, want exactly one record", entries)
+	}
+	if outcome := entries[0].Record.Outcome; outcome == nil || *outcome != record.OutcomeInterrupted {
+		t.Fatalf("Outcome = %v, want interrupted", outcome)
+	}
+}
+
+func TestIngestResolvesAStaleCallOnlyOnce(t *testing.T) {
+	// Re-scanning re-derives the same event id from the same source event, so the store
+	// deduplicates the second copy (ADR-0004). That is what makes the rule safe to be
+	// final: it cannot accumulate a record per scan.
+	paths, claudeDir := stalenessFixture(t, 72*time.Hour)
+
+	for scanNumber := range 3 {
+		if _, err := Ingest(paths, claudeDir); err != nil {
+			t.Fatalf("Ingest() %d error = %v", scanNumber, err)
+		}
+		entries, err := store.New(filepath.Join(paths.DataDir, eventsFile)).Entries(0)
+		if err != nil {
+			t.Fatalf("Entries() error = %v", err)
+		}
+		if len(entries) != 1 {
+			t.Fatalf("after scan %d: Entries() = %+v, want exactly one record", scanNumber, entries)
+		}
+	}
+}
+
+func TestIngestKeepsCollectingWhenTheConfigFileCannotBeRead(t *testing.T) {
+	// A scan that cannot read its own threshold buffers rather than guessing one:
+	// "could not read" means "collects nothing", never an error that breaks a command
+	// (plan §4.3), and an interrupted record written under a threshold the user never
+	// chose is permanent while a buffered call is resolved by any later scan.
+	paths, claudeDir := stalenessFixture(t, 72*time.Hour)
+	if err := os.WriteFile(paths.ConfigFile, []byte("{not toml"), 0o600); err != nil {
+		t.Fatalf("WriteFile() config error = %v", err)
+	}
+
+	if _, err := Ingest(paths, claudeDir); err != nil {
+		t.Fatalf("Ingest() error = %v, want the scan to keep collecting", err)
+	}
+
+	scan := scanOf(t, paths)
+	if scan.PendingCalls != 1 || scan.InterruptedCalls != 0 {
+		t.Fatalf("Scan = %+v, want the call left buffered", scan)
+	}
+}
+
+func TestActivationNeverReadsTheSessionIdleTimeout(t *testing.T) {
+	// ADR-0014 scopes session.idle_timeout to session-end inference — the session
+	// grain's ended_at — which is a different question from whether an unresolved call
+	// may be resolved. ADR-0023 §3 allows exactly one threshold for that,
+	// scan.stale_call_timeout, so reading the other one here would be the "second
+	// threshold" it forbids. A grep is the cheapest guard, in the same spirit as
+	// internal/config's walk for its salt name.
+	//
+	// The quoted form is what it looks for, not the bare name: a key can only reach
+	// config as a string literal, so the quotes are the difference between reading the
+	// tunable and documenting that this package does not.
+	const readingTheKey = `"session.idle_timeout"`
+	sources, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("ReadDir() error = %v", err)
+	}
+	for _, entry := range sources {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || entry.Name() == "activation_test.go" {
+			continue
+		}
+		body, err := os.ReadFile(entry.Name())
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", entry.Name(), err)
+		}
+		if strings.Contains(string(body), readingTheKey) {
+			t.Errorf("%s reads %s; the staleness rule reads scan.stale_call_timeout only", entry.Name(), readingTheKey)
+		}
 	}
 }
 

@@ -88,6 +88,55 @@ func TestDoctorReportsRefusedCalls(t *testing.T) {
 	}
 }
 
+func TestDoctorReportsPendingAndInterruptedCallsSeparately(t *testing.T) {
+	// Two lines, not one. "Buffered, may still finish" and "resolved as never
+	// finishing" are different facts, and one number would conflate them — which is
+	// the conflation the ticket exists to prevent.
+	paths := isolate(t)
+	if err := health.New(paths.HealthFile).RecordScan(health.Scan{At: time.Now().UTC(), Transcripts: 1, PendingCalls: 2, InterruptedCalls: 1}); err != nil {
+		t.Fatalf("RecordScan() error = %v", err)
+	}
+
+	out, _, err := runSplit(t, "doctor")
+	if err != nil {
+		t.Fatalf("doctor error = %v", err)
+	}
+	if !strings.Contains(out, "pending calls: 2") {
+		t.Errorf("output is missing the pending-call count:\n%s", out)
+	}
+	if !strings.Contains(out, "interrupted calls: 1") {
+		t.Errorf("output is missing the interrupted-call count:\n%s", out)
+	}
+}
+
+func TestDoctorDoesNotCallPendingCallsLostCollection(t *testing.T) {
+	// A buffered call is a number that is not final yet, and a call that resolved to
+	// interrupted is an invocation the store has. Neither is a source nobody could
+	// read, so neither may move integration state into "collects nothing".
+	paths := isolate(t)
+	if err := health.New(paths.HealthFile).RecordScan(health.Scan{At: time.Now().UTC(), EventsWritten: 1, PendingCalls: 5, InterruptedCalls: 3}); err != nil {
+		t.Fatalf("RecordScan() error = %v", err)
+	}
+
+	out, _, err := runSplit(t, "doctor")
+	if err != nil {
+		t.Fatalf("doctor error = %v", err)
+	}
+	if !strings.Contains(out, "integration: collecting") {
+		t.Errorf("integration state is not collecting:\n%s", out)
+	}
+	if strings.Contains(out, "collects nothing") {
+		t.Errorf("pending or interrupted calls were reported as lost collection:\n%s", out)
+	}
+	// No threshold is printed with them. The value is provisional and uncalibrated
+	// (ADR-0014), and a duration here would read as a calibrated promise.
+	for _, unit := range []string{"24h", "h0m0s", "30m"} {
+		if strings.Contains(out, unit) {
+			t.Errorf("output names a duration %q, which reads as a calibrated threshold:\n%s", unit, out)
+		}
+	}
+}
+
 // doctor output is what people paste into issues. It carries counts and one state
 // word, and never a path, a label or an id.
 func TestDoctorOutputNamesNoPathOrLabel(t *testing.T) {

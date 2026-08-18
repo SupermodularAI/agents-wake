@@ -25,10 +25,16 @@ type Result struct {
 	// health.Scan.RefusedCalls, which doctor renders and which puts integration
 	// state in "collects nothing". A dropped call nobody counts is how format drift
 	// stops collection while doctor still says "collecting" (plan §3.3, §12).
-	Refused   int
-	Written   int
-	Duplicate int
-	Dropped   int
+	Refused int
+	// Interrupted is the reader's count of calls that resolved to outcome interrupted
+	// because their session went quiet past the staleness threshold (ADR-0015). Those
+	// records are terminal and are also counted by Parsed and Written; this counter
+	// exists so doctor can say the transition happened, which is new information
+	// rather than lost collection.
+	Interrupted int
+	Written     int
+	Duplicate   int
+	Dropped     int
 }
 
 // ClaudeCode reads one already-authorized Claude Code transcript and persists
@@ -37,8 +43,11 @@ type Result struct {
 //
 // names is the key a scoped primitive reference is digested under, and travels
 // with the resolver because both come from the same consent boundary (ADR-0020).
-func ClaudeCode(reader io.Reader, resolve claudecode.Resolver, names record.Namer, destination *store.Store) (Result, error) {
-	derived, err := claudecode.Read(reader, resolve, names)
+//
+// stale carries ADR-0015's staleness threshold from the caller that owns config;
+// this package does not read config (plan §6.2).
+func ClaudeCode(reader io.Reader, resolve claudecode.Resolver, names record.Namer, stale claudecode.Staleness, destination *store.Store) (Result, error) {
+	derived, err := claudecode.Read(reader, resolve, names, stale)
 	if err != nil {
 		return Result{}, err
 	}
@@ -47,12 +56,13 @@ func ClaudeCode(reader io.Reader, resolve claudecode.Resolver, names record.Name
 		return Result{}, err
 	}
 	return Result{
-		Parsed:    len(derived.Records),
-		Malformed: derived.Malformed,
-		Pending:   derived.Pending,
-		Refused:   derived.Refused,
-		Written:   written.Written,
-		Duplicate: written.Duplicate,
-		Dropped:   written.Dropped,
+		Parsed:      len(derived.Records),
+		Malformed:   derived.Malformed,
+		Pending:     derived.Pending,
+		Refused:     derived.Refused,
+		Interrupted: derived.Interrupted,
+		Written:     written.Written,
+		Duplicate:   written.Duplicate,
+		Dropped:     written.Dropped,
 	}, nil
 }

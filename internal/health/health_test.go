@@ -32,6 +32,29 @@ func TestRecordScanKeepsTheHookCounters(t *testing.T) {
 	}
 }
 
+func TestScanCarriesThePendingAndInterruptedCounters(t *testing.T) {
+	// Two counters, not one: "buffered, may still finish" and "resolved as never
+	// finishing" are different facts, and a single number would conflate them.
+	store := New(filepath.Join(t.TempDir(), "health.json"))
+	if err := store.RecordScan(Scan{At: time.Now().UTC(), PendingCalls: 3, InterruptedCalls: 2}); err != nil {
+		t.Fatalf("RecordScan() error = %v", err)
+	}
+
+	got, err := store.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if got.Scan.PendingCalls != 3 {
+		t.Errorf("Scan.PendingCalls = %d, want 3", got.Scan.PendingCalls)
+	}
+	if got.Scan.InterruptedCalls != 2 {
+		t.Errorf("Scan.InterruptedCalls = %d, want 2", got.Scan.InterruptedCalls)
+	}
+	if got.Hooks != (Hooks{}) {
+		t.Errorf("Hooks = %+v, want zero — a scan records only its own half", got.Hooks)
+	}
+}
+
 func TestRecordHooksKeepsTheScanCounters(t *testing.T) {
 	store := New(filepath.Join(t.TempDir(), "health.json"))
 	if err := store.RecordScan(Scan{At: time.Now().UTC(), EventsWritten: 5}); err != nil {
@@ -122,6 +145,47 @@ func TestRecordingOverAnUnreadableReportReplacesIt(t *testing.T) {
 				t.Errorf("hooks = %+v, want zero — nothing readable was there to keep", got.Hooks)
 			}
 		})
+	}
+}
+
+// The version-1 file every existing install has is one of those unreadable files,
+// and this pins what that costs: `doctor` reports "never scanned" until the next
+// scan, and that scan starts from a zero Report — so the hook half a version-1 file
+// still held is lost, not carried forward. Deliberate. Refusing an unrecognised
+// version exists because counters from another format mean something else, and
+// keeping half of one anyway would contradict that; the file is derived and
+// non-precious (ADR-0014), and `wake init` or `wake remove` refills the hook half.
+// The test exists so that cost is a decision in the suite rather than a surprise.
+func TestARecordOverAVersion1ReportLosesTheHookCounters(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "health.json")
+	version1 := `{"version":1,"scan":{"at":"2026-08-01T00:00:00Z","transcripts":9},` +
+		`"hooks":{"at":"2026-08-01T00:00:00Z","installed":4,"removed":2,"kept_owned":1}}`
+	if err := os.WriteFile(path, []byte(version1), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	store := New(path)
+
+	if _, err := store.Read(); err == nil {
+		t.Fatal("Read() error = nil, want a refusal for the version-1 format")
+	}
+
+	at := time.Now().UTC().Truncate(time.Second)
+	if err := store.RecordScan(Scan{At: at, Transcripts: 3, PendingCalls: 1}); err != nil {
+		t.Fatalf("RecordScan() error = %v", err)
+	}
+
+	got, err := store.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if got.Version != reportVersion {
+		t.Errorf("Version = %d, want %d", got.Version, reportVersion)
+	}
+	if got.Scan.Transcripts != 3 || got.Scan.PendingCalls != 1 || !got.Scan.At.Equal(at) {
+		t.Errorf("scan = %+v, want the scan just recorded", got.Scan)
+	}
+	if got.Hooks != (Hooks{}) {
+		t.Errorf("hooks = %+v, want zero — a version-1 half is not carried across the bump", got.Hooks)
 	}
 }
 

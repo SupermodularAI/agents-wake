@@ -193,7 +193,7 @@ func scanListings(path, root string, add func(record.Kind, string)) {
 }
 
 func readListings(reader io.Reader, root string, add func(record.Kind, string)) {
-	visit := func(line []byte) {
+	visit := func(_ int64, line []byte) {
 		var entry struct {
 			CWD        string `json:"cwd"`
 			Attachment struct {
@@ -233,6 +233,8 @@ func readListings(reader io.Reader, root string, add func(record.Kind, string)) 
 	// discarded lines is deliberately dropped rather than reported — a per-read
 	// health counter must not enter the snapshot, whose rows are one per change of
 	// state (ADR-0014), and surfacing partial discovery is a later phase's scope.
+	// The line's offset is discarded with it: the discovery snapshot has no cursor to
+	// floor (ADR-0014's rows are one per change of state, not per read).
 	if _, err := jsonl.Lines(reader, maxListingLineBytes, visit); err != nil {
 		return
 	}
