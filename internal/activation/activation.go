@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/adapter/claudecode"
 	"github.com/SupermodularAI/agents-wake/internal/config"
 	"github.com/SupermodularAI/agents-wake/internal/health"
 	"github.com/SupermodularAI/agents-wake/internal/ingest"
@@ -73,7 +74,7 @@ func Init(paths config.Paths, root, claudeDir, executable string) (int, error) {
 	}
 
 	events := store.New(filepath.Join(paths.DataDir, eventsFile))
-	written, scan, err := ingestHistory(repos, claudeDir, events)
+	written, scan, err := ingestHistory(repos, claudeDir, events, staleness(paths))
 	// The counters are recorded whether the scan succeeded or not: a partial
 	// activation — hooks written, history import failed — is reported through
 	// doctor rather than repaired silently, and the counters are the report.
@@ -97,7 +98,7 @@ func Ingest(paths config.Paths, claudeDir string) (int, error) {
 		return 0, fmt.Errorf("resolving current directory: %w", err)
 	}
 	events := store.New(filepath.Join(paths.DataDir, eventsFile))
-	written, scan, err := ingestHistory(repos, claudeDir, events)
+	written, scan, err := ingestHistory(repos, claudeDir, events, staleness(paths))
 	if recordErr := health.New(paths.HealthFile).RecordScan(scan); recordErr != nil && err == nil {
 		err = recordErr
 	}
@@ -176,6 +177,32 @@ func Uninstall(paths config.Paths, claudeDir string, purge bool) (bool, error) {
 	return removed > 0, nil
 }
 
+// staleness resolves ADR-0015's staleness rule for one scan: the configured
+// threshold, and the instant to compare last activity against.
+//
+// scan.stale_call_timeout is the only threshold read, and it governs both the
+// interrupted emission and the session-close determination the reader shares with
+// its other caller — ADR-0023 §3: "no second threshold is introduced".
+// session.idle_timeout is a different tunable (ADR-0014's session-end inference,
+// for the session grain's ended_at) and is deliberately not read here.
+//
+// A config file this build cannot read, or a value it cannot use, leaves the rule
+// disabled rather than guessing a threshold: emitting interrupted too early is
+// permanent (ADR-0015 rejects upsert, ADR-0004 deduplicates), so a scan that cannot
+// read its own threshold buffers instead. The value is uncalibrated and provisional
+// (ADR-0014), which is why nothing derived from it is reported as a duration.
+func staleness(paths config.Paths) claudecode.Staleness {
+	settings, err := config.Load(paths)
+	if err != nil {
+		return claudecode.Staleness{}
+	}
+	timeout, usable, err := settings.Duration("scan.stale_call_timeout")
+	if err != nil || !usable {
+		return claudecode.Staleness{}
+	}
+	return claudecode.Staleness{Timeout: timeout, Now: time.Now().UTC()}
+}
+
 // ingestHistory imports every reachable transcript and reports both what it wrote
 // and what it could not do.
 //
@@ -184,7 +211,7 @@ func Uninstall(paths config.Paths, claudeDir string, purge bool) (bool, error) {
 // rather than an error that breaks the command (plan §4.3). Swallowed and
 // uncounted, though, they are indistinguishable from a machine with no history —
 // which is the confusion ADR-0010 asks doctor to end.
-func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Store) (int, health.Scan, error) {
+func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Store, stale claudecode.Staleness) (int, health.Scan, error) {
 	written := 0
 	scan := health.Scan{At: time.Now().UTC(), RefusedProjects: repos.DroppedEntries()}
 	err := filepath.WalkDir(filepath.Join(claudeDir, "projects"), func(path string, entry fs.DirEntry, walkErr error) error {
@@ -213,7 +240,7 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 		result, ingestErr := ingest.ClaudeCode(file, func(cwd string) (record.Hash, bool) {
 			identity, identifyErr := repos.Identify(cwd)
 			return record.Hash(identity.ID), identifyErr == nil && identity.Matched
-		}, record.NewNamer(repos.NameKey()), destination)
+		}, record.NewNamer(repos.NameKey()), stale, destination)
 		if ingestErr != nil {
 			scan.ParseErrors++
 			return nil

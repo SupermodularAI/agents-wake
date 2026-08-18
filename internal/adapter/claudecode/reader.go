@@ -1,14 +1,17 @@
 // Package claudecode derives safe terminal records from Claude Code JSONL
-// transcripts. It retains pending call metadata only until a matching result
-// arrives, and a result's derived outcome only until its matching call arrives,
-// and never persists transcript content.
+// transcripts. It retains pending call metadata only until the call terminates —
+// by a matching result, or by ADR-0015's staleness rule once its session has gone
+// quiet — and a result's derived outcome only until its matching call arrives, and
+// never persists transcript content.
 package claudecode
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"io"
+	"slices"
 	"time"
 
 	"github.com/SupermodularAI/agents-wake/internal/jsonl"
@@ -27,7 +30,25 @@ const maxLineBytes = 1024 * 1024
 type Result struct {
 	Records   []record.Record
 	Malformed int
-	Pending   int
+	// Pending counts calls still unterminated when the scan finished whose session
+	// is still inside the staleness window. It is a number that is not final yet
+	// rather than collection that was lost (ADR-0015), which is why doctor renders it
+	// as its own line and not as "collects nothing".
+	Pending int
+	// Interrupted counts calls this scan resolved by the staleness rule: their
+	// session went quiet past the threshold, so they were emitted as terminal records
+	// with outcome interrupted rather than buffered again forever. Those records are
+	// in Records and are also counted by Parsed upstream.
+	Interrupted int
+	// OpenSessions counts the sessions this transcript's entries belong to that have
+	// not closed under the staleness rule.
+	OpenSessions int
+	// CursorFloor is the byte offset of the earliest line belonging to any session
+	// still open. A future incremental cursor (T020, T102) must not advance past it
+	// until that session closes: ADR-0023 §5 generalizes ADR-0015's "does not advance
+	// its cursor past [an unterminated call]" to the session grain. It is meaningful
+	// only when OpenSessions is positive.
+	CursorFloor int64
 	// Refused counts tool calls dropped because the primitive's own name failed
 	// validation — a Task block naming no subagent, or a name the name/scope
 	// grammar refuses. Fail closed (ADR-0007): nothing is written and no
@@ -51,13 +72,19 @@ type Resolver func(cwd string) (record.Hash, bool)
 // scope is a repository path fragment, so the reader cannot derive a persistable
 // name for one on its own (ADR-0020); a Namer with no key drops those references
 // rather than persisting an unkeyed digest of a path.
-func Read(reader io.Reader, resolve Resolver, names record.Namer) (Result, error) {
+//
+// stale carries ADR-0015's staleness rule (scan.stale_call_timeout and the scan's
+// clock) from the caller that owns config, so the threshold is never a constant
+// here. Its zero value buffers every unterminated call, which is what a caller that
+// cannot read the threshold must do.
+func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Staleness) (Result, error) {
 	if resolve == nil {
 		return Result{}, errors.New("missing repository resolver")
 	}
 
 	result := Result{}
 	pending := map[string]call{}
+	sessions := &SessionState{}
 	// earlyResults holds a tool_result whose tool_use line has not been read yet.
 	// Claude Code writes the pair out of order in a small fraction of transcripts,
 	// and a forward-only pairing loop drops the result and then buffers the call
@@ -72,7 +99,7 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer) (Result, error
 	// callResult), so buffering one before the call's repository consent is known
 	// retains nothing.
 	earlyResults := map[string]callResult{}
-	skipped, err := jsonl.Lines(reader, maxLineBytes, func(_ int64, line []byte) {
+	skipped, err := jsonl.Lines(reader, maxLineBytes, func(offset int64, line []byte) {
 		var entry transcriptEntry
 		if unmarshalErr := json.Unmarshal(line, &entry); unmarshalErr != nil {
 			result.Malformed++
@@ -81,6 +108,13 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer) (Result, error
 		if !entry.valid() {
 			result.Malformed++
 			return
+		}
+		// Every valid entry is activity, whether or not it carries a tool call: the last
+		// thing a session wrote is what says it is still alive. An id outside the token
+		// domain is not observed, matching call, which skips such an entry — so no call
+		// can be buffered for a session this cannot judge.
+		if sessionID, tokenErr := record.BoundedToken(entry.SessionID); tokenErr == nil {
+			sessions.Observe(sessionID, record.NormalizedTimestamp(entry.Timestamp), offset)
 		}
 		if event, ok := entry.attributedRun(resolve, names); ok {
 			result.Records = append(result.Records, event)
@@ -135,8 +169,43 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer) (Result, error
 	// parse is: counted as malformed so doctor can report blindness, and nothing is
 	// synthesised from it — no call is opened, so no result can terminate one.
 	result.Malformed += skipped
+	interrupted := resolveStaleCalls(pending, sessions, stale)
+	result.Records = append(result.Records, interrupted...)
+	result.Interrupted = len(interrupted)
 	result.Pending = len(pending)
+	result.OpenSessions, result.CursorFloor = sessions.CursorFloor(stale)
 	return result, nil
+}
+
+// resolveStaleCalls emits the terminal record for every buffered call whose session
+// has closed, and removes it from the buffer so it is not counted as pending.
+//
+// The record reuses the id the call already derived from its own source event: one
+// unresolved call becomes at most one record, whether a tool_result terminates it or
+// this does, so a rescan re-derives the same id and the store deduplicates it
+// (ADR-0004, ADR-0002). ADR-0015 rejects upsert, so this is final — a tool_result
+// arriving after emission is deduplicated away, which is why the threshold errs long
+// (internal/config/keys.go).
+//
+// The order is sorted rather than the map's: iteration order is randomised, and two
+// scans of one transcript have to produce byte-identical store contents. The block
+// id breaks a timestamp tie and is unique per call, because pending is keyed by it.
+func resolveStaleCalls(pending map[string]call, sessions *SessionState, stale Staleness) []record.Record {
+	resolved := make([]string, 0, len(pending))
+	for id, buffered := range pending {
+		if sessions.Closed(buffered.sessionID, stale) {
+			resolved = append(resolved, id)
+		}
+	}
+	slices.SortFunc(resolved, func(a, b string) int {
+		return cmp.Or(pending[a].timestamp.Compare(pending[b].timestamp), cmp.Compare(a, b))
+	})
+	records := make([]record.Record, 0, len(resolved))
+	for _, id := range resolved {
+		records = append(records, pending[id].interrupted())
+		delete(pending, id)
+	}
+	return records
 }
 
 type transcriptEntry struct {
@@ -411,8 +480,10 @@ func primitiveName(block contentBlock, names record.Namer) (record.Identifier, e
 }
 
 // complete pairs an accepted call with the result that terminated it. It takes the
-// already-derived callResult rather than the source entry and block, so the
-// forward-order and out-of-order paths share one derivation and one stamping rule.
+// already-derived callResult rather than the source entry and block, so every
+// terminal path — forward order, out of order, and the staleness rule — shares one
+// derivation and one stamping rule, and a call can only ever yield one shape of
+// record.
 func (call call) complete(result callResult) record.Record {
 	return record.Record{
 		SchemaVersion:  record.SchemaVersion,
@@ -431,6 +502,27 @@ func (call call) complete(result callResult) record.Record {
 		Invoker:        call.invoker,
 		Outcome:        result.outcome,
 	}
+}
+
+// interrupted is the terminal record for a call whose session closed without ever
+// producing a result (ADR-0015's staleness rule). outcome interrupted means "did not
+// finish" and is never a synthesised ok (ADR-0005); record.IsFailure already counts
+// it, so this newly makes that path live and error rates will move — the intended
+// effect of ADR-0015, not a regression.
+//
+// It goes through complete, like both result-terminated paths, so the id it carries
+// is the id the completed record would have carried (ADR-0004): a result arriving
+// after this record was written is deduplicated away rather than upserted, which is
+// the alternative ADR-0015 rejected.
+//
+// The timestamp is the call's own tool_use timestamp rather than the session's last
+// activity: the invocation grain's timestamp is when the call happened, and last
+// activity would make the same logical event serialise differently once unrelated
+// later lines are appended to the session. There is no result entry on this path, so
+// a result-derived timestamp is unavailable by construction.
+func (call call) interrupted() record.Record {
+	outcome := record.OutcomeInterrupted
+	return call.complete(callResult{timestamp: call.timestamp, outcome: &outcome})
 }
 
 func kindFor(name record.Identifier) record.Kind {
