@@ -62,7 +62,7 @@ type Entry struct {
 	Record   record.Record
 }
 
-// New creates a Store over path. It creates nothing until Append is called.
+// New creates a Store over path. It creates nothing until an append or a discard.
 func New(path string) *Store {
 	return &Store{path: path, lockPath: path + ".lock"}
 }
@@ -176,6 +176,36 @@ func (s *Store) appendLocked(valid []record.Record) (Result, error) {
 	}
 	s.indexedTo, s.indexed = info.Size(), info
 	return result, nil
+}
+
+// Discard removes the spool under the same lock Append takes, so a rebuild cannot
+// unlink the file an append still holds open. Without the lock the removal is
+// invisible to the appender: the directory entry goes, the descriptor stays valid,
+// and every byte written after that lands on an inode nothing will ever read.
+//
+// A spool that is already absent is not an error — dropping a derived index is
+// idempotent, and rebuilding a machine that never ingested is a normal first run.
+//
+// The lock covers the removal and nothing more. Holding it across the caller's
+// re-ingest would deadlock against that ingest's own Append, which takes this same
+// lock blocking (ADR-0015: the spool is derived, so dropping and rescanning is the
+// migration path — the drop just may not race a writer).
+//
+// mu is taken before the spool lock here, the same order Append uses, so the two
+// orders cannot cycle.
+func (s *Store) Discard() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return lockfile.WithLock(s.lockPath, func() error {
+		if err := os.Remove(s.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("discarding store: %w", err)
+		}
+		// Everything cached describes a file that is gone. refreshIndex would notice
+		// on its own (os.SameFile), so this is belt-and-braces rather than the
+		// correctness mechanism (ADR-0004, ADR-0015).
+		s.dropIndex()
+		return nil
+	})
 }
 
 // refreshIndex brings the dedup index up to the spool's current length, decoding
