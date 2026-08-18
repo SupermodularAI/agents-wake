@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -10,6 +11,22 @@ import (
 
 	"github.com/SupermodularAI/agents-wake/internal/config"
 )
+
+// TestMain clears the harness's own relocation variable for the whole package.
+//
+// config.ClaudeCodeDir honours CLAUDE_CONFIG_DIR, which is how Claude Code
+// relocates ~/.claude. A developer who has it set would otherwise have every
+// command driven here resolve to their real Claude Code directory whatever HOME a
+// test isolates — and `init` and `remove` write hooks into what they resolve.
+// Clearing it once, here, keeps that impossible for tests written later too; a test
+// that wants the variable sets it with t.Setenv, which restores it afterwards.
+func TestMain(m *testing.M) {
+	if err := os.Unsetenv(config.EnvClaudeConfigDir); err != nil {
+		fmt.Fprintf(os.Stderr, "clearing %s: %v\n", config.EnvClaudeConfigDir, err)
+		os.Exit(1)
+	}
+	os.Exit(m.Run())
+}
 
 // run executes the root command with args, returning combined output and error.
 func run(t *testing.T, args ...string) (string, error) {
