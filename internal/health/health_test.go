@@ -33,10 +33,11 @@ func TestRecordScanKeepsTheHookCounters(t *testing.T) {
 }
 
 func TestScanCarriesThePendingAndInterruptedCounters(t *testing.T) {
-	// Two counters, not one: "buffered, may still finish" and "resolved as never
-	// finishing" are different facts, and a single number would conflate them.
+	// Three counters, not one: "buffered, may still finish", "resolved as never
+	// finishing" and "collapsed into an already-counted run" are different facts, and a
+	// single number would conflate them.
 	store := New(filepath.Join(t.TempDir(), "health.json"))
-	if err := store.RecordScan(Scan{At: time.Now().UTC(), PendingCalls: 3, InterruptedCalls: 2}); err != nil {
+	if err := store.RecordScan(Scan{At: time.Now().UTC(), PendingCalls: 3, InterruptedCalls: 2, AmbiguousSkillRuns: 4}); err != nil {
 		t.Fatalf("RecordScan() error = %v", err)
 	}
 
@@ -49,6 +50,9 @@ func TestScanCarriesThePendingAndInterruptedCounters(t *testing.T) {
 	}
 	if got.Scan.InterruptedCalls != 2 {
 		t.Errorf("Scan.InterruptedCalls = %d, want 2", got.Scan.InterruptedCalls)
+	}
+	if got.Scan.AmbiguousSkillRuns != 4 {
+		t.Errorf("Scan.AmbiguousSkillRuns = %d, want 4", got.Scan.AmbiguousSkillRuns)
 	}
 	if got.Hooks != (Hooks{}) {
 		t.Errorf("Hooks = %+v, want zero — a scan records only its own half", got.Hooks)

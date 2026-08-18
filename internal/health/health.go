@@ -39,7 +39,11 @@ import (
 // measured, which is the "collects zero for a state nobody measured" failure this
 // package's comment forbids. The file is derived and non-precious (ADR-0014), so
 // refusing it costs one scan's diagnostics.
-const reportVersion = 2
+//
+// Bumped to 3 when the scan gained the ambiguous-skill-run counter (T121): a version-2
+// file read as this format would report 0 for a counter nobody measured, which is the
+// same failure the bump to 2 avoided.
+const reportVersion = 3
 
 // reportFileMode is the mode the counter file is written with. It holds no path and
 // no label, but it is state about this user's machine and the rest of the local
@@ -96,6 +100,13 @@ type Scan struct {
 	// what earlier scans resolved. Reading it as "this scan interrupted N calls" would
 	// overstate it.
 	InterruptedCalls int `json:"interrupted_calls"`
+	// AmbiguousSkillRuns counts attributed skill runs the last scan collapsed into an
+	// already-counted one for the same session and skill (ADR-0023's accepted
+	// limitation). It is uncertainty about the invocation numbers, not a number of
+	// invocations, and it is deliberately not one of integrationState's "collects
+	// nothing" reasons: the transcript was read completely and the collapse is a
+	// documented decision, not a source nobody could read.
+	AmbiguousSkillRuns int `json:"ambiguous_skill_runs"`
 }
 
 // Hooks is what the last `init` or `remove` managed to do. KeptOwned is the partial
