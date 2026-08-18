@@ -252,10 +252,19 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 		// primitive's identity lives in would otherwise stop collection in silence
 		// while doctor still reported "collecting" (plan §3.3, §12).
 		scan.RefusedCalls += result.Refused
+		// Two different facts, deliberately two counters. Pending is a call whose
+		// session may still be running — transient, and not a fault. Interrupted is a
+		// call whose session went quiet past the threshold, so the invocation is now
+		// in the store carrying the outcome that says it never finished (ADR-0015).
+		// Neither is lost collection, so neither joins doctor's "collects nothing" arm.
+		scan.PendingCalls += result.Pending
+		scan.InterruptedCalls += result.Interrupted
 		if result.Parsed == 0 && result.Refused == 0 {
 			// Read successfully and yielded no terminal event — most often because
 			// its working directory belongs to no consented repository, sometimes
-			// because every call in it is still unterminated (ADR-0015). Either way
+			// because every call in it is still unterminated and not yet stale
+			// (ADR-0015) — a transcript whose stale calls did resolve has parsed
+			// records and is not skipped. Either way
 			// it is a clean zero, not a failure, and the two must not share a counter.
 			// A transcript whose every call was refused is deliberately not one of
 			// those: doctor reports Skipped as an honest zero, and that transcript is
