@@ -55,6 +55,10 @@ func newDoctorCmd() *cobra.Command {
 // single number would conflate them. Neither line reports the threshold: it is
 // provisional and uncalibrated (ADR-0014), and printing a duration here would read
 // as a calibrated promise.
+//
+// The interpretation of these counters lives in health.Diagnose, because
+// internal/cli only parses and prints (ADR-0001, plan §6.2). This function is the
+// print loop and holds no decision about what the numbers mean.
 func writeDiagnosis(out io.Writer, paths config.Paths, claudeDir string) error {
 	report, readErr := health.New(paths.HealthFile).Read()
 
@@ -69,6 +73,8 @@ func writeDiagnosis(out io.Writer, paths config.Paths, claudeDir string) error {
 		installed = 0
 	}
 
+	diagnosis := health.Diagnose(report, readErr, hookErr)
+
 	for _, line := range []struct {
 		key   string
 		value int
@@ -82,7 +88,11 @@ func writeDiagnosis(out io.Writer, paths config.Paths, claudeDir string) error {
 		}
 	}
 
-	if _, err := fmt.Fprintf(out, "last scan: %s\n", scanTime(report, readErr)); err != nil {
+	lastScan := "never"
+	if diagnosis.ScanKnown {
+		lastScan = diagnosis.ScanAt.UTC().Format(time.RFC3339)
+	}
+	if _, err := fmt.Fprintf(out, "last scan: %s\n", lastScan); err != nil {
 		return err
 	}
 	for _, line := range []struct {
@@ -104,69 +114,6 @@ func writeDiagnosis(out io.Writer, paths config.Paths, claudeDir string) error {
 		}
 	}
 
-	_, err := fmt.Fprintf(out, "integration: %s\n", integrationState(report, readErr, hookErr))
+	_, err := fmt.Fprintf(out, "integration: %s\n", diagnosis.State)
 	return err
-}
-
-// scanTime renders when the last scan ran, or that there has not been one.
-func scanTime(report health.Report, readErr error) string {
-	if readErr != nil || report.Scan.At.IsZero() {
-		return "never"
-	}
-	return report.Scan.At.UTC().Format(time.RFC3339)
-}
-
-// integrationState is the one word ADR-0010 asks for, and it is exactly one of five.
-//
-// "collects nothing" and "collects zero" are the pair that matters. A source that
-// could not be read or could not be parsed means the numbers below are missing
-// something and nobody knows how much; everything read and nothing found means the
-// numbers are complete and the answer is zero. Reporting the first as the second is
-// how `unused` would come to recommend removing something the user relies on.
-//
-// A refused project entry belongs in the first arm for the same reason: an entry
-// this build will not resolve is attribution it could not perform, so every
-// transcript belonging to that repository counted as holding nothing, and the
-// numbers are missing all of it. It is also not a rare tamper case — it is what
-// every project table written before match_mac became required looks like on its
-// first scan, and the remedy (`wake init` in the repository) is undiscoverable if
-// doctor calls the situation a complete count of zero.
-//
-// A refused call belongs in it for the same reason, and it is the arm that catches
-// format drift: a primitive Wake found but could not name was invoked, and the
-// numbers below are missing that invocation. Inferring a name would be worse than
-// losing it (plan §3.3), so the drop is correct and reporting it is what keeps the
-// drop honest — a harness renaming the field a primitive's identity lives in stops
-// collection for that whole kind, and this is the only line that says so.
-//
-// Skipped is deliberately not in it. A transcript whose working directory belongs to
-// no consented repository was read completely and collected nothing because consent
-// says so, and an unterminated call is a number that is not final yet rather than
-// one nobody could read (ADR-0015). Both are honest zeroes. Pending and interrupted
-// calls are not in it either, and for the reason already stated there — an
-// unterminated call is a number that is not final yet, and a call that resolved to
-// interrupted is an invocation the store has, carrying the outcome that says it
-// never finished (ADR-0015). Both are honest, and neither is a source nobody could
-// read.
-//
-// An input this build cannot read is its own state rather than an error: a
-// diagnostic that failed in the situation it exists for is worse than one that says
-// what it could not determine. Both unreadable states come first, because a number
-// derived from an input nobody could read is not a number worth reading — and a
-// settings file this build refuses is exactly what a user comes here after `wake
-// init` told them to fix it.
-func integrationState(report health.Report, readErr, hookErr error) string {
-	switch {
-	case readErr != nil:
-		return "counters unreadable"
-	case hookErr != nil:
-		return "hooks unreadable"
-	case report.Scan.At.IsZero():
-		return "never scanned"
-	case report.Scan.Unreadable > 0 || report.Scan.ParseErrors > 0 || report.Scan.RefusedProjects > 0 || report.Scan.RefusedCalls > 0:
-		return "collects nothing"
-	case report.Scan.EventsWritten == 0:
-		return "collects zero"
-	}
-	return "collecting"
 }
