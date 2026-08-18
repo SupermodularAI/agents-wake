@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/SupermodularAI/agents-wake/internal/metrics"
 	"github.com/SupermodularAI/agents-wake/internal/record"
@@ -341,6 +342,87 @@ func skillCallTranscript(t *testing.T, skill string) string {
 		fmt.Sprintf(`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Skill","input":{"skill":%s}}]}}`, quoted(t, skill)),
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
+}
+
+// resultShapeTranscript is one Bash call terminated by a tool_result entry whose
+// toolUseResult carries rawResult verbatim. rawResult is inlined as raw JSON, not
+// quoted, so a caller can hand it an object, a string, an array or a literal; an
+// empty rawResult omits the key entirely. errorField is spliced into the
+// tool_result block so a case can choose between a known-not-an-error terminator
+// and one carrying no is_error at all.
+func resultShapeTranscript(rawResult, errorField string) string {
+	result := ""
+	if rawResult != "" {
+		result = `"toolUseResult":` + rawResult + `,`
+	}
+	return strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z",` + result + `"message":{"content":[{"type":"tool_result","tool_use_id":"call-1"` + errorField + `}]}}`,
+	}, "\n")
+}
+
+// resultShapes is every shape real Claude Code writes toolUseResult in, plus the
+// edge cases a shape-tolerant decode must resolve without fabricating a verdict.
+// A syntactically broken object is deliberately absent: a line carrying one fails
+// the outer json.Unmarshal and is counted Malformed before the field is reached.
+var resultShapes = map[string]struct {
+	raw  string
+	want record.Outcome
+}{
+	"bare string (a Bash result)":             {`"done"`, record.OutcomeOK},
+	"array of content blocks (a Task result)": {`[{"type":"text","text":"done"}]`, record.OutcomeOK},
+	"object saying interrupted":               {`{"interrupted":true}`, record.OutcomeInterrupted},
+	"object saying not interrupted":           {`{"stdout":"done","interrupted":false}`, record.OutcomeOK},
+	"object with no interrupted field":        {`{"stdout":"done"}`, record.OutcomeOK},
+	"object whose interrupted is not a bool":  {`{"interrupted":"maybe"}`, record.OutcomeOK},
+	"bare number":                             {`12`, record.OutcomeOK},
+	"null":                                    {`null`, record.OutcomeOK},
+	"absent":                                  {``, record.OutcomeOK},
+}
+
+// A tool_result line is the only thing that terminates a call, so a shape the
+// decode cannot read strands that call in pending forever (ADR-0015). Failure
+// messages name the shape and the counters, never the payload (plan §4.2).
+func TestReadTerminatesACallWhateverShapeItsToolUseResultTook(t *testing.T) {
+	terminated := record.NormalizedTimestamp(time.Date(2026, 8, 13, 12, 0, 1, 0, time.UTC))
+	for shape, want := range resultShapes {
+		t.Run(shape, func(t *testing.T) {
+			result, err := Read(strings.NewReader(resultShapeTranscript(want.raw, `,"is_error":false`)), resolver, names)
+			if err != nil {
+				t.Fatalf("Read() error = %v", err)
+			}
+			if len(result.Records) != 1 || result.Pending != 0 || result.Malformed != 0 || result.Refused != 0 {
+				t.Fatalf("toolUseResult written as %s left records = %d, pending = %d, malformed = %d, refused = %d; want one terminated call",
+					shape, len(result.Records), result.Pending, result.Malformed, result.Refused)
+			}
+			event := result.Records[0]
+			if event.Outcome == nil {
+				t.Fatalf("toolUseResult written as %s left the outcome null despite is_error:false", shape)
+			}
+			if *event.Outcome != want.want {
+				t.Errorf("toolUseResult written as %s gave outcome %q, want %q", shape, *event.Outcome, want.want)
+			}
+			if !event.Timestamp.Equal(terminated) {
+				t.Errorf("toolUseResult written as %s timestamped the record %v, want the terminating line's %v", shape, event.Timestamp, terminated)
+			}
+		})
+	}
+}
+
+// ADR-0005: unknown is never success. A shape this reader takes no structured
+// result from must leave the outcome null when the terminator carries no is_error,
+// never promote it to ok — and must never promote it to interrupted either.
+func TestReadKeepsOutcomeNullWhenAnUnreadableResultCarriesNoError(t *testing.T) {
+	result, err := Read(strings.NewReader(resultShapeTranscript(`"done"`, ``)), resolver, names)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 1 || result.Pending != 0 || result.Malformed != 0 {
+		t.Fatalf("Read() = %+v, want one terminated call", result)
+	}
+	if outcome := result.Records[0].Outcome; outcome != nil {
+		t.Errorf("Outcome = %q, want null: the result shape carries no verdict and the terminator carries no is_error", *outcome)
+	}
 }
 
 // subagentCallTranscript is a terminated Task call naming subagentType as its
