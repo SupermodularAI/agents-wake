@@ -49,6 +49,12 @@ func newDoctorCmd() *cobra.Command {
 // output is what people paste into issues (ADR-0019 §7). A test asserts it carries
 // no path separator at all, which is the strongest form of that check since nothing
 // printed here has a legitimate slash in it.
+//
+// Pending and interrupted calls are two lines rather than one, because "buffered,
+// may still finish" and "resolved as never finishing" are different facts and a
+// single number would conflate them. Neither line reports the threshold: it is
+// provisional and uncalibrated (ADR-0014), and printing a duration here would read
+// as a calibrated promise.
 func writeDiagnosis(out io.Writer, paths config.Paths, claudeDir string) error {
 	report, readErr := health.New(paths.HealthFile).Read()
 
@@ -90,6 +96,8 @@ func writeDiagnosis(out io.Writer, paths config.Paths, claudeDir string) error {
 		{"events written", report.Scan.EventsWritten},
 		{"refused project entries", report.Scan.RefusedProjects},
 		{"refused calls", report.Scan.RefusedCalls},
+		{"pending calls", report.Scan.PendingCalls},
+		{"interrupted calls", report.Scan.InterruptedCalls},
 	} {
 		if _, err := fmt.Fprintf(out, "%s: %d\n", line.key, line.value); err != nil {
 			return err
@@ -134,7 +142,12 @@ func scanTime(report health.Report, readErr error) string {
 // Skipped is deliberately not in it. A transcript whose working directory belongs to
 // no consented repository was read completely and collected nothing because consent
 // says so, and an unterminated call is a number that is not final yet rather than
-// one nobody could read (ADR-0015). Both are honest zeroes.
+// one nobody could read (ADR-0015). Both are honest zeroes. Pending and interrupted
+// calls are not in it either, and for the reason already stated there — an
+// unterminated call is a number that is not final yet, and a call that resolved to
+// interrupted is an invocation the store has, carrying the outcome that says it
+// never finished (ADR-0015). Both are honest, and neither is a source nobody could
+// read.
 //
 // An input this build cannot read is its own state rather than an error: a
 // diagnostic that failed in the situation it exists for is worse than one that says
