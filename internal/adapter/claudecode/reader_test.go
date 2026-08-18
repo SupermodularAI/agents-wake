@@ -316,6 +316,281 @@ func TestReadNeverUsesToolArguments(t *testing.T) {
 	}
 }
 
+// forwardOrderPair is the canonical terminated Bash call: the tool_use line, then
+// the tool_result line that terminates it. reversedOrderPair is the same two lines
+// in the order Claude Code writes them in a small fraction of transcripts — the
+// result first. Each line keeps its own uuid and timestamp in both orders, so the
+// only difference between the two transcripts is arrival order.
+var (
+	toolUseLine    = `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","version":"1.0.0","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`
+	toolResultLine = `{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`
+
+	forwardOrderPair  = toolUseLine + "\n" + toolResultLine
+	reversedOrderPair = toolResultLine + "\n" + toolUseLine
+)
+
+// A tool_result line can precede its own tool_use line. That is an out-of-order
+// write, not a malformed one, and the forward-only pairing loop used to drop the
+// result and then buffer the call forever — which, once the staleness path is live,
+// writes a call that genuinely succeeded as outcome: interrupted, permanently
+// (ADR-0004 dedup never upserts, ADR-0015).
+func TestReadCompletesACallWhoseResultLinePrecedesIt(t *testing.T) {
+	result, err := Read(strings.NewReader(reversedOrderPair), resolver, names)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 1 || result.Pending != 0 || result.Malformed != 0 || result.Refused != 0 {
+		t.Fatalf("Read() = %+v, want one record and no counter moved", result)
+	}
+	event := result.Records[0]
+	if event.Outcome == nil || *event.Outcome != record.OutcomeOK {
+		t.Errorf("Outcome = %v, want the real outcome the result line carries", event.Outcome)
+	}
+	if event.Kind != record.KindBuiltinTool || event.Name != "Bash" {
+		t.Errorf("record = %+v, want the Bash call", event)
+	}
+	// The tool_use entry is what the call's own metadata comes from, in either order.
+	if event.HarnessVersion != "1.0.0" || event.Model != "sonnet" {
+		t.Errorf("HarnessVersion = %q, Model = %q, want them from the tool_use entry", event.HarnessVersion, event.Model)
+	}
+	// And the result entry is what stamps the timestamp, exactly as complete has
+	// always stamped it.
+	if want := record.NormalizedTimestamp(parsedTime(t, "2026-08-13T12:00:01Z")); !event.Timestamp.Equal(want) {
+		t.Errorf("Timestamp = %v, want the result entry's %v", event.Timestamp, want)
+	}
+}
+
+// Ordering may not reach the derived identity at all: callSourceEvent composes the
+// tool_use entry's uuid with the block's own id, and both halves are the same
+// whichever line the reader saw first (ADR-0004). Comparing the marshalled bytes
+// covers the id, the timestamp and every other field in one assertion, which is
+// what "no change to the forward-order path" actually asks for.
+func TestReadDerivesTheSameRecordInEitherLineOrder(t *testing.T) {
+	encoded := make([]string, 0, 2)
+	for _, transcript := range []string{forwardOrderPair, reversedOrderPair} {
+		result, err := Read(strings.NewReader(transcript), resolver, names)
+		if err != nil {
+			t.Fatalf("Read() error = %v", err)
+		}
+		if len(result.Records) != 1 {
+			t.Fatalf("Read() records = %+v, want exactly one", result.Records)
+		}
+		marshalled, err := record.Marshal(result.Records[0])
+		if err != nil {
+			t.Fatalf("Marshal() error = %v", err)
+		}
+		encoded = append(encoded, string(marshalled))
+	}
+	if encoded[0] != encoded[1] {
+		t.Errorf("record differs by line order:\n forward  = %s\n reversed = %s", encoded[0], encoded[1])
+	}
+}
+
+// A result whose tool_use never arrives is counted nowhere. It cannot become a
+// record — there is no name, kind, invoker or consented repository to build one
+// from — and it must not be folded into Pending either: Pending means "accepted
+// calls awaiting a result", and the staleness path ages exactly those into
+// interrupted. A call that does not exist has nothing to age.
+func TestReadEmitsNothingForAResultWhoseCallNeverArrives(t *testing.T) {
+	result, err := Read(strings.NewReader(toolResultLine), resolver, names)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 0 || result.Pending != 0 || result.Malformed != 0 || result.Refused != 0 {
+		t.Fatalf("Read() = %+v, want nothing emitted and no counter moved", result)
+	}
+}
+
+func TestReadDerivesTheRealOutcomeWhenTheResultArrivesFirst(t *testing.T) {
+	ok, failed := record.OutcomeOK, record.OutcomeError
+	deniedPolicy, deniedUser := record.OutcomeDeniedPolicy, record.OutcomeDeniedUser
+	interrupted := record.OutcomeInterrupted
+
+	for _, testCase := range []struct {
+		name        string
+		entryFields string
+		blockFields string
+		want        *record.Outcome
+	}{
+		{name: "ok", blockFields: `,"is_error":false`, want: &ok},
+		{name: "error", blockFields: `,"is_error":true`, want: &failed},
+		// ADR-0005: absent is first-class null, never coerced to ok.
+		{name: "unknown"},
+		{name: "denied by policy", entryFields: `"toolDenialKind":"permission-rule",`, blockFields: `,"is_error":true`, want: &deniedPolicy},
+		{name: "denied by user", entryFields: `"toolDenialKind":"user-rejected",`, blockFields: `,"is_error":true`, want: &deniedUser},
+		// The control: interrupted may only ever come from the source saying so. The
+		// five rows above prove arrival order alone never produces it.
+		{name: "interrupted", entryFields: `"toolUseResult":{"interrupted":true},`, want: &interrupted},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			transcript := reversedPairWith(testCase.entryFields, testCase.blockFields)
+			result, err := Read(strings.NewReader(transcript), resolver, names)
+			if err != nil {
+				t.Fatalf("Read() error = %v", err)
+			}
+			if len(result.Records) != 1 {
+				t.Fatalf("Read() records = %+v, want exactly one", result.Records)
+			}
+			got := result.Records[0].Outcome
+			if (got == nil) != (testCase.want == nil) {
+				t.Fatalf("Outcome = %v, want %v", got, testCase.want)
+			}
+			if got != nil && *got != *testCase.want {
+				t.Errorf("Outcome = %q, want %q", *got, *testCase.want)
+			}
+		})
+	}
+}
+
+func TestReadDoesNotEmitAnEarlyResultForAnUnconsentedCall(t *testing.T) {
+	transcript := strings.Join([]string{
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/outside","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/outside","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
+	}, "\n")
+	result, err := Read(strings.NewReader(transcript), func(string) (record.Hash, bool) { return "", false }, names)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	// A clean zero, not a refusal: an unconsented directory is outside collection
+	// rather than lost from it, whichever line arrived first.
+	if len(result.Records) != 0 || result.Refused != 0 {
+		t.Errorf("Read() = %+v, want no record and no refusal", result)
+	}
+}
+
+func TestReadCountsARefusedNameWhoseResultArrivedFirst(t *testing.T) {
+	transcript := strings.Join([]string{
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Task"}]}}`,
+	}, "\n")
+	result, err := Read(strings.NewReader(transcript), resolver, names)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	// A buffered result does not turn a fail-closed refusal into a silent success,
+	// and the refusal is still counted exactly once.
+	if len(result.Records) != 0 || result.Refused != 1 {
+		t.Errorf("Read() = %+v, want the call refused and counted once", result)
+	}
+}
+
+func TestReadDoesNotEmitAnEarlyResultForAnIDOutsideTheTokenDomain(t *testing.T) {
+	unsafe := quoted(t, "call"+callSeparator+"1")
+	transcript := strings.Join([]string{
+		fmt.Sprintf(`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":%s,"is_error":false}]}}`, unsafe),
+		fmt.Sprintf(`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":%s,"name":"Bash"}]}}`, unsafe),
+	}, "\n")
+	result, err := Read(strings.NewReader(transcript), resolver, names)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	// An id that would make a composed identity ambiguous is skipped, not refused,
+	// and the early result may not smuggle it back in.
+	if len(result.Records) != 0 || result.Refused != 0 || result.Pending != 0 {
+		t.Errorf("Read() = %+v, want the call skipped with no record", result)
+	}
+}
+
+// The buffering branch now retains a result that used to be discarded, so a second
+// result for an already-completed call reaches it. One call is still one record
+// (ADR-0002), and the first terminal result is the one that stands.
+func TestReadIgnoresARepeatedResultForACompletedCall(t *testing.T) {
+	transcript := strings.Join([]string{
+		toolUseLine,
+		toolResultLine,
+		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":true}]}}`,
+	}, "\n")
+	result, err := Read(strings.NewReader(transcript), resolver, names)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 1 || result.Pending != 0 {
+		t.Fatalf("Read() = %+v, want exactly one record for one call", result)
+	}
+	if event := result.Records[0]; event.Outcome == nil || *event.Outcome != record.OutcomeOK {
+		t.Errorf("Outcome = %v, want the first terminal result to stand", event.Outcome)
+	}
+}
+
+// Two results for one id can both precede the tool_use line. The forward-order
+// path has always let the first terminal result stand and discarded the rest, so
+// the buffered path must too — otherwise the same transcript would report a
+// different outcome depending on which side of the tool_use line the duplicate
+// landed on.
+func TestReadKeepsTheFirstOfTwoEarlyResultsForOneCall(t *testing.T) {
+	transcript := strings.Join([]string{
+		toolResultLine,
+		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":true}]}}`,
+		toolUseLine,
+	}, "\n")
+	result, err := Read(strings.NewReader(transcript), resolver, names)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 1 || result.Pending != 0 {
+		t.Fatalf("Read() = %+v, want exactly one record for one call", result)
+	}
+	event := result.Records[0]
+	if event.Outcome == nil || *event.Outcome != record.OutcomeOK {
+		t.Errorf("Outcome = %v, want the first early result to stand", event.Outcome)
+	}
+	if want := record.NormalizedTimestamp(parsedTime(t, "2026-08-13T12:00:01Z")); !event.Timestamp.Equal(want) {
+		t.Errorf("Timestamp = %v, want the first early result's %v", event.Timestamp, want)
+	}
+}
+
+// The adapter's hostile-payload assertion for the new retention path. ADR-0007
+// requires one per adapter, not one shared corpus, because each input shape is a
+// new way for a transcript string to reach a record.
+func TestReadRetainsNothingFromAnEarlyResultLine(t *testing.T) {
+	for _, value := range hostileValues {
+		entryFields := fmt.Sprintf(`"toolDenialKind":%s,"pad":%s,"toolUseResult":{"interrupted":false},`,
+			quoted(t, value), quoted(t, "swordfish-"+value))
+		result, err := Read(strings.NewReader(reversedPairWith(entryFields, "")), resolver, names)
+		if err != nil {
+			t.Fatalf("Read() error = %v", err)
+		}
+		if len(result.Records) != 1 {
+			t.Fatalf("Read(toolDenialKind=%q) records = %+v, want exactly one", value, result.Records)
+		}
+		event := result.Records[0]
+		// A hostile denial kind is neither permission-rule nor user-rejected, so the
+		// source does not say — and unknown is never success (ADR-0005).
+		if event.Outcome != nil {
+			t.Errorf("Read(toolDenialKind=%q) outcome = %q, want unknown", value, *event.Outcome)
+		}
+		encoded, err := record.Marshal(event)
+		if err != nil {
+			t.Fatalf("Marshal() error = %v", err)
+		}
+		for _, fragment := range []string{"swordfish", value} {
+			if strings.Contains(string(encoded), fragment) {
+				t.Fatalf("record retains %q from the early result line: %s", fragment, encoded)
+			}
+		}
+	}
+}
+
+// reversedPairWith builds a reversed-order pair whose tool_result line carries
+// entryFields at the top level (each ending in a comma) and blockFields inside the
+// tool_result block (each starting with a comma), followed by the tool_use line
+// that the result terminates.
+func reversedPairWith(entryFields, blockFields string) string {
+	result := fmt.Sprintf(
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z",%s"message":{"content":[{"type":"tool_result","tool_use_id":"call-1"%s}]}}`,
+		entryFields, blockFields)
+	return result + "\n" + toolUseLine
+}
+
+func parsedTime(t *testing.T, value string) time.Time {
+	t.Helper()
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		t.Fatalf("Parse(%q) error = %v", value, err)
+	}
+	return parsed
+}
+
 // mixedShapeTranscript is one session shaped the way a real one is: three calls
 // opened in a single assistant turn, terminated one at a time by results written
 // in three different shapes, with an attribution-only bookkeeping entry in
@@ -405,87 +680,6 @@ func skillCallTranscript(t *testing.T, skill string) string {
 		fmt.Sprintf(`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Skill","input":{"skill":%s}}]}}`, quoted(t, skill)),
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
-}
-
-// resultShapeTranscript is one Bash call terminated by a tool_result entry whose
-// toolUseResult carries rawResult verbatim. rawResult is inlined as raw JSON, not
-// quoted, so a caller can hand it an object, a string, an array or a literal; an
-// empty rawResult omits the key entirely. errorField is spliced into the
-// tool_result block so a case can choose between a known-not-an-error terminator
-// and one carrying no is_error at all.
-func resultShapeTranscript(rawResult, errorField string) string {
-	result := ""
-	if rawResult != "" {
-		result = `"toolUseResult":` + rawResult + `,`
-	}
-	return strings.Join([]string{
-		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
-		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z",` + result + `"message":{"content":[{"type":"tool_result","tool_use_id":"call-1"` + errorField + `}]}}`,
-	}, "\n")
-}
-
-// resultShapes is every shape real Claude Code writes toolUseResult in, plus the
-// edge cases a shape-tolerant decode must resolve without fabricating a verdict.
-// A syntactically broken object is deliberately absent: a line carrying one fails
-// the outer json.Unmarshal and is counted Malformed before the field is reached.
-var resultShapes = map[string]struct {
-	raw  string
-	want record.Outcome
-}{
-	"bare string (a Bash result)":             {`"done"`, record.OutcomeOK},
-	"array of content blocks (a Task result)": {`[{"type":"text","text":"done"}]`, record.OutcomeOK},
-	"object saying interrupted":               {`{"interrupted":true}`, record.OutcomeInterrupted},
-	"object saying not interrupted":           {`{"stdout":"done","interrupted":false}`, record.OutcomeOK},
-	"object with no interrupted field":        {`{"stdout":"done"}`, record.OutcomeOK},
-	"object whose interrupted is not a bool":  {`{"interrupted":"maybe"}`, record.OutcomeOK},
-	"bare number":                             {`12`, record.OutcomeOK},
-	"null":                                    {`null`, record.OutcomeOK},
-	"absent":                                  {``, record.OutcomeOK},
-}
-
-// A tool_result line is the only thing that terminates a call, so a shape the
-// decode cannot read strands that call in pending forever (ADR-0015). Failure
-// messages name the shape and the counters, never the payload (plan §4.2).
-func TestReadTerminatesACallWhateverShapeItsToolUseResultTook(t *testing.T) {
-	terminated := record.NormalizedTimestamp(time.Date(2026, 8, 13, 12, 0, 1, 0, time.UTC))
-	for shape, want := range resultShapes {
-		t.Run(shape, func(t *testing.T) {
-			result, err := Read(strings.NewReader(resultShapeTranscript(want.raw, `,"is_error":false`)), resolver, names)
-			if err != nil {
-				t.Fatalf("Read() error = %v", err)
-			}
-			if len(result.Records) != 1 || result.Pending != 0 || result.Malformed != 0 || result.Refused != 0 {
-				t.Fatalf("toolUseResult written as %s left records = %d, pending = %d, malformed = %d, refused = %d; want one terminated call",
-					shape, len(result.Records), result.Pending, result.Malformed, result.Refused)
-			}
-			event := result.Records[0]
-			if event.Outcome == nil {
-				t.Fatalf("toolUseResult written as %s left the outcome null despite is_error:false", shape)
-			}
-			if *event.Outcome != want.want {
-				t.Errorf("toolUseResult written as %s gave outcome %q, want %q", shape, *event.Outcome, want.want)
-			}
-			if !event.Timestamp.Equal(terminated) {
-				t.Errorf("toolUseResult written as %s timestamped the record %v, want the terminating line's %v", shape, event.Timestamp, terminated)
-			}
-		})
-	}
-}
-
-// ADR-0005: unknown is never success. A shape this reader takes no structured
-// result from must leave the outcome null when the terminator carries no is_error,
-// never promote it to ok — and must never promote it to interrupted either.
-func TestReadKeepsOutcomeNullWhenAnUnreadableResultCarriesNoError(t *testing.T) {
-	result, err := Read(strings.NewReader(resultShapeTranscript(`"done"`, ``)), resolver, names)
-	if err != nil {
-		t.Fatalf("Read() error = %v", err)
-	}
-	if len(result.Records) != 1 || result.Pending != 0 || result.Malformed != 0 {
-		t.Fatalf("Read() = %+v, want one terminated call", result)
-	}
-	if outcome := result.Records[0].Outcome; outcome != nil {
-		t.Errorf("Outcome = %q, want null: the result shape carries no verdict and the terminator carries no is_error", *outcome)
-	}
 }
 
 // subagentCallTranscript is a terminated Task call naming subagentType as its
