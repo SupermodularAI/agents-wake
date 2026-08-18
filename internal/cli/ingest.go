@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -49,11 +48,10 @@ func newIngestCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		home, err := os.UserHomeDir()
+		claudeDir, err := config.ClaudeCodeDir()
 		if err != nil {
 			return err
 		}
-		claudeDir := filepath.Join(home, ".claude")
 		var written int
 		if rebuild {
 			written, err = activation.Rebuild(paths, claudeDir)
@@ -94,11 +92,14 @@ func runHookScan() {
 		discard(err)
 		return
 	}
-	home, err := os.UserHomeDir()
+	// The same resolution as the interactive form, disposed of differently on
+	// purpose: this path exits 0 in silence whatever happened (ADR-0016), so the
+	// error goes to discard rather than to the session's terminal.
+	claudeDir, err := config.ClaudeCodeDir()
 	if err != nil {
 		discard(err)
 		return
 	}
-	_, err = activation.Trigger(paths, filepath.Join(home, ".claude"))
+	_, err = activation.Trigger(paths, claudeDir)
 	discard(err)
 }
