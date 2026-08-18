@@ -3,8 +3,6 @@ package cli
 import (
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -36,11 +34,11 @@ func newDoctorCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			home, err := os.UserHomeDir()
+			claudeDir, err := config.ClaudeCodeDir()
 			if err != nil {
 				return err
 			}
-			return writeDiagnosis(cmd.OutOrStdout(), paths, filepath.Join(home, ".claude"))
+			return writeDiagnosis(cmd.OutOrStdout(), paths, claudeDir)
 		},
 	}
 }
