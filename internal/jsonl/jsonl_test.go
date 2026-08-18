@@ -158,12 +158,64 @@ func (f *failingReader) Read(p []byte) (int, error) {
 	return n, f.err
 }
 
+func TestLinesReportsEachLineStartOffset(t *testing.T) {
+	// "a\n" is bytes 0-1, "bb\r\n" is 2-5, the empty line is 6, "ccc" starts at 7.
+	var got []int64
+	if _, err := Lines(strings.NewReader("a\nbb\r\n\nccc"), 16, func(offset int64, _ []byte) {
+		got = append(got, offset)
+	}); err != nil {
+		t.Fatalf("Lines() error = %v", err)
+	}
+
+	assertOffsets(t, got, 0, 2, 6, 7)
+}
+
+func TestLinesReportsTheOffsetAfterASkippedLine(t *testing.T) {
+	// An oversized line is never delivered, but the bytes it occupied still move the
+	// offset: a cursor built from the line after it would otherwise point inside it.
+	oversized := strings.Repeat("x", 40)
+	var got []int64
+	skipped, err := Lines(strings.NewReader("ok\n"+oversized+"\ntail\n"), 8, func(offset int64, _ []byte) {
+		got = append(got, offset)
+	})
+
+	if err != nil || skipped != 1 {
+		t.Fatalf("Lines() = %d, %v; want 1 skipped and no error", skipped, err)
+	}
+	assertOffsets(t, got, 0, int64(len(oversized))+4)
+}
+
+func TestLinesReportsOffsetsAcrossALineLongerThanTheReadBuffer(t *testing.T) {
+	// The offset has to survive a line accumulated over several buffer fills.
+	long := strings.Repeat("x", readBuffer*2+5)
+	var got []int64
+	if _, err := Lines(strings.NewReader("a\n"+long+"\nb\n"), readBuffer*3, func(offset int64, _ []byte) {
+		got = append(got, offset)
+	}); err != nil {
+		t.Fatalf("Lines() error = %v", err)
+	}
+
+	assertOffsets(t, got, 0, 2, int64(len(long))+3)
+}
+
 func collect(reader io.Reader, maxLine int) ([]string, int, error) {
 	var got []string
-	skipped, err := Lines(reader, maxLine, func(line []byte) {
+	skipped, err := Lines(reader, maxLine, func(_ int64, line []byte) {
 		got = append(got, string(line))
 	})
 	return got, skipped, err
+}
+
+func assertOffsets(t *testing.T, got []int64, want ...int64) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("offsets = %v, want %v", got, want)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("offsets = %v, want %v", got, want)
+		}
+	}
 }
 
 func assertLines(t *testing.T, got []string, want ...string) {

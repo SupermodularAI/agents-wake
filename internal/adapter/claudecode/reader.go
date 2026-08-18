@@ -1,14 +1,17 @@
 // Package claudecode derives safe terminal records from Claude Code JSONL
-// transcripts. It retains pending call metadata only until a matching result
-// arrives, and a result's derived outcome only until its matching call arrives,
-// and never persists transcript content.
+// transcripts. It retains pending call metadata only until the call terminates —
+// by a matching result, or by ADR-0015's staleness rule once its session has gone
+// quiet — and a result's derived outcome only until its matching call arrives, and
+// never persists transcript content.
 package claudecode
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"io"
+	"slices"
 	"time"
 
 	"github.com/SupermodularAI/agents-wake/internal/jsonl"
@@ -25,9 +28,40 @@ const maxLineBytes = 1024 * 1024
 
 // Result contains safe derived records plus collection health counters.
 type Result struct {
-	Records   []record.Record
+	Records []record.Record
+	// Malformed counts source lines this read had no transcript entry for: a line
+	// that does not parse, one whose entry id or timestamp is outside the domain, and
+	// one too long to deliver. It is doctor's drift signal.
+	//
+	// It is deliberately not the gate on the staleness rule. It is a broad counter —
+	// a real transcript's routine per-session bookkeeping lines (ai-title,
+	// last-prompt, queue-operation, which carry no uuid) are counted here on every
+	// machine — and a rule gated on it would never run outside a hand-written
+	// fixture. The gate is the narrower "could not be ruled out as a terminator"
+	// signal computed inside Read.
 	Malformed int
-	Pending   int
+	// Pending counts calls still unterminated when the scan finished that the
+	// staleness rule did not resolve — because their session is still inside the
+	// window, or because this read hit a line it could not rule out as their
+	// terminator and so could not apply the rule at all. It is a number that is not
+	// final yet rather than collection that was lost (ADR-0015), which is why doctor
+	// renders it as its own line and not as "collects nothing".
+	Pending int
+	// Interrupted counts calls this scan resolved by the staleness rule: their
+	// session went quiet past the threshold, so they were emitted as terminal records
+	// with outcome interrupted rather than buffered again forever. Those records are
+	// in Records and are also counted by Parsed upstream.
+	Interrupted int
+	// OpenSessions counts the sessions this transcript's entries belong to that have
+	// not closed under the staleness rule. When this read hit a line it could not rule
+	// out no session is reported closed, for the same reason no call is resolved.
+	OpenSessions int
+	// CursorFloor is the byte offset of the earliest line belonging to any session
+	// still open. A future incremental cursor (T020, T102) must not advance past it
+	// until that session closes: ADR-0023 §5 generalizes ADR-0015's "does not advance
+	// its cursor past [an unterminated call]" to the session grain. It is meaningful
+	// only when OpenSessions is positive.
+	CursorFloor int64
 	// Refused counts tool calls dropped because the primitive's own name failed
 	// validation — a Task block naming no subagent, or a name the name/scope
 	// grammar refuses. Fail closed (ADR-0007): nothing is written and no
@@ -51,13 +85,19 @@ type Resolver func(cwd string) (record.Hash, bool)
 // scope is a repository path fragment, so the reader cannot derive a persistable
 // name for one on its own (ADR-0020); a Namer with no key drops those references
 // rather than persisting an unkeyed digest of a path.
-func Read(reader io.Reader, resolve Resolver, names record.Namer) (Result, error) {
+//
+// stale carries ADR-0015's staleness rule (scan.stale_call_timeout and the scan's
+// clock) from the caller that owns config, so the threshold is never a constant
+// here. Its zero value buffers every unterminated call, which is what a caller that
+// cannot read the threshold must do.
+func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Staleness) (Result, error) {
 	if resolve == nil {
 		return Result{}, errors.New("missing repository resolver")
 	}
 
 	result := Result{}
 	pending := map[string]call{}
+	sessions := &SessionState{}
 	// earlyResults holds a tool_result whose tool_use line has not been read yet.
 	// Claude Code writes the pair out of order in a small fraction of transcripts,
 	// and a forward-only pairing loop drops the result and then buffers the call
@@ -72,14 +112,45 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer) (Result, error
 	// callResult), so buffering one before the call's repository consent is known
 	// retains nothing.
 	earlyResults := map[string]callResult{}
-	skipped, err := jsonl.Lines(reader, maxLineBytes, func(line []byte) {
+	// unreadable counts the lines this read could not use *and could not rule out* as
+	// the terminator of a buffered call, which is the only blindness that bears on the
+	// staleness rule: a line too long to be delivered, a line whose JSON leaves nothing
+	// to inspect, and a line the reader has no entry for that carries a tool_result
+	// block anyway.
+	//
+	// It is narrower than Malformed on purpose. A line the reader could inspect and
+	// found no tool_result in cannot have terminated anything, so nothing about any
+	// call's fate is hidden by it. That distinction is what keeps a real transcript's
+	// routine lines — bookkeeping shapes with no uuid, and entries whose message content
+	// is not the type this struct declares — out of the gate. A result payload cannot
+	// put a line here at all: ToolUseResult is captured raw, so its shape never costs
+	// the reader the entry that terminates a call.
+	unreadable := 0
+	skipped, err := jsonl.Lines(reader, maxLineBytes, func(offset int64, line []byte) {
 		var entry transcriptEntry
-		if unmarshalErr := json.Unmarshal(line, &entry); unmarshalErr != nil {
-			result.Malformed++
-			return
+		unmarshalErr := json.Unmarshal(line, &entry)
+		// Activity comes from every line that named a session and a time, not only from
+		// the ones this read has an entry for. The last thing a session wrote is what says
+		// it is still alive, and a bookkeeping line or a line whose JSON did not fit this
+		// struct was written by a live session just as much as an entry was. Taking
+		// liveness from entries alone understates it, and the staleness rule would then
+		// call a session that wrote something minutes ago dead — permanently, since
+		// ADR-0004 deduplicates the correction away.
+		//
+		// An id outside the token domain is not observed, matching call, which skips such
+		// an entry — so no call is buffered for a session this cannot judge. Observe
+		// ignores a zero timestamp, which is most of what these lines carry.
+		if sessionID, tokenErr := record.BoundedToken(entry.SessionID); tokenErr == nil {
+			sessions.Observe(sessionID, record.NormalizedTimestamp(entry.Timestamp), offset)
 		}
-		if !entry.valid() {
+		if unmarshalErr != nil || !entry.valid() {
+			// This read has no entry for the line, whether its JSON did not fit the struct or
+			// its identity is outside the domain. Either way nothing is derived from it — and
+			// it stops the staleness rule only if it could have been a terminator.
 			result.Malformed++
+			if !inspectable(unmarshalErr) || entry.carriesToolResult() {
+				unreadable++
+			}
 			return
 		}
 		if event, ok := entry.attributedRun(resolve, names); ok {
@@ -133,10 +204,77 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer) (Result, error
 	}
 	// A line too long to deliver is unusable in the same way a line that does not
 	// parse is: counted as malformed so doctor can report blindness, and nothing is
-	// synthesised from it — no call is opened, so no result can terminate one.
+	// synthesised from it — no call is opened, so no result can terminate one. It was
+	// never delivered, so its contents could not be ruled out either.
 	result.Malformed += skipped
+	unreadable += skipped
+	// A read that could not rule out one of its lines may not judge a session silent.
+	// That line may be the tool_result that terminated a buffered call, and it was not
+	// observed as activity either — so last activity is known-understated, not merely
+	// old. Concluding "interrupted" from that would infer a terminal outcome from
+	// blindness, which plan §3.3 forbids, and would write a permanent failure for a
+	// call that succeeded: ADR-0015 rejects upsert and ADR-0004 deduplicates, so no
+	// later scan can take it back. ADR-0015 scopes interrupted to a session that
+	// actually died; this reader cannot tell that apart from one line it cannot read.
+	//
+	// Disabling the rule for the whole read rather than for one session is the
+	// practical grain: internal/jsonl cannot attribute a line it never delivered to a
+	// session, so there is no session to exempt. The cost is a call that stays Pending
+	// and a cursor floor that does not move — a slower scan, never wrong data, which is
+	// the direction Staleness's zero value already takes.
+	//
+	// The gate is unreadable and not Malformed. Every real transcript carries lines
+	// Malformed counts that hide nothing — per-session bookkeeping (ai-title,
+	// last-prompt, queue-operation) has no uuid, so valid() rejects it, and a message's
+	// content arriving as a type this struct does not declare fails json.Unmarshal — and
+	// gating on that count switched ADR-0015's rule off on every machine while every
+	// hand-written fixture stayed green. Keeping this read's own two questions apart
+	// ("did I have an entry for that line" and "could that line have terminated a
+	// call") is what makes the rule run in production and stop only for blindness that
+	// could actually mislead it.
+	judged := stale
+	if unreadable > 0 {
+		judged = Staleness{}
+	}
+	interrupted := resolveStaleCalls(pending, sessions, judged)
+	result.Records = append(result.Records, interrupted...)
+	result.Interrupted = len(interrupted)
 	result.Pending = len(pending)
+	result.OpenSessions, result.CursorFloor = sessions.CursorFloor(judged)
 	return result, nil
+}
+
+// resolveStaleCalls emits the terminal record for every buffered call whose session
+// has closed, and removes it from the buffer so it is not counted as pending.
+//
+// The record reuses the id the call already derived from its own source event: one
+// unresolved call becomes at most one record, whether a tool_result terminates it or
+// this does, so a rescan re-derives the same id and the store deduplicates it
+// (ADR-0004, ADR-0002). ADR-0015 rejects upsert, so this is final — a tool_result
+// arriving after emission is deduplicated away, which is why the threshold errs long
+// (internal/config/keys.go).
+//
+// The order is sorted rather than the map's: iteration order is randomised, and two
+// scans of one transcript have to produce byte-identical store contents. The key is
+// the call's own tool_use timestamp, with the block id breaking a tie — not the
+// line's position in the file, which the buffer does not retain. That is a total
+// order, because the block id is unique per call: pending is keyed by it.
+func resolveStaleCalls(pending map[string]call, sessions *SessionState, stale Staleness) []record.Record {
+	resolved := make([]string, 0, len(pending))
+	for id, buffered := range pending {
+		if sessions.Closed(buffered.sessionID, stale) {
+			resolved = append(resolved, id)
+		}
+	}
+	slices.SortFunc(resolved, func(a, b string) int {
+		return cmp.Or(pending[a].timestamp.Compare(pending[b].timestamp), cmp.Compare(a, b))
+	})
+	records := make([]record.Record, 0, len(resolved))
+	for _, id := range resolved {
+		records = append(records, pending[id].interrupted())
+		delete(pending, id)
+	}
+	return records
 }
 
 type transcriptEntry struct {
@@ -239,6 +377,39 @@ func (entry transcriptEntry) valid() bool {
 	}
 	_, err := record.BoundedToken(entry.UUID)
 	return err == nil
+}
+
+// inspectable reports whether a decode that ended in err still left the entry worth
+// looking at. A type mismatch does: encoding/json records it and carries on with the
+// remaining keys, so a field this reader does not model arriving as some other type —
+// a message's content as a plain string, ordinary in real transcripts — costs the entry
+// but not the reader's view of the line. Anything else, a syntax error above all, leaves
+// nothing to look at.
+//
+// Whether such an entry should be salvaged rather than rejected is a separate
+// question, and a bigger one than the staleness rule: today the reader derives nothing
+// from it. This only decides whether it may still conclude a session went silent.
+func inspectable(err error) bool {
+	if err == nil {
+		return true
+	}
+	var mismatch *json.UnmarshalTypeError
+	return errors.As(err, &mismatch)
+}
+
+// carriesToolResult reports whether this entry holds a tool_result block, which is
+// the only thing that can terminate a buffered call. Read asks it about an entry
+// valid rejected: such an entry cannot be attributed, so a result it carries is a
+// call whose fate this read could not see, and the staleness rule must not run.
+//
+// A line the reader decoded and found no tool_result in is the opposite case — it is
+// unusable and harmless, and must not stop the rule. That is most of what valid
+// rejects on a real transcript: bookkeeping lines carrying a title, a queued
+// operation or the last prompt's leaf, none of them a transcript entry at all.
+func (entry transcriptEntry) carriesToolResult() bool {
+	return slices.ContainsFunc(entry.Message.Content, func(block contentBlock) bool {
+		return block.Type == "tool_result"
+	})
 }
 
 // callSeparator delimits the two halves of a tool call's source identity. It is a
@@ -411,8 +582,10 @@ func primitiveName(block contentBlock, names record.Namer) (record.Identifier, e
 }
 
 // complete pairs an accepted call with the result that terminated it. It takes the
-// already-derived callResult rather than the source entry and block, so the
-// forward-order and out-of-order paths share one derivation and one stamping rule.
+// already-derived callResult rather than the source entry and block, so every
+// terminal path — forward order, out of order, and the staleness rule — shares one
+// derivation and one stamping rule, and a call can only ever yield one shape of
+// record.
 func (call call) complete(result callResult) record.Record {
 	return record.Record{
 		SchemaVersion:  record.SchemaVersion,
@@ -431,6 +604,27 @@ func (call call) complete(result callResult) record.Record {
 		Invoker:        call.invoker,
 		Outcome:        result.outcome,
 	}
+}
+
+// interrupted is the terminal record for a call whose session closed without ever
+// producing a result (ADR-0015's staleness rule). outcome interrupted means "did not
+// finish" and is never a synthesised ok (ADR-0005); record.IsFailure already counts
+// it, so this newly makes that path live and error rates will move — the intended
+// effect of ADR-0015, not a regression.
+//
+// It goes through complete, like both result-terminated paths, so the id it carries
+// is the id the completed record would have carried (ADR-0004): a result arriving
+// after this record was written is deduplicated away rather than upserted, which is
+// the alternative ADR-0015 rejected.
+//
+// The timestamp is the call's own tool_use timestamp rather than the session's last
+// activity: the invocation grain's timestamp is when the call happened, and last
+// activity would make the same logical event serialise differently once unrelated
+// later lines are appended to the session. There is no result entry on this path, so
+// a result-derived timestamp is unavailable by construction.
+func (call call) interrupted() record.Record {
+	outcome := record.OutcomeInterrupted
+	return call.complete(callResult{timestamp: call.timestamp, outcome: &outcome})
 }
 
 func kindFor(name record.Identifier) record.Kind {
