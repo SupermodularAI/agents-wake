@@ -3,9 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -17,13 +15,9 @@ func init() { commands = append(commands, newInitCmd) }
 
 func newInitCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "init", Short: "Enable local Claude Code collection for this project", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		cwd, err := os.Getwd()
+		root, err := config.DiscoverRootForRegistration()
 		if err != nil {
 			return err
-		}
-		root := cwd
-		if output, gitErr := exec.Command("git", "-C", cwd, "rev-parse", "--show-toplevel").Output(); gitErr == nil {
-			root = strings.TrimSpace(string(output))
 		}
 		paths, err := config.ResolvePaths()
 		if err != nil {
