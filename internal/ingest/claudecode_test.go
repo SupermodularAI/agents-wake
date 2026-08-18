@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/adapter/claudecode"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 	"github.com/SupermodularAI/agents-wake/internal/store"
 )
@@ -26,11 +28,11 @@ func TestClaudeCodeIsIdempotent(t *testing.T) {
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
 	resolve := func(cwd string) (record.Hash, bool) { return repo, cwd == "/repo" }
 
-	first, err := ClaudeCode(strings.NewReader(input), resolve, names, destination)
+	first, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, destination)
 	if err != nil {
 		t.Fatalf("first ClaudeCode() error = %v", err)
 	}
-	second, err := ClaudeCode(strings.NewReader(input), resolve, names, destination)
+	second, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, destination)
 	if err != nil {
 		t.Fatalf("second ClaudeCode() error = %v", err)
 	}
@@ -49,7 +51,7 @@ func TestClaudeCodePersistsBothToolCallsFromOneSourceEntry(t *testing.T) {
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
 	resolve := func(cwd string) (record.Hash, bool) { return repo, cwd == "/repo" }
 
-	first, err := ClaudeCode(strings.NewReader(input), resolve, names, destination)
+	first, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, destination)
 	if err != nil {
 		t.Fatalf("first ClaudeCode() error = %v", err)
 	}
@@ -61,7 +63,7 @@ func TestClaudeCodePersistsBothToolCallsFromOneSourceEntry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
-	second, err := ClaudeCode(strings.NewReader(input), resolve, names, destination)
+	second, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, destination)
 	if err != nil {
 		t.Fatalf("second ClaudeCode() error = %v", err)
 	}
@@ -97,7 +99,7 @@ func TestClaudeCodeCountsARefusedSubagentCallWithoutWritingIt(t *testing.T) {
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
 	resolve := func(cwd string) (record.Hash, bool) { return repo, cwd == "/repo" }
 
-	result, err := ClaudeCode(strings.NewReader(input), resolve, names, destination)
+	result, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, destination)
 	if err != nil {
 		t.Fatalf("ClaudeCode() error = %v", err)
 	}
@@ -131,7 +133,7 @@ func TestClaudeCodePersistsNoPathShapedValue(t *testing.T) {
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
 	resolve := func(cwd string) (record.Hash, bool) { return repo, cwd == "/repo" }
 
-	result, err := ClaudeCode(strings.NewReader(input), resolve, names, destination)
+	result, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, destination)
 	if err != nil {
 		t.Fatalf("ClaudeCode() error = %v", err)
 	}
@@ -159,5 +161,48 @@ func TestClaudeCodePersistsNoPathShapedValue(t *testing.T) {
 	}
 	if !bytes.Contains(raw, []byte("reviewer")) {
 		t.Fatalf("events.ndjson dropped the safe half of a scoped reference: %s", raw)
+	}
+}
+
+func TestClaudeCodeWritesAnInterruptedCallExactlyOnce(t *testing.T) {
+	// A session killed mid-call leaves a tool_use with no tool_result. Once the
+	// staleness threshold has passed, the reader resolves it to outcome interrupted —
+	// and because the id comes from the source event rather than from the scan
+	// (ADR-0004), a second scan of the same transcript writes nothing more. That is
+	// what makes a retry, a rescan and two concurrent scans all safe.
+	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`
+	destination := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	repo := record.Hash("0123456789abcdef0123456789abcdef")
+	resolve := func(cwd string) (record.Hash, bool) { return repo, cwd == "/repo" }
+	stale := claudecode.Staleness{
+		Timeout: time.Hour,
+		Now:     time.Date(2026, 8, 13, 14, 0, 0, 0, time.UTC),
+	}
+
+	first, err := ClaudeCode(strings.NewReader(input), resolve, names, stale, destination)
+	if err != nil {
+		t.Fatalf("first ClaudeCode() error = %v", err)
+	}
+	if first.Written != 1 || first.Interrupted != 1 || first.Duplicate != 0 || first.Pending != 0 {
+		t.Fatalf("first ClaudeCode() = %+v", first)
+	}
+
+	second, err := ClaudeCode(strings.NewReader(input), resolve, names, stale, destination)
+	if err != nil {
+		t.Fatalf("second ClaudeCode() error = %v", err)
+	}
+	if second.Written != 0 || second.Duplicate != 1 || second.Interrupted != 1 {
+		t.Fatalf("second ClaudeCode() = %+v", second)
+	}
+
+	entries, err := destination.Entries(0)
+	if err != nil {
+		t.Fatalf("Entries() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("Entries() = %+v, want exactly one record", entries)
+	}
+	if outcome := entries[0].Record.Outcome; outcome == nil || *outcome != record.OutcomeInterrupted {
+		t.Fatalf("Outcome = %v, want interrupted", outcome)
 	}
 }

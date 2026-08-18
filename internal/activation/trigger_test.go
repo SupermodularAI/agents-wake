@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/SupermodularAI/agents-wake/internal/config"
 	"github.com/SupermodularAI/agents-wake/internal/health"
@@ -119,8 +120,13 @@ func TestScanCountersDistinguishAnUnreadableSourceFromACleanZero(t *testing.T) {
 		paths := testPaths(t)
 		claudeDir, root := inventoryFixture(t)
 		// Truncated to the tool_use line only: the call never terminates, so no
-		// terminal event is emitted (ADR-0015) and nothing is written.
-		if err := os.WriteFile(transcriptOf(claudeDir), []byte(`{"uuid":"entry-1","sessionId":"session-1","cwd":"`+root+`","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`), 0o600); err != nil {
+		// terminal event is emitted (ADR-0015) and nothing is written. The timestamp is
+		// generated rather than fixed so the session is inside the staleness window by
+		// construction — a call whose session has gone quiet past the threshold does
+		// resolve, to outcome interrupted, which is a terminal event and a different
+		// case (see TestIngestSurfacesPendingAndInterruptedCalls).
+		recent := time.Now().UTC().Format(time.RFC3339)
+		if err := os.WriteFile(transcriptOf(claudeDir), []byte(`{"uuid":"entry-1","sessionId":"session-1","cwd":"`+root+`","timestamp":"`+recent+`","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`), 0o600); err != nil {
 			t.Fatalf("WriteFile() error = %v", err)
 		}
 		if _, err := Init(paths, root, claudeDir, testExecutable(t)); err != nil {
