@@ -127,8 +127,25 @@ func Trigger(paths config.Paths, claudeDir string) (bool, error) {
 
 // Rebuild discards only the derived event spool before importing consented
 // history again. Project consent, repository identities, and hooks remain.
+//
+// The spool is dropped through the store rather than removed here, because the
+// removal has to be exclusive with a concurrent append: a hook-triggered scan that
+// holds the spool's descriptor open goes on writing into an inode this function
+// unlinked, and those bytes reach no reader (T004's bar: the store is readable while
+// being written). The store owns that lock, so the drop is its operation.
+//
+// It waits rather than refusing: an append's critical section is one buffered write,
+// and blocking keeps `wake ingest --rebuild` free of a failure mode a user would have
+// to retry past. It takes no other lock — not ingest.lock, which only Trigger holds
+// and whose non-blocking single-flight must keep letting a hook child skip and exit
+// 0 in silence (ADR-0016). Trigger takes ingest.lock before the spool lock and this
+// takes only the spool lock, so the two orders cannot cycle. The lock is released
+// before Ingest runs; holding it across the re-ingest would deadlock against that
+// ingest's own Append.
 func Rebuild(paths config.Paths, claudeDir string) (int, error) {
-	if err := os.Remove(filepath.Join(paths.DataDir, eventsFile)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	// The spool is dropped first, so a lock failure returns before the primitives
+	// snapshot is removed — never a half-dropped state.
+	if err := store.New(filepath.Join(paths.DataDir, eventsFile)).Discard(); err != nil {
 		return 0, err
 	}
 	if err := os.Remove(paths.PrimitivesFile); err != nil && !errors.Is(err, fs.ErrNotExist) {

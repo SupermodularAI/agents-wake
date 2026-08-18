@@ -2,13 +2,18 @@ package store
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/lockfile"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 )
 
@@ -336,6 +341,53 @@ func TestConcurrentAppendsOnOneStoreValueDoNotDuplicate(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Fatalf("Entries() count = %d, want 1", len(entries))
+	}
+}
+
+// A rebuild must not unlink the spool while an append is mid-write, so Discard takes
+// the same lock Append does. The holder below stands in for that append: it holds the
+// spool lock and checks, before releasing it, that the file is still there — which is
+// exactly what an unsynchronised os.Remove takes away.
+func TestDiscardWaitsForTheSpoolLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.ndjson")
+	appender := New(path)
+	if _, err := appender.Append([]record.Record{testRecord("one")}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+
+	held := make(chan struct{})
+	holderDone := make(chan error, 1)
+	var released atomic.Bool
+	go func() {
+		holderDone <- lockfile.WithLock(path+".lock", func() error {
+			close(held)
+			// The window a concurrent removal would race into. The sleep only widens
+			// the failure window; nothing this test asserts depends on it elapsing.
+			time.Sleep(100 * time.Millisecond)
+			if _, statErr := os.Stat(path); statErr != nil {
+				return fmt.Errorf("the spool was removed while this holder had the lock: %w", statErr)
+			}
+			released.Store(true)
+			return nil
+		})
+	}()
+	<-held
+
+	// A second Store value, because two flock holders in one process need two open
+	// file descriptions; one value would serialise on mu and prove nothing about the
+	// file lock.
+	if err := New(path).Discard(); err != nil {
+		t.Fatalf("Discard() error = %v", err)
+	}
+
+	if !released.Load() {
+		t.Error("Discard() returned while another holder still had the spool lock")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Stat(spool) = %v, want ErrNotExist — Discard left the spool behind", err)
+	}
+	if err := <-holderDone; err != nil {
+		t.Fatalf("holder WithLock() error = %v", err)
 	}
 }
 
