@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -1224,6 +1226,121 @@ func TestNameKeyIsAStableSubkeyOfTheSaltAndNotTheSalt(t *testing.T) {
 	}
 	if string(other.NameKey()) == string(key) {
 		t.Fatal("NameKey() does not depend on the salt")
+	}
+}
+
+// The three keyed digests this package derives, pinned against the construction
+// written out longhand. T119 moved the HMAC step into internal/keyeddigest, and
+// the one thing that refactor may not do is change a byte: an id or a match
+// digest that shifts silently stops resolving every entry already in
+// projects.json, and a shifted NameKey re-keys every scope digest already in the
+// spool (ADR-0019 §3, §8, ADR-0020, ADR-0022).
+//
+// crypto/hmac is spelled out here rather than calling the shared helper on
+// purpose: recomputing the value through the helper would assert only that the
+// helper equals itself.
+func TestTheKeyedDigestSitesMatchTheConstructionWrittenLonghand(t *testing.T) {
+	paths := testPaths(t)
+	repos := openRepos(t, paths)
+	salt, err := os.ReadFile(paths.SaltFile)
+	if err != nil {
+		t.Fatalf("reading the salt: %v", err)
+	}
+
+	longhand := func(key, data []byte) []byte {
+		mac := hmac.New(sha256.New, key)
+		if _, writeErr := mac.Write(data); writeErr != nil {
+			t.Fatalf("writing to the MAC: %v", writeErr)
+		}
+		return mac.Sum(nil)
+	}
+
+	// NameKey is the raw, unencoded, untruncated MAC: record.NewNamer consumes it
+	// as an HMAC key, so encoding it would be a different value.
+	if got, want := repos.NameKey(), longhand(salt, []byte(nameKeyDomain)); !hmac.Equal(got, want) {
+		t.Errorf("NameKey() = %x, want %x", got, want)
+	}
+
+	const root = "/some/consented/root"
+	if got, want := repos.hashRoot(root), hex.EncodeToString(longhand(salt, []byte(root)))[:idHexLen]; got != want {
+		t.Errorf("hashRoot() = %q, want %q", got, want)
+	}
+
+	// matchMAC's NUL-separated input is rebuilt rather than reused: the digest is
+	// persisted in projects.json, so a change to what it covers has to be a
+	// deliberate edit here as well as there.
+	entry := projectEntry{
+		Root:            root,
+		Aliases:         []string{"/private/some/consented/root"},
+		CaseInsensitive: true,
+	}
+	buf := append([]byte(matchMACDomain), 0)
+	buf = append(buf, 'f', 0)
+	for _, spelling := range entry.spellings() {
+		buf = append(buf, spelling...)
+		buf = append(buf, 0)
+	}
+	got := repos.matchMAC(entry)
+	if want := hex.EncodeToString(longhand(salt, buf)); got != want {
+		t.Errorf("matchMAC() = %q, want %q", got, want)
+	}
+	// Deliberately not truncated, unlike the id.
+	if len(got) != sha256.Size*2 {
+		t.Errorf("matchMAC() is %d characters, want the full %d", len(got), sha256.Size*2)
+	}
+}
+
+// A table whose digests were derived by the construction written out longhand —
+// which is what every build before T119 wrote — still resolves.
+//
+// readProjects verifies each entry's id and match digest against freshly derived
+// values and refuses the entry when either differs (trustworthy, ADR-0019 §7), so
+// this is the whole compatibility question in one assertion: had the refactor
+// shifted a digest by one byte, the entry would be dropped, the directory would
+// hash as itself with Matched false, and every repository already in projects.json
+// would silently stop being recognised on upgrade.
+func TestATableDigestedByTheLonghandConstructionStillResolves(t *testing.T) {
+	p := testPaths(t)
+	// Opened once so the salt exists, then read directly: the expected digests must
+	// come from the salt rather than from the code under test.
+	openRepos(t, p)
+	salt, err := os.ReadFile(p.SaltFile)
+	if err != nil {
+		t.Fatalf("reading the salt: %v", err)
+	}
+	longhand := func(data []byte) []byte {
+		mac := hmac.New(sha256.New, salt)
+		if _, writeErr := mac.Write(data); writeErr != nil {
+			t.Fatalf("writing to the MAC: %v", writeErr)
+		}
+		return mac.Sum(nil)
+	}
+
+	const root = "/a/longhand"
+	id := hex.EncodeToString(longhand([]byte(root)))[:idHexLen]
+	buf := append([]byte(matchMACDomain), 0, 0)
+	buf = append(buf, root...)
+	buf = append(buf, 0)
+	mac := hex.EncodeToString(longhand(buf))
+
+	writeProjectsJSON(t, p, fmt.Sprintf(`{
+  "version": 1,
+  "projects": [
+    {"id": %q, "label": "longhand", "root": %q, "case_insensitive": false, "match_mac": %q}
+  ]
+}
+`, id, root, mac))
+
+	r := openRepos(t, p)
+	if dropped := r.DroppedEntries(); dropped != 0 {
+		t.Fatalf("DroppedEntries() = %d, want 0 — this build refused a table the longhand construction signed", dropped)
+	}
+	identity, err := r.Identify(root + "/pkg")
+	if err != nil {
+		t.Fatalf("Identify() error = %v", err)
+	}
+	if !identity.Matched || identity.ID != id {
+		t.Fatalf("Identify() = %+v, want the recorded id %s matched", identity, id)
 	}
 }
 
