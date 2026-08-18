@@ -86,10 +86,7 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer) (Result, error
 					continue
 				}
 				delete(pending, block.ToolUseID)
-				event, ok := pendingCall.complete(entry, block)
-				if ok {
-					result.Records = append(result.Records, event)
-				}
+				result.Records = append(result.Records, pendingCall.complete(resultOf(entry, block)))
 			}
 		}
 	})
@@ -143,6 +140,24 @@ type input struct {
 
 type toolResult struct {
 	Interrupted bool `json:"interrupted"`
+}
+
+// callResult is the whole of what a tool_result line contributes to a record: the
+// timestamp complete stamps and the outcome outcomeFor derives. It holds the
+// derived enum rather than the source fields it came from, so the reader can
+// retain a result whose tool_use has not arrived yet without holding any
+// transcript string at all — not a denial kind, not a tool name (ADR-0007,
+// plan §4.2).
+type callResult struct {
+	timestamp time.Time
+	outcome   *record.Outcome
+}
+
+// resultOf derives the terminal half of a call from the tool_result entry and
+// block, at the moment the line is read. Both orders of the pair go through this
+// one function, so line order cannot change a derived outcome.
+func resultOf(entry transcriptEntry, block contentBlock) callResult {
+	return callResult{timestamp: entry.Timestamp, outcome: outcomeFor(entry, block)}
 }
 
 // valid bounds the entry id to the opaque-token domain rather than only requiring
@@ -328,12 +343,14 @@ func primitiveName(block contentBlock, names record.Namer) (record.Identifier, e
 	return record.BoundedIdentifier(block.Name)
 }
 
-func (call call) complete(entry transcriptEntry, block contentBlock) (record.Record, bool) {
-	outcome := outcomeFor(entry, block)
+// complete pairs an accepted call with the result that terminated it. It takes the
+// already-derived callResult rather than the source entry and block, so the
+// forward-order and out-of-order paths share one derivation and one stamping rule.
+func (call call) complete(result callResult) record.Record {
 	return record.Record{
 		SchemaVersion:  record.SchemaVersion,
 		EventID:        call.eventID,
-		Timestamp:      record.NormalizedTimestamp(entry.Timestamp),
+		Timestamp:      record.NormalizedTimestamp(result.timestamp),
 		Harness:        harness,
 		HarnessVersion: call.version,
 		SessionID:      call.sessionID,
@@ -345,8 +362,8 @@ func (call call) complete(entry transcriptEntry, block contentBlock) (record.Rec
 		ViaAgent:       call.viaAgent,
 		Model:          call.model,
 		Invoker:        call.invoker,
-		Outcome:        outcome,
-	}, true
+		Outcome:        result.outcome,
+	}
 }
 
 func kindFor(name record.Identifier) record.Kind {
