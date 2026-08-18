@@ -114,37 +114,42 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 	earlyResults := map[string]callResult{}
 	// unreadable counts the lines this read could not use *and could not rule out* as
 	// the terminator of a buffered call, which is the only blindness that bears on the
-	// staleness rule. Three shapes qualify: a line that does not parse at all, a line
-	// too long to be delivered, and a line that parses but whose entry identity is
-	// unusable while it still carries a tool_result block.
+	// staleness rule: a line too long to be delivered, a line whose JSON leaves nothing
+	// to inspect, and a line the reader has no entry for that carries a tool_result
+	// block anyway.
 	//
-	// It is narrower than Malformed on purpose. A line that parses is inspectable: if
-	// it holds no tool_result it cannot have terminated anything, so nothing about any
+	// It is narrower than Malformed on purpose. A line the reader could inspect and
+	// found no tool_result in cannot have terminated anything, so nothing about any
 	// call's fate is hidden by it. That distinction is what keeps a real transcript's
-	// routine bookkeeping lines out of the gate.
+	// routine lines — bookkeeping shapes with no uuid, and entries whose message
+	// content or toolUseResult is not the type this struct declares — out of the gate.
 	unreadable := 0
 	skipped, err := jsonl.Lines(reader, maxLineBytes, func(offset int64, line []byte) {
 		var entry transcriptEntry
-		if unmarshalErr := json.Unmarshal(line, &entry); unmarshalErr != nil {
-			result.Malformed++
-			unreadable++
-			return
+		unmarshalErr := json.Unmarshal(line, &entry)
+		// Activity comes from every line that named a session and a time, not only from
+		// the ones this read has an entry for. The last thing a session wrote is what says
+		// it is still alive, and a bookkeeping line or a line whose JSON did not fit this
+		// struct was written by a live session just as much as an entry was. Taking
+		// liveness from entries alone understates it, and the staleness rule would then
+		// call a session that wrote something minutes ago dead — permanently, since
+		// ADR-0004 deduplicates the correction away.
+		//
+		// An id outside the token domain is not observed, matching call, which skips such
+		// an entry — so no call is buffered for a session this cannot judge. Observe
+		// ignores a zero timestamp, which is most of what these lines carry.
+		if sessionID, tokenErr := record.BoundedToken(entry.SessionID); tokenErr == nil {
+			sessions.Observe(sessionID, record.NormalizedTimestamp(entry.Timestamp), offset)
 		}
-		if !entry.valid() {
+		if unmarshalErr != nil || !entry.valid() {
+			// This read has no entry for the line, whether its JSON did not fit the struct or
+			// its identity is outside the domain. Either way nothing is derived from it — and
+			// it stops the staleness rule only if it could have been a terminator.
 			result.Malformed++
-			// The entry could not be attributed, so a result it carries could not terminate
-			// the call it names — and the reader can see whether it carries one.
-			if entry.carriesToolResult() {
+			if !inspectable(unmarshalErr) || entry.carriesToolResult() {
 				unreadable++
 			}
 			return
-		}
-		// Every valid entry is activity, whether or not it carries a tool call: the last
-		// thing a session wrote is what says it is still alive. An id outside the token
-		// domain is not observed, matching call, which skips such an entry — so no call
-		// can be buffered for a session this cannot judge.
-		if sessionID, tokenErr := record.BoundedToken(entry.SessionID); tokenErr == nil {
-			sessions.Observe(sessionID, record.NormalizedTimestamp(entry.Timestamp), offset)
 		}
 		if event, ok := entry.attributedRun(resolve, names); ok {
 			result.Records = append(result.Records, event)
@@ -218,11 +223,13 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 	//
 	// The gate is unreadable and not Malformed. Every real transcript carries lines
 	// Malformed counts that hide nothing — per-session bookkeeping (ai-title,
-	// last-prompt, queue-operation) has no uuid, so valid() rejects it — and gating on
-	// that count switched ADR-0015's rule off on every machine while every test fixture
-	// stayed green. Keeping this read's own two questions apart ("did I have an entry
-	// for that line" and "could that line have terminated a call") is what makes the
-	// rule run in production and stop only for blindness that could actually mislead it.
+	// last-prompt, queue-operation) has no uuid, so valid() rejects it, and a message's
+	// content or a toolUseResult arriving as a type this struct does not declare fails
+	// json.Unmarshal — and gating on that count switched ADR-0015's rule off on every
+	// machine while every hand-written fixture stayed green. Keeping this read's own two
+	// questions apart ("did I have an entry for that line" and "could that line have
+	// terminated a call") is what makes the rule run in production and stop only for
+	// blindness that could actually mislead it.
 	judged := stale
 	if unreadable > 0 {
 		judged = Staleness{}
@@ -368,6 +375,24 @@ func (entry transcriptEntry) valid() bool {
 	}
 	_, err := record.BoundedToken(entry.UUID)
 	return err == nil
+}
+
+// inspectable reports whether a decode that ended in err still left the entry worth
+// looking at. A type mismatch does: encoding/json records it and carries on with the
+// remaining keys, so a field this reader does not model arriving as some other type —
+// a message's content as a plain string, a toolUseResult as a string or an array, both
+// ordinary in real transcripts — costs the entry but not the reader's view of the
+// line. Anything else, a syntax error above all, leaves nothing to look at.
+//
+// Whether such an entry should be salvaged rather than rejected is a separate
+// question, and a bigger one than the staleness rule: today the reader derives nothing
+// from it. This only decides whether it may still conclude a session went silent.
+func inspectable(err error) bool {
+	if err == nil {
+		return true
+	}
+	var mismatch *json.UnmarshalTypeError
+	return errors.As(err, &mismatch)
 }
 
 // carriesToolResult reports whether this entry holds a tool_result block, which is
