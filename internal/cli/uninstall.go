@@ -19,9 +19,12 @@ var selfPath = os.Executable
 func init() { commands = append(commands, newUninstallCmd) }
 
 func newUninstallCmd() *cobra.Command {
+	// Short is one row of `wake --help`, so it stays inside the table every other row
+	// fits rather than wrapping the whole listing; the detail is in the disclosure the
+	// command prints, which the user reads at the moment it matters.
 	return &cobra.Command{
 		Use:   "uninstall",
-		Short: "Remove Wake entirely: the Claude Code integration, all local data and configuration, and this binary",
+		Short: "Remove Wake entirely, including this binary",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			paths, err := config.ResolvePaths()
@@ -53,14 +56,42 @@ func newUninstallCmd() *cobra.Command {
 					"%s  Wake's own hook entry only; your other hooks are left as they are\n"+
 					"%s  all collected activity and the local project map\n"+
 					"%s  configuration and the local identity salt\n"+
-					"%s  this binary\n"+
-					"To keep your configuration, use `wake remove --purge` instead.\n",
+					"%s  this binary\n",
 				plan.SettingsFile, plan.DataDir, plan.ConfigDir, plan.Executable,
 			); discloseErr != nil {
 				return discloseErr
 			}
+			// A fifth path only when there is one: the plan deletes the file a link
+			// resolves to, so an installation reached through a link has the link
+			// deleted as well, and ADR-0010's disclosure names everything that goes.
+			// Its own line rather than folded into the one above, so the four paths
+			// every run prints stay the same four.
+			if plan.Launcher != "" {
+				if _, discloseErr := fmt.Fprintf(cmd.OutOrStdout(), "%s  the link this command was invoked through\n", plan.Launcher); discloseErr != nil {
+					return discloseErr
+				}
+			}
+			if _, discloseErr := fmt.Fprintln(cmd.OutOrStdout(), "To keep your configuration, use `wake remove --purge` instead."); discloseErr != nil {
+				return discloseErr
+			}
 			removed, err := plan.Remove()
 			if err != nil {
+				// What the removal managed before it stopped, printed before the error
+				// itself: the disclosure has already named four paths as about to be
+				// deleted, so an error on its own leaves the reader unable to tell which
+				// of them survived. `removed` is the one step the sequence can still
+				// report through a failure, and it is never claimed in the negative —
+				// a data root that failed part way through leaves removed false with
+				// the hook entry already gone, so the other branch says only what it
+				// knows. The binary is always still there, because activation removes
+				// it last, which is what makes the retry possible.
+				report := "The removal stopped part way; whatever it had not reached is still in place."
+				if removed {
+					report = "Removed Wake's Claude Code integration, then the removal stopped part way."
+				}
+				if _, printErr := fmt.Fprintf(cmd.OutOrStdout(), "%s This binary was not removed — run `wake uninstall` again once the reported problem is fixed.\n", report); printErr != nil {
+					return printErr
+				}
 				return err
 			}
 			if removed {
@@ -71,7 +102,12 @@ func newUninstallCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_, err = fmt.Fprintln(cmd.OutOrStdout(), "Removed Wake's local data, configuration and binary. A later `wake init` is a fresh install with a new identity salt.")
+			// The state it leaves behind, not a list of removals it performed: on a
+			// machine that was never `init`ed there is no data root and no config root
+			// to remove, and "Removed …" would be claiming work that never happened.
+			// "are gone" is true either way, which is the only thing the user is
+			// checking here.
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), "Wake's local data, configuration and binary are gone. A later `wake init` is a fresh install with a new identity salt.")
 			return err
 		},
 	}
