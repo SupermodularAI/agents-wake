@@ -65,8 +65,11 @@ func Init(paths config.Paths, root, claudeDir, executable string, full bool) (in
 	if err != nil {
 		return 0, err
 	}
+	// The refusals the settings file's shape decides say what the file's problem is
+	// and stop there, so the step that clears them is named here, by the command the
+	// user actually ran.
 	if settingsErr := checkSettingsShape(claudeDir); settingsErr != nil {
-		return 0, settingsErr
+		return 0, withSettingsFix(settingsErr, "then run wake init again")
 	}
 	repos, err := config.OpenRepos(paths)
 	if err != nil {
@@ -98,7 +101,10 @@ func Init(paths config.Paths, root, claudeDir, executable string, full bool) (in
 	}
 	installed, err := installHooks(paths, claudeDir, command)
 	if err != nil {
-		return 0, err
+		// Wrapped for the same reason as the pre-check above: a file that changed
+		// shape in between is refused by the write's own read, and that refusal needs
+		// the same next step attached.
+		return 0, withSettingsFix(err, "then run wake init again")
 	}
 	counters := health.New(paths.HealthFile)
 	if recordErr := counters.RecordHooks(health.Hooks{At: time.Now().UTC(), Installed: installed}); recordErr != nil {
