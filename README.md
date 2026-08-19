@@ -69,7 +69,9 @@ wake init --full        # Consent and import existing history now
 wake ingest             # Re-scan consented history
 wake ingest --rebuild   # Rebuild the derived event store
 wake doctor             # Inspect collection and hook health
-wake remove             # Remove Wake's Claude Code integration
+wake remove             # Remove the Claude Code integration; keep local data
+wake remove --purge     # ...and delete collected data; ~/.config/wake is kept
+wake uninstall          # Remove everything, including ~/.config/wake and the binary
 ```
 
 | Command | Purpose |
@@ -80,7 +82,8 @@ wake remove             # Remove Wake's Claude Code integration
 | `wake init --full` | Enable collection and import existing history now. |
 | `wake ingest` | Import activity for consented projects. |
 | `wake doctor` | Show collection and hook health. |
-| `wake remove` | Remove Wake-owned Claude Code hooks. |
+| `wake remove` | Remove Wake-owned Claude Code hooks. `--purge` also deletes collected data; `~/.config/wake` is kept either way, so a later `wake init` keeps the same repository identity. |
+| `wake uninstall` | Irreversible. Removes the integration, all collected data, `~/.config/wake` (configuration and the identity salt) and the binary itself — plus the symlink you invoked it through, if the `wake` on your PATH is a link. It prints every path before deleting anything, and removes nothing at all if it cannot take its hook entry out of `settings.json` first. |
 
 ## Privacy And Enterprise Use
 
