@@ -49,9 +49,11 @@ wake report
 current project and installs Wake-owned Claude Code session hooks, and
 collection starts from that moment. Existing hooks are preserved.
 
-Existing history is not imported by default. `wake init --full` imports this
-project's Claude Code history in the same call, and `wake ingest` does it
-afterwards for a project that is already consented.
+Existing history is not imported by default, and nothing imports it later on
+its own: the session hooks collect only what happens after `wake init`. When
+you want the history, ask for it — `wake init --full` imports this project's
+Claude Code history in the same call, and `wake ingest` does it afterwards for
+a project that is already consented.
 
 Open the local dashboard when you want a browser view:
 
@@ -88,7 +90,8 @@ certification; organizations should still apply their own security and policy
 review. Its default design keeps the sensitive path local:
 
 - Collection requires explicit, per-project consent. A fresh install collects
-  nothing.
+  nothing, and consent starts collection from the moment it is given: importing
+  a project's existing history is a separate, explicit request.
 - Wake reads Claude Code transcripts to derive measurements, but it never
   persists prompts, tool arguments, code, repository paths, or repository
   labels in its event records.
