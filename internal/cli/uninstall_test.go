@@ -132,7 +132,7 @@ func TestUninstallDisclosesEveryPathBeforeRemovingAnything(t *testing.T) {
 	if err != nil {
 		t.Fatalf("uninstall returned an error: %v\n%s", err, out)
 	}
-	result := strings.Index(out, "Removed Wake's local data")
+	result := strings.Index(out, "are gone")
 	if result < 0 {
 		t.Fatalf("output has no result line:\n%s", out)
 	}
@@ -285,22 +285,142 @@ func TestUninstallCommandHoldsNoRemovalLogic(t *testing.T) {
 
 // Acceptance: a failure part way through surfaces and leaves the binary in place, so
 // the user can retry `wake uninstall` rather than being left with an uninvokable tool.
-func TestUninstallReportsAFailureAndKeepsTheBinary(t *testing.T) {
+//
+// A settings document this build refuses to edit is refused before the disclosure, not
+// after: the disclosure is worded as a deletion that is about to happen, and printing it
+// ahead of a run that removes nothing is what left the user unable to tell whether part
+// of it happened. So this asserts the opposite of what a disclosure test does — the
+// promise was never made, and the refusal says so.
+func TestUninstallRefusesASettingsFileItWillNotEditWithoutPromisingADeletion(t *testing.T) {
 	paths, _ := isolateUnderOneHome(t)
 	binary := pointSelfPathAtAThrowawayBinary(t)
-	// A settings document this build refuses to edit fails the first step.
 	writeFixture(t, filepath.Join(claudeHome(t), "settings.json"), "null")
 	writeFixture(t, paths.ConfigFile, "ui.default_window = \"7d\"\n")
+	writeFixture(t, filepath.Join(paths.DataDir, "events.ndjson"), "seeded")
 
 	out, err := run(t, "uninstall")
 
 	if err == nil {
 		t.Fatalf("uninstall returned nil, want the failure surfaced; output:\n%s", out)
 	}
-	if !strings.Contains(out, paths.ConfigDir) {
-		t.Errorf("the disclosure was not printed before the failure:\n%s", out)
+	message := err.Error()
+	if strings.Contains(message, "wake init") {
+		t.Errorf("refusal = %q; the removal command must not send the user to the command that installs", message)
+	}
+	if !strings.Contains(message, "nothing has been removed") {
+		t.Errorf("refusal = %q, want it to say plainly that nothing has been removed", message)
+	}
+	if strings.Contains(out, "Wake will permanently delete") {
+		t.Errorf("the disclosure promised a deletion that never happened:\n%s", out)
+	}
+	for _, path := range []string{paths.DataDir, paths.ConfigDir, binary} {
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Errorf("Stat(%s) error = %v; the refusal must leave everything in place", path, statErr)
+		}
+	}
+}
+
+// A failure after the disclosure is a different case: something may already be gone, so
+// the run reports what it managed before it stopped rather than leaving the reader to
+// guess which of the four disclosed paths survived.
+func TestUninstallReportsWhatItManagedBeforeAFailure(t *testing.T) {
+	paths, _ := isolateUnderOneHome(t)
+	binary := pointSelfPathAtAThrowawayBinary(t)
+	writeFixture(t, filepath.Join(claudeHome(t), "settings.json"), settingsWith(userHookGroup, wakeHookGroup))
+	writeFixture(t, filepath.Join(paths.DataDir, "events.ndjson"), "seeded")
+	writeFixture(t, paths.ConfigFile, "ui.default_window = \"7d\"\n")
+	// The config root cannot be unlinked, so the removal fails at its second step —
+	// after the hook entry and the data root have already gone.
+	parent := filepath.Dir(paths.ConfigDir)
+	if err := os.Chmod(parent, 0o500); err != nil {
+		t.Fatalf("Chmod(%s) error = %v", parent, err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(parent, 0o700); err != nil {
+			t.Errorf("restoring %s: %v", parent, err)
+		}
+	})
+
+	out, err := run(t, "uninstall")
+
+	if err == nil {
+		t.Fatalf("uninstall returned nil, want the failure surfaced; output:\n%s", out)
+	}
+	if !strings.Contains(out, "Removed Wake's Claude Code integration") {
+		t.Errorf("output does not report the step that did succeed:\n%s", out)
+	}
+	if !strings.Contains(out, "stopped") {
+		t.Errorf("output does not say the removal stopped part way:\n%s", out)
+	}
+	if !strings.Contains(out, "run `wake uninstall` again") {
+		t.Errorf("output does not name the retry:\n%s", out)
 	}
 	if _, statErr := os.Stat(binary); statErr != nil {
 		t.Errorf("Stat(the binary) error = %v; a failed uninstall must leave it in place", statErr)
+	}
+}
+
+// The success line reports the state it leaves behind rather than asserting four
+// removals, because a machine that was never `init`ed has less than four to remove and
+// "Removed …" would be claiming work that never happened.
+func TestUninstallSuccessLineClaimsNoRemovalThatDidNotHappen(t *testing.T) {
+	paths, _ := isolateUnderOneHome(t)
+	pointSelfPathAtAThrowawayBinary(t)
+
+	out, err := run(t, "uninstall")
+
+	if err != nil {
+		t.Fatalf("uninstall returned an error: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "Removed Wake's local data") {
+		t.Errorf("output claims removals that did not happen on a machine with neither root:\n%s", out)
+	}
+	if !strings.Contains(out, "are gone") {
+		t.Errorf("output does not report the state it leaves behind:\n%s", out)
+	}
+	absent(t, paths.DataDir)
+}
+
+// The `Short` string is one row of `wake --help`, so it has to fit the table every other
+// row fits.
+func TestUninstallShortFitsTheHelpTable(t *testing.T) {
+	for _, command := range commands {
+		cmd := command()
+		if cmd.Name() != "uninstall" {
+			continue
+		}
+		// 80 columns minus the width `wake --help` spends on the command name and its
+		// padding, which cobra sets from the longest name in the table.
+		if limit := 60; len(cmd.Short) > limit {
+			t.Errorf("Short is %d characters, want at most %d so the help table stays aligned: %q", len(cmd.Short), limit, cmd.Short)
+		}
+		return
+	}
+	t.Fatal("no uninstall command is registered")
+}
+
+// An installation reached through a link on PATH: the link is disclosed as a fifth path
+// and removed with the file it points at, because a link left behind is a `wake` on PATH
+// that resolves to nothing.
+func TestUninstallDisclosesAndRemovesALinkOnPath(t *testing.T) {
+	isolateUnderOneHome(t)
+	binary := pointSelfPathAtAThrowawayBinary(t)
+	link := filepath.Join(filepath.Dir(binary), "wake-on-path")
+	if err := os.Symlink(binary, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	selfPath = func() (string, error) { return link, nil }
+
+	out, err := run(t, "uninstall")
+
+	if err != nil {
+		t.Fatalf("uninstall returned an error: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, link) {
+		t.Errorf("the disclosure never names the link it will remove:\n%s", out)
+	}
+	absent(t, binary)
+	if _, lstatErr := os.Lstat(link); !errors.Is(lstatErr, fs.ErrNotExist) {
+		t.Errorf("Lstat(%s) error = %v; the link is still on PATH pointing at nothing", link, lstatErr)
 	}
 }
