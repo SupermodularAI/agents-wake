@@ -31,10 +31,15 @@ To build from source, use Go 1.25 or newer:
 ```sh
 git clone https://github.com/SupermodularAI/agents-wake.git
 cd agents-wake
-make build
-mkdir -p ~/.local/bin
-install -m 0755 dist/wake ~/.local/bin/wake
+make install
 ```
+
+`make install` builds and installs to `~/.local/bin` — the same place and
+`WAKE_INSTALL_DIR` override the shell installer above uses — and tells you if
+that directory isn't on your `PATH`. `make build` alone only builds
+`dist/wake`; it isn't on `PATH`, so running `wake` from outside the repo
+without `make install` (or `go install ./cmd/wake`, which puts it in
+`$(go env GOPATH)/bin` instead) fails with a plain "command not found".
 
 ## Use
 
@@ -45,9 +50,24 @@ wake init
 wake report
 ```
 
+`wake report` prints usage for the primitives you've used. Add `--unused` to
+see primitives that are available but never invoked, or both flags together
+for the full picture. A bare `--unused` swaps the OVERVIEW too — invocation
+counts and outcomes describe activity, so the overview above an unused list
+is instead a count of unused primitives by kind. In a terminal the tables are
+lime-bordered and colored; piped or redirected — a script, another program,
+an agent reading the output — it's plain ASCII text instead, so nothing
+downstream ever has to parse around a color code.
+
 `wake init` explains what it will change before doing so. It consents the
 current project and installs Wake-owned Claude Code session hooks, and
 collection starts from that moment. Existing hooks are preserved.
+
+On a terminal, `init`, `ingest`, `remove`, `uninstall`, `report` and `serve`
+all show a lime spinner while their real work runs — importing history,
+rebuilding the event store, refreshing the primitive inventory, removing the
+integration — and confirm with a lime checkmark. Piped or redirected, every
+one of them is the same plain, deterministic text instead.
 
 Existing history is not imported by default, and nothing imports it later on
 its own: the session hooks collect only what happens after `wake init`. When
@@ -76,7 +96,9 @@ wake uninstall          # Remove everything, including ~/.config/wake and the bi
 
 | Command | Purpose |
 | --- | --- |
-| `wake report` | Print local activity in the terminal. |
+| `wake report` | Print local activity in the terminal: the primitives you've used. |
+| `wake report --unused` | ...swap in the primitives available but never invoked. |
+| `wake report --usage --unused` | ...both sections. |
 | `wake serve` | Open the local dashboard. |
 | `wake init` | Enable collection for the current project. |
 | `wake init --full` | Enable collection and import existing history now. |

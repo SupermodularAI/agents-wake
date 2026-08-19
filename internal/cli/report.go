@@ -9,6 +9,7 @@ import (
 	"github.com/SupermodularAI/agents-wake/internal/inventory"
 	"github.com/SupermodularAI/agents-wake/internal/report"
 	"github.com/SupermodularAI/agents-wake/internal/store"
+	"github.com/SupermodularAI/agents-wake/internal/style"
 )
 
 func init() { commands = append(commands, newReportCmd) }
@@ -21,6 +22,7 @@ func newReportCmd() *cobra.Command {
 		Short: "Show current local activity in the terminal",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			pretty := ttyOutput(cmd)
 			paths, err := config.ResolvePaths()
 			if err != nil {
 				return err
@@ -31,10 +33,14 @@ func newReportCmd() *cobra.Command {
 			}
 			events := store.New(filepath.Join(paths.DataDir, "events.ndjson"))
 			primitives := inventory.New(paths.PrimitivesFile)
-			if err := primitives.Refresh(events, inventory.ClaudeCodeInScope(scope, names)); err != nil {
-				return err
+			refreshErr := style.WithSpinner(cmd.OutOrStdout(), pretty, "Refreshing primitive inventory", func() error {
+				return primitives.Refresh(events, inventory.ClaudeCodeInScope(scope, names))
+			})
+			if refreshErr != nil {
+				return refreshErr
 			}
-			return report.Print(cmd.OutOrStdout(), events, primitives, report.Options{Usage: usage, Unused: unused})
+			options := report.Options{Usage: usage, Unused: unused, Pretty: pretty}
+			return report.Print(cmd.OutOrStdout(), events, primitives, options)
 		},
 	}
 	cmd.Flags().BoolVar(&usage, "usage", false, "show only primitive activity")

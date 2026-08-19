@@ -8,6 +8,7 @@ import (
 
 	"github.com/SupermodularAI/agents-wake/internal/activation"
 	"github.com/SupermodularAI/agents-wake/internal/config"
+	"github.com/SupermodularAI/agents-wake/internal/style"
 )
 
 // selfPath is how the command finds the binary it will unlink. A variable for the
@@ -27,6 +28,7 @@ func newUninstallCmd() *cobra.Command {
 		Short: "Remove Wake entirely, including this binary",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			pretty := ttyOutput(cmd)
 			paths, err := config.ResolvePaths()
 			if err != nil {
 				return err
@@ -50,14 +52,19 @@ func newUninstallCmd() *cobra.Command {
 			// re-joined literal, so the disclosure cannot drift from what gets deleted.
 			// It says what happens to the data as well as where it is (ADR-0010, and
 			// ADR-0019 §3's "the tool says what happens to the data"), and it names only
-			// Wake's own locations — no consented repository root or label.
+			// Wake's own locations — no consented repository root or label. Each path is
+			// dimmed rather than plain (style.Paint no-ops when pretty is false, so a
+			// test asserting an exact path never sees this) for the same reason init
+			// dims its own list: the sentence around a path is what deserves the eye.
 			if _, discloseErr := fmt.Fprintf(cmd.OutOrStdout(),
-				"Wake will permanently delete, and this cannot be undone:\n"+
+				"%s\n"+
 					"%s  Wake's own hook entry only; your other hooks are left as they are\n"+
 					"%s  all collected activity and the local project map\n"+
 					"%s  configuration and the local identity salt\n"+
 					"%s  this binary\n",
-				plan.SettingsFile, plan.DataDir, plan.ConfigDir, plan.Executable,
+				style.Heading(pretty, "Wake will permanently delete, and this cannot be undone:"),
+				style.Paint(pretty, style.Dim, plan.SettingsFile), style.Paint(pretty, style.Dim, plan.DataDir),
+				style.Paint(pretty, style.Dim, plan.ConfigDir), style.Paint(pretty, style.Dim, plan.Executable),
 			); discloseErr != nil {
 				return discloseErr
 			}
@@ -67,15 +74,20 @@ func newUninstallCmd() *cobra.Command {
 			// Its own line rather than folded into the one above, so the four paths
 			// every run prints stay the same four.
 			if plan.Launcher != "" {
-				if _, discloseErr := fmt.Fprintf(cmd.OutOrStdout(), "%s  the link this command was invoked through\n", plan.Launcher); discloseErr != nil {
+				if _, discloseErr := fmt.Fprintf(cmd.OutOrStdout(), "%s  the link this command was invoked through\n", style.Paint(pretty, style.Dim, plan.Launcher)); discloseErr != nil {
 					return discloseErr
 				}
 			}
 			if _, discloseErr := fmt.Fprintln(cmd.OutOrStdout(), "To keep your configuration, use `wake remove --purge` instead."); discloseErr != nil {
 				return discloseErr
 			}
-			removed, err := plan.Remove()
-			if err != nil {
+			var removed bool
+			spinErr := style.WithSpinner(cmd.OutOrStdout(), pretty, "Removing Wake", func() error {
+				var removeErr error
+				removed, removeErr = plan.Remove()
+				return removeErr
+			})
+			if spinErr != nil {
 				// What the removal managed before it stopped, printed before the error
 				// itself: the disclosure has already named four paths as about to be
 				// deleted, so an error on its own leaves the reader unable to tell which
@@ -92,7 +104,7 @@ func newUninstallCmd() *cobra.Command {
 				if _, printErr := fmt.Fprintf(cmd.OutOrStdout(), "%s This binary was not removed — run `wake uninstall` again once the reported problem is fixed.\n", report); printErr != nil {
 					return printErr
 				}
-				return err
+				return spinErr
 			}
 			if removed {
 				_, err = fmt.Fprintln(cmd.OutOrStdout(), "Removed Wake's Claude Code integration.")
@@ -106,8 +118,12 @@ func newUninstallCmd() *cobra.Command {
 			// machine that was never `init`ed there is no data root and no config root
 			// to remove, and "Removed …" would be claiming work that never happened.
 			// "are gone" is true either way, which is the only thing the user is
-			// checking here.
-			_, err = fmt.Fprintln(cmd.OutOrStdout(), "Wake's local data, configuration and binary are gone. A later `wake init` is a fresh install with a new identity salt.")
+			// checking here — and true either way is what earns it the checkmark.
+			confirmation := "Wake's local data, configuration and binary are gone. A later `wake init` is a fresh install with a new identity salt.\n"
+			if pretty {
+				confirmation = style.Paint(pretty, style.Green, "✓") + " " + confirmation
+			}
+			_, err = fmt.Fprint(cmd.OutOrStdout(), confirmation)
 			return err
 		},
 	}
