@@ -80,7 +80,7 @@ func TestEveryCommandResolvesTheSameClaudeCodeDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ingest error = %v", err)
 	}
-	if !strings.Contains(out, "Imported 1 terminal events.") {
+	if !strings.Contains(out, "Imported 1 terminal event.") {
 		t.Errorf("ingest found no transcript under %q:\n%s", dir, out)
 	}
 

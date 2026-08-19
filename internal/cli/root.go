@@ -77,6 +77,19 @@ func newRootCmd() *cobra.Command {
 	return cmd
 }
 
+// terminalEvents renders a count of terminal events with a noun that agrees with it.
+//
+// Shared by the two commands that report an import, so the same quantity is not
+// spelled two ways one release apart. "1 terminal events" is the kind of detail that
+// makes a number look machine-generated in a tool whose whole claim is that its
+// numbers were derived carefully (ADR-0015 names the grain).
+func terminalEvents(count int) string {
+	if count == 1 {
+		return "1 terminal event"
+	}
+	return fmt.Sprintf("%d terminal events", count)
+}
+
 func isTerminal(file *os.File) bool {
 	info, err := file.Stat()
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
