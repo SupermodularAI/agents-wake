@@ -275,7 +275,7 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 			return nil
 		}
 		defer file.Close()
-		result, ingestErr := ingest.ClaudeCode(file, func(cwd string) (record.Hash, bool) {
+		result, ingestErr := ingest.ClaudeCode(file, func(cwd string, _ time.Time) (record.Hash, bool) {
 			identity, identifyErr := repos.Identify(cwd)
 			return record.Hash(identity.ID), identifyErr == nil && identity.Matched
 		}, record.NewNamer(repos.NameKey()), stale, destination)
