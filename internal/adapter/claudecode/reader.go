@@ -73,10 +73,17 @@ type Result struct {
 	Refused int
 }
 
-// Resolver maps a recorded working directory to a consented repository hash.
-// It returns false when the directory was never consented. The reader never
-// accesses the filesystem while resolving a transcript entry.
-type Resolver func(cwd string) (record.Hash, bool)
+// Resolver maps one observed event — a recorded working directory and the instant it
+// happened — to a consented repository hash.
+//
+// It returns false when the event is outside consent, which has two dimensions and
+// one answer: the directory was never consented, or the event predates the instant
+// collection began for its repository (ADR-0024, ADR-0025). The reader passes the
+// event's own timestamp and never learns the boundary — consent stays the caller's
+// to answer, so no adapter scan can widen it in either dimension.
+//
+// The reader never accesses the filesystem while resolving a transcript entry.
+type Resolver func(cwd string, at time.Time) (record.Hash, bool)
 
 // Read streams one Claude Code transcript. Only events accepted by resolve can
 // become records, so an adapter scan cannot widen project consent.
@@ -446,7 +453,8 @@ type call struct {
 
 // callStatus separates a tool_use block whose primitive name was refused from one
 // Wake deliberately does not collect. A refused name is a fail-closed drop worth
-// counting (ADR-0007); an unusable id or an unconsented repository is a clean zero,
+// counting (ADR-0007); an unusable id, an unconsented repository, and a call that
+// predates the instant collection began for its repository are all a clean zero,
 // which activation already reports as a skip rather than a failure, and must not be
 // counted as a refusal.
 type callStatus int
@@ -466,7 +474,11 @@ func (entry transcriptEntry) call(block contentBlock, resolve Resolver, names re
 	if err != nil {
 		return call{}, callSkipped
 	}
-	repo, consented := resolve(entry.CWD)
+	// The call's own instant, which is the one the boundary is about: a call that
+	// started before collection began is history the user declined, whenever its
+	// result arrives. It is the same value the record carries, taken once.
+	timestamp := record.NormalizedTimestamp(entry.Timestamp)
+	repo, consented := resolve(entry.CWD, timestamp)
 	if !consented {
 		return call{}, callSkipped
 	}
@@ -483,7 +495,7 @@ func (entry transcriptEntry) call(block contentBlock, resolve Resolver, names re
 		id:        string(id),
 		eventID:   record.DeriveEventID(harness, callSourceEvent(entry.UUID, id)),
 		sessionID: sessionID,
-		timestamp: record.NormalizedTimestamp(entry.Timestamp),
+		timestamp: timestamp,
 		kind:      kindFor(record.Identifier(block.Name)),
 		name:      name,
 		invoker:   record.InvokerModel,
@@ -537,7 +549,8 @@ func (entry transcriptEntry) attributedRun(resolve Resolver, names record.Namer)
 	if err != nil {
 		return record.Record{}, false
 	}
-	repo, consented := resolve(entry.CWD)
+	timestamp := record.NormalizedTimestamp(entry.Timestamp)
+	repo, consented := resolve(entry.CWD, timestamp)
 	if !consented {
 		return record.Record{}, false
 	}
@@ -545,7 +558,7 @@ func (entry transcriptEntry) attributedRun(resolve Resolver, names record.Namer)
 	event := record.Record{
 		SchemaVersion: record.SchemaVersion,
 		EventID:       record.DeriveEventID(harness, record.Identifier(entry.UUID)),
-		Timestamp:     record.NormalizedTimestamp(entry.Timestamp),
+		Timestamp:     timestamp,
 		Harness:       harness,
 		SessionID:     sessionID,
 		Repo:          repo,

@@ -138,12 +138,53 @@ func TestReadSkipsUnconsentedRepository(t *testing.T) {
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/outside","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/outside","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
-	result, err := Read(strings.NewReader(input), func(string) (record.Hash, bool) { return "", false }, names, Staleness{})
+	result, err := Read(strings.NewReader(input), deny, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
 	if len(result.Records) != 0 {
 		t.Fatalf("Read() emitted records for an unconsented repository: %+v", result.Records)
+	}
+}
+
+// Consent has two dimensions, and the resolver answers both: which repository a
+// working directory belongs to, and whether an event at that instant is one the
+// repository consented to collect (ADR-0024, ADR-0025). The reader is handed the
+// event's own timestamp and asks; it never learns the boundary, so a scan cannot
+// widen consent in either dimension.
+//
+// The two halves run against one resolver, so the excluded half cannot pass because
+// nothing was collected at all.
+func TestReadSkipsAnEventBeforeTheInstantCollectionBegan(t *testing.T) {
+	const begins = "2026-08-13T12:00:00Z"
+	from, err := time.Parse(time.RFC3339, begins)
+	if err != nil {
+		t.Fatalf("parsing the boundary: %v", err)
+	}
+	forwardOnly := func(cwd string, at time.Time) (record.Hash, bool) {
+		return repo, cwd == consentedPath && !at.Before(from)
+	}
+	input := strings.Join([]string{
+		// One call before the boundary and one after it, in the same session and the
+		// same consented directory: the only difference is when they happened.
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T11:59:59Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T11:59:59Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"` + begins + `","message":{"content":[{"type":"tool_use","id":"call-2","name":"Read"}]}}`,
+		`{"uuid":"entry-4","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}`,
+	}, "\n")
+
+	result, err := Read(strings.NewReader(input), forwardOnly, names, Staleness{})
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 1 || result.Records[0].Name != "Read" {
+		t.Fatalf("Read() = %+v, want only the call at or after the boundary", result.Records)
+	}
+	// An event outside the boundary is a clean zero, exactly as an unconsented
+	// directory is: it was never Wake's to collect, so it is neither a refusal nor a
+	// pending call waiting to be resolved as interrupted (ADR-0015).
+	if result.Refused != 0 || result.Pending != 0 || result.Malformed != 0 {
+		t.Errorf("Read() = %+v, want no refusal, nothing pending and nothing malformed", result)
 	}
 }
 
@@ -451,7 +492,7 @@ func TestReadDoesNotEmitAnEarlyResultForAnUnconsentedCall(t *testing.T) {
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/outside","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/outside","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
 	}, "\n")
-	result, err := Read(strings.NewReader(transcript), func(string) (record.Hash, bool) { return "", false }, names, Staleness{})
+	result, err := Read(strings.NewReader(transcript), deny, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -663,9 +704,13 @@ func TestReadTerminatesEveryCallInATranscriptShapedLikeARealOne(t *testing.T) {
 // does (plan §3.4).
 const consentedPath = "/repo"
 
-func resolver(cwd string) (record.Hash, bool) {
+func resolver(cwd string, _ time.Time) (record.Hash, bool) {
 	return repo, cwd == consentedPath
 }
+
+// deny consents to nothing. It is what the tests about the boundary of collection —
+// an unconsented directory, a refusal that must not be counted — resolve with.
+func deny(string, time.Time) (record.Hash, bool) { return "", false }
 
 // names keys the scope digest for this package's tests. Production keys it with a
 // subkey of the per-machine salt (config.Repos.NameKey).
@@ -847,7 +892,6 @@ func TestReadDropsAndCountsASubagentCallWithNoType(t *testing.T) {
 // to is outside collection altogether: counting it would report lost collection for
 // a repository Wake was never asked to read, and would never clear.
 func TestReadDoesNotCountARefusalInAnUnconsentedRepository(t *testing.T) {
-	deny := func(string) (record.Hash, bool) { return "", false }
 	for _, transcript := range []string{
 		subagentCallTranscript(t, ""),
 		subagentCallTranscript(t, "/usr/local/bin"),
