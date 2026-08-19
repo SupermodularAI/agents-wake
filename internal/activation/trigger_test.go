@@ -15,6 +15,7 @@ import (
 	"github.com/SupermodularAI/agents-wake/internal/config"
 	"github.com/SupermodularAI/agents-wake/internal/health"
 	"github.com/SupermodularAI/agents-wake/internal/lockfile"
+	"github.com/SupermodularAI/agents-wake/internal/store"
 )
 
 // triggerFixture consents to a repository with one transcript in it, so a Trigger
@@ -42,6 +43,67 @@ func TestTriggerScansWhenTheLockIsFree(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(paths.DataDir, eventsFile)); statErr != nil {
 		t.Errorf("Stat(events) = %v, want the spool to exist", statErr)
+	}
+}
+
+// The forward-only default has to hold for the scan nobody typed.
+//
+// `wake init` writes SessionStart and SessionEnd hooks that run `wake ingest`, and
+// that scan arrives here. If it walked the whole history — which is all it could do
+// before the recorded boundary existed — then the disclosure a plain `init` printed
+// ("existing history will not be imported") would be undone by the user's next
+// session, silently, by a command they never ran. The promise is not "init imports
+// nothing"; it is "nothing imports your history until you ask" (ADR-0024, ADR-0025).
+//
+// The second half of the test is the same promise's other side, and the positive
+// control for the first: collection really does start now, so a transcript written
+// after the init is imported by the very next trigger. Without it, "no records" would
+// also be what a trigger that collected nothing at all looks like.
+func TestATriggerAfterAPlainInitImportsNoPreExistingHistory(t *testing.T) {
+	paths := testPaths(t)
+	claudeDir, root := inventoryFixture(t)
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), false); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	spool := store.New(filepath.Join(paths.DataDir, eventsFile))
+
+	ran, err := Trigger(paths, claudeDir)
+	if err != nil {
+		t.Fatalf("Trigger() error = %v", err)
+	}
+	if !ran {
+		t.Fatal("ran = false, want true — nothing else was scanning")
+	}
+	entries, err := spool.Entries(0)
+	if err != nil {
+		t.Fatalf("Entries() error = %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("the trigger imported %d events from before the repository was consented, want none", len(entries))
+	}
+	// The scan itself did run and did read the transcript — the boundary excludes
+	// events, it does not stop the walk. A trigger that had skipped the file entirely
+	// would leave the same empty spool for a different reason.
+	if scan := scanCounters(t, paths); scan.Transcripts != 1 {
+		t.Errorf("Scan.Transcripts = %d, want 1 — the trigger did not read the transcript at all", scan.Transcripts)
+	}
+
+	// Activity after the init, in the same consented repository.
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	writeFixture(t, filepath.Join(claudeDir, "projects", "project", "after.jsonl"), strings.Join([]string{
+		`{"uuid":"entry-3","sessionId":"session-2","cwd":"` + root + `","timestamp":"` + now + `","message":{"content":[{"type":"tool_use","id":"call-2","name":"Read"}]}}`,
+		`{"uuid":"entry-4","sessionId":"session-2","cwd":"` + root + `","timestamp":"` + now + `","message":{"content":[{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}`,
+	}, "\n"))
+
+	if _, triggerErr := Trigger(paths, claudeDir); triggerErr != nil {
+		t.Fatalf("second Trigger() error = %v", triggerErr)
+	}
+	entries, err = spool.Entries(0)
+	if err != nil {
+		t.Fatalf("Entries() error = %v", err)
+	}
+	if len(entries) != 1 || entries[0].Record.Name != "Read" {
+		t.Fatalf("Entries() = %+v, want only the call that happened after the init", entries)
 	}
 }
 
