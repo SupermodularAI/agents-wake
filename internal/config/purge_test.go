@@ -93,12 +93,12 @@ func TestRemoveConfigRootErrorNamesTheConfigRootAndNotTheSaltBytes(t *testing.T)
 	}
 
 	parent := filepath.Dir(p.ConfigDir)
-	if err := os.Chmod(parent, 0o500); err != nil {
-		t.Fatalf("Chmod(%s) error = %v", parent, err)
+	if chmodErr := os.Chmod(parent, 0o500); chmodErr != nil {
+		t.Fatalf("Chmod(%s) error = %v", parent, chmodErr)
 	}
 	t.Cleanup(func() {
-		if err := os.Chmod(parent, 0o700); err != nil {
-			t.Errorf("restoring %s: %v", parent, err)
+		if restoreErr := os.Chmod(parent, 0o700); restoreErr != nil {
+			t.Errorf("restoring %s: %v", parent, restoreErr)
 		}
 	})
 
