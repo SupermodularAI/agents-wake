@@ -40,14 +40,57 @@ const settingsFileMode = fs.FileMode(0o600)
 // The shapes a settings file can have that this build refuses to edit. Each says
 // what was expected and where, and quotes nothing out of the file: a hook command is
 // a command line, and plan §4.2 keeps source content out of every error.
+//
+// None of them names a command to re-run, and that omission is deliberate. `init`,
+// `remove` and `uninstall` all refuse the same documents, so the command that clears
+// the refusal is the caller's to name — withSettingsFix is how each one does it. A
+// sentinel that ended in "run wake init again" said the wrong thing on the command
+// whose whole purpose is removal.
 var (
 	errSettingsNotAnObject  = errors.New("the Claude Code settings file must hold a JSON object")
 	errSettingsUnreadable   = errors.New("the Claude Code settings file is not valid JSON")
 	errHooksNotAnObject     = errors.New(`the "hooks" setting must hold a JSON object`)
 	errHookEventNotAnArray  = errors.New("a hook event must hold an array of hook groups")
-	errSettingsNotARegular  = errors.New("the Claude Code settings file is not a regular file; move whatever is in its place aside and run wake init again")
-	errSettingsLinkIsBroken = errors.New("the Claude Code settings file is a symbolic link that resolves to no file; restore what it points at, or remove the link, and run wake init again")
+	errSettingsNotARegular  = errors.New("the Claude Code settings file is not a regular file; move whatever is in its place aside")
+	errSettingsLinkIsBroken = errors.New("the Claude Code settings file is a symbolic link that resolves to no file; restore what it points at, or remove the link")
 )
+
+// settingsShapeRefusals is that same set, as a set: the refusals a settings
+// document's own shape decides, and therefore the ones repairing the file clears.
+// Every other error a settings write can return — a lock it could not take, an
+// encoding failure — is not one a caller should attach "then repair the file" to.
+var settingsShapeRefusals = []error{
+	errSettingsNotAnObject,
+	errSettingsUnreadable,
+	errHooksNotAnObject,
+	errHookEventNotAnArray,
+	errSettingsNotARegular,
+	errSettingsLinkIsBroken,
+}
+
+// refusedTheSettingsShape reports whether err is one of those refusals, however it
+// was wrapped on the way out.
+func refusedTheSettingsShape(err error) bool {
+	for _, refusal := range settingsShapeRefusals {
+		if errors.Is(err, refusal) {
+			return true
+		}
+	}
+	return false
+}
+
+// withSettingsFix appends the step that clears a settings-shape refusal, and hands
+// back every other error exactly as it was.
+//
+// The guidance belongs to the command the user ran, which is why it arrives from
+// there rather than from the sentinel: the file's problem is the same for `init` and
+// for `uninstall`, and the next step is not.
+func withSettingsFix(err error, guidance string) error {
+	if !refusedTheSettingsShape(err) {
+		return err
+	}
+	return fmt.Errorf("%w; %s", err, guidance)
+}
 
 // The three ways an installation cannot host a hook command. Each names the
 // requirement and never the path it refused (plan §4.2), and each is returned
