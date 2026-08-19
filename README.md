@@ -75,7 +75,7 @@ wake uninstall          # Remove everything, including ~/.config/wake and the bi
 | `wake ingest` | Import activity for consented projects. |
 | `wake doctor` | Show collection and hook health. |
 | `wake remove` | Remove Wake-owned Claude Code hooks. `--purge` also deletes collected data; `~/.config/wake` is kept either way, so a later `wake init` keeps the same repository identity. |
-| `wake uninstall` | Irreversible. Removes the integration, all collected data, `~/.config/wake` (configuration and the identity salt) and the binary itself. It prints every path before deleting anything. |
+| `wake uninstall` | Irreversible. Removes the integration, all collected data, `~/.config/wake` (configuration and the identity salt) and the binary itself — plus the symlink you invoked it through, if the `wake` on your PATH is a link. It prints every path before deleting anything, and removes nothing at all if it cannot take its hook entry out of `settings.json` first. |
 
 ## Privacy And Enterprise Use
 
