@@ -53,6 +53,34 @@ func TestClaudeCodeInScopeIgnoresARootItWasNotConsentedFor(t *testing.T) {
 	}
 }
 
+func TestClaudeCodeAcrossReposMergesEveryRootsProjectPrimitivesWithGlobal(t *testing.T) {
+	claudeDir := filepath.Join(t.TempDir(), ".claude")
+	write(t, filepath.Join(claudeDir, "skills", "global-skill", "SKILL.md"), "# global")
+
+	rootA := t.TempDir()
+	write(t, filepath.Join(rootA, ".claude", "commands", "deploy-a.md"), "# a")
+	rootB := t.TempDir()
+	write(t, filepath.Join(rootB, ".claude", "commands", "deploy-b.md"), "# b")
+
+	got := ClaudeCodeAcrossRepos(claudeDir, []string{rootA, rootB}, names)
+	if !got.ProjectScanned {
+		t.Fatal("a pass over consented roots reported that it did not scan the project")
+	}
+	found := map[primitiveKey]bool{}
+	for _, item := range got.Primitives {
+		found[primitiveKey{kind: item.Kind, name: item.Name}] = true
+	}
+	for _, want := range []primitiveKey{
+		{kind: record.KindSkill, name: "global-skill"},
+		{kind: record.KindCommand, name: "deploy-a"},
+		{kind: record.KindCommand, name: "deploy-b"},
+	} {
+		if !found[want] {
+			t.Fatalf("missing %+v in %+v", want, got)
+		}
+	}
+}
+
 func TestClaudeCodeInScopeSkipsInvalidPrimitiveNames(t *testing.T) {
 	claudeDir := filepath.Join(t.TempDir(), ".claude")
 	root := t.TempDir()

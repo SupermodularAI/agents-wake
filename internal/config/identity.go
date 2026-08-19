@@ -195,6 +195,20 @@ func (r *Repos) DroppedEntries() int {
 	return r.dropped
 }
 
+// ConsentedRoots returns the canonical root of every repository this build
+// trusts, in table order. It exists for project-local discovery across a
+// machine-wide surface (report, serve): those need every consented repo to
+// scan, not only the one the command happens to run in. The caller must never
+// print or persist what this returns — only Identity's hashed id may leave this
+// package for that (plan §3.4).
+func (r *Repos) ConsentedRoots() []string {
+	roots := make([]string, 0, len(r.table.Projects))
+	for _, entry := range r.table.Projects {
+		roots = append(roots, entry.Root)
+	}
+	return roots
+}
+
 // Identify returns the identity of the repository the given working directory
 // belongs to.
 //

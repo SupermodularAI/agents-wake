@@ -37,7 +37,7 @@ func runServe(cmd *cobra.Command, port int) error {
 	}
 	// Before the URL: what the dashboard will and will not contain is part of
 	// reading it, and a notice printed after the address reads as an afterthought.
-	scope, names, err := resolveDiscoveryScope(cmd, paths)
+	scope, _, err := resolveDiscoveryScope(cmd, paths)
 	if err != nil {
 		return err
 	}
@@ -46,7 +46,11 @@ func runServe(cmd *cobra.Command, port int) error {
 	// Assigned, not redeclared: err is read again below, and a shadowed copy here
 	// would make the later reads ambiguous to a reader and to govet.
 	if err = style.WithSpinner(cmd.OutOrStdout(), ttyOutput(cmd), "Refreshing primitive inventory", func() error {
-		return primitives.Refresh(events, inventory.ClaudeCodeInScope(scope, names))
+		discovery, discoverErr := discoverAllRepos(paths, scope.ClaudeDir)
+		if discoverErr != nil {
+			return discoverErr
+		}
+		return primitives.Refresh(events, discovery)
 	}); err != nil {
 		return err
 	}

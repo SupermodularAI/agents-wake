@@ -205,6 +205,74 @@ func consent(t *testing.T, paths config.Paths, root string) {
 	}
 }
 
+// TestReportAggregatesEveryConsentedRepositoryNotOnlyTheOneItRunsIn is the
+// machine-wide surface plan §8 promises ("served dashboard, navigation and
+// filters"): a repo consented to earlier must not disappear just because a
+// later `wake init` in a different repo, or simply a `wake report` run from
+// somewhere else, becomes the invocation report resolves its scope from.
+func TestReportAggregatesEveryConsentedRepositoryNotOnlyTheOneItRunsIn(t *testing.T) {
+	t.Setenv(config.EnvDataDir, t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	repoA := t.TempDir()
+	writeSkill(t, filepath.Join(repoA, ".claude", "skills", "skill-a"))
+	repoB := t.TempDir()
+	writeSkill(t, filepath.Join(repoB, ".claude", "skills", "skill-b"))
+
+	paths, err := config.ResolvePaths()
+	if err != nil {
+		t.Fatalf("ResolvePaths() error = %v", err)
+	}
+	consent(t, paths, repoA)
+	consent(t, paths, repoB)
+
+	ok := record.OutcomeOK
+	events := []record.Record{
+		{
+			SchemaVersion: record.SchemaVersion,
+			EventID:       record.DeriveEventID("claude-code", "skill-a-run"),
+			Timestamp:     time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC),
+			Harness:       "claude-code",
+			SessionID:     "session-a",
+			Repo:          "0123456789abcdef0123456789abcdef",
+			Kind:          record.KindSkill,
+			Name:          "skill-a",
+			Invoker:       record.InvokerModel,
+			Outcome:       &ok,
+		},
+		{
+			SchemaVersion: record.SchemaVersion,
+			EventID:       record.DeriveEventID("claude-code", "skill-b-run"),
+			Timestamp:     time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC),
+			Harness:       "claude-code",
+			SessionID:     "session-b",
+			Repo:          "fedcba9876543210fedcba9876543210",
+			Kind:          record.KindSkill,
+			Name:          "skill-b",
+			Invoker:       record.InvokerModel,
+			Outcome:       &ok,
+		},
+	}
+	if _, appendErr := store.New(filepath.Join(paths.DataDir, "events.ndjson")).Append(events); appendErr != nil {
+		t.Fatalf("Append() error = %v", appendErr)
+	}
+
+	// Standing inside repo B only, the way the user does right after the second
+	// `wake init` — repo A is not cwd, and is not even a subdirectory of it.
+	t.Chdir(repoB)
+
+	out, err := run(t, "report", "--usage")
+	if err != nil {
+		t.Fatalf("wake report error = %v: %s", err, out)
+	}
+	if !strings.Contains(out, "skill-b") {
+		t.Fatalf("wake report lost the repository it is running in: %s", out)
+	}
+	if !strings.Contains(out, "skill-a") {
+		t.Fatalf("wake report only shows the current directory's repo, not every consented one: %s", out)
+	}
+}
+
 func appendReportRecord(t *testing.T, paths config.Paths) {
 	t.Helper()
 	ok := record.OutcomeOK

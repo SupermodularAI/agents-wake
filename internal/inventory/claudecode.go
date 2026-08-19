@@ -67,6 +67,33 @@ func ClaudeCodeInScope(scope Scope, names record.Namer) Discovery {
 	return Discovery{Primitives: sortedPrimitives(items), ProjectScanned: scanned}
 }
 
+// ClaudeCodeAcrossRepos discovers global primitives once, then project-local
+// primitives for every root given, merging everything into one Discovery.
+//
+// ClaudeCodeInScope can only ever see one consented root per call, which is
+// right for a single command run inside a repository but wrong for a
+// machine-wide surface: report and serve are meant to show every repo `wake
+// init` has registered on this machine, not only the one the command happens to
+// run in (plan §8, "served dashboard, navigation and filters"). ProjectScanned
+// is unconditionally true here because every root offered is already consented
+// — there is no partial-scan case to carry a previous snapshot forward from,
+// the way a single unconsented cwd has.
+func ClaudeCodeAcrossRepos(claudeDir string, roots []string, names record.Namer) Discovery {
+	items := map[primitiveKey]Primitive{}
+	add := func(kind record.Kind, name string) {
+		identifier, err := names.DerivedName(name)
+		if err != nil {
+			return
+		}
+		items[primitiveKey{kind: kind, name: identifier}] = Primitive{Harness: claudeCode, Kind: kind, Name: identifier}
+	}
+	claudeCodeGlobal(claudeDir, add)
+	for _, root := range roots {
+		claudeCodeProject(claudeDir, root, add)
+	}
+	return Discovery{Primitives: sortedPrimitives(items), ProjectScanned: true}
+}
+
 // claudeCodeGlobal scans the harness's own directory and its installed plugins.
 // It never reads a working directory, so it needs no consent answer.
 func claudeCodeGlobal(claudeDir string, add func(record.Kind, string)) {

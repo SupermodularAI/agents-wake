@@ -41,3 +41,18 @@ func resolveDiscoveryScope(cmd *cobra.Command, paths config.Paths) (inventory.Sc
 	}
 	return scope, names, nil
 }
+
+// discoverAllRepos merges every consented repository's project-local
+// primitives with the harness's global ones, so report and serve reflect every
+// repo `wake init` has registered on this machine — not only the one the
+// command happens to run in (plan §8, "served dashboard, navigation and
+// filters"). resolveDiscoveryScope alone cannot do this: its Scope names at
+// most one root, cwd's, which is right for the notice it prints but wrong for
+// what the dashboard and report are meant to aggregate.
+func discoverAllRepos(paths config.Paths, claudeDir string) (inventory.Discovery, error) {
+	roots, names, err := activation.AllRepoRoots(paths)
+	if err != nil {
+		return inventory.Discovery{}, err
+	}
+	return inventory.ClaudeCodeAcrossRepos(claudeDir, roots, names), nil
+}

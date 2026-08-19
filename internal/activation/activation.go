@@ -453,3 +453,15 @@ func refreshInventory(paths config.Paths, repos *config.Repos, claudeDir, root s
 	scope, names := discoveryScope(repos, claudeDir, root)
 	return inventory.New(paths.PrimitivesFile).Refresh(events, inventory.ClaudeCodeInScope(scope, names))
 }
+
+// AllRepoRoots resolves the Namer together with the canonical root of every
+// repository consented on this machine, so a machine-wide surface — report,
+// serve — can discover project-local primitives for all of them in one pass
+// rather than only the working directory's (inventory.ClaudeCodeAcrossRepos).
+func AllRepoRoots(paths config.Paths) ([]string, record.Namer, error) {
+	repos, err := config.OpenRepos(paths)
+	if err != nil {
+		return nil, record.Namer{}, err
+	}
+	return repos.ConsentedRoots(), record.NewNamer(repos.NameKey()), nil
+}
