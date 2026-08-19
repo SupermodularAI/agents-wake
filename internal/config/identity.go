@@ -331,12 +331,23 @@ func (r *Repos) match(cwd string) (root, id string) {
 // too. The zero time records no boundary, which is what an explicit full import asks
 // for: the user wants everything the harness holds, and no instant says that.
 //
-// The boundary is the one part of an existing entry that may change, and it may
-// change in one direction only. A zero from clears a recorded boundary, because a
-// user who has asked for the whole history has asked for it from then on as well. A
-// non-zero from never moves one: the instant the user consented is the instant the
-// disclosure was about, and moving it forward on a later `init` would silently skip
-// everything collected in between.
+// The boundary is the one part of an existing entry that may change, and every edit
+// narrows what an unattended scan will import or opens it fully at the user's word:
+//
+//   - a zero from clears a recorded boundary, because a user who has asked for the
+//     whole history has asked for it from then on as well;
+//   - a non-zero from onto an entry that records none records it. An unbounded entry
+//     is one every scan imports everything for, so this narrows collection — and the
+//     call that asks for it is the one whose disclosure says collection starts now.
+//     The two ways an entry gets into that state are a full import, which clears the
+//     boundary, and a table written before the boundary existed;
+//   - a non-zero from never *moves* a boundary already recorded: the instant the user
+//     consented is the instant the disclosure was about, and moving it forward on a
+//     later `init` would silently skip everything collected in between.
+//
+// Nothing is lost by recording one: the history stays exactly as reachable as it was,
+// through `wake ingest` or `init --full`, since every id is derived from the source
+// event (ADR-0004).
 //
 // A refused registration writes nothing.
 func (r *Repos) Register(root, label string, from time.Time) (string, error) {
@@ -420,11 +431,22 @@ func (r *Repos) registration(table projectsFile, canonical string, aliases []str
 				added = append(added, alias)
 			}
 		}
-		// Clearing is the only edit the boundary allows, and only towards collecting
-		// more (see Register): the user asked for the whole history in a call that
-		// found the repository already consented.
+		// The boundary is the one recorded fact this entry allows to change, and only
+		// in the two directions Register describes.
+		//
+		// Clearing is the explicit full import: the user asked for the whole history in
+		// a call that found the repository already consented.
+		//
+		// Recording is a plain init on an entry that has none — after a full import,
+		// which clears it, or from a table written before the boundary existed. It is
+		// not the forward move Register refuses: there is nothing to move, and an
+		// unbounded entry is one every scan would import everything for. Leaving it
+		// unbounded here is what made a plain `init` print the forward-only disclosure
+		// and then hand the next hook-fired scan the whole history anyway — the
+		// disclosure is unconditional, so this is what makes it true.
 		clearBoundary := from.IsZero() && existing.CollectFrom != ""
-		if len(added) == 0 && !clearBoundary {
+		recordBoundary := !from.IsZero() && existing.CollectFrom == ""
+		if len(added) == 0 && !clearBoundary && !recordBoundary {
 			return table, existing.ID, false, nil
 		}
 		if len(added) > 0 {
@@ -440,8 +462,11 @@ func (r *Repos) registration(table projectsFile, canonical string, aliases []str
 				return table, "", false, nested
 			}
 		}
-		if clearBoundary {
+		switch {
+		case clearBoundary:
 			existing.CollectFrom = ""
+		case recordBoundary:
+			existing.CollectFrom = formatCollectFrom(from)
 		}
 		// Cloned before appending: the entry is a copy of the recorded one, but its
 		// alias slice still shares the recorded backing array.

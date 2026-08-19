@@ -101,6 +101,15 @@ func derivedMAC(t *testing.T, p Paths, entry projectEntry) string {
 	return openRepos(t, p).matchMAC(entry)
 }
 
+// derivedLegacyMAC returns the match digest a build from before the collection
+// boundary joined the digest would have written for entry (ADR-0025). A table signed
+// this way is the state every installation predating that ADR is in, so it is the
+// starting point for any test about what happens to those entries on upgrade.
+func derivedLegacyMAC(t *testing.T, p Paths, entry projectEntry) string {
+	t.Helper()
+	return openRepos(t, p).legacyMatchMAC(entry)
+}
+
 // Acceptance item 11, second half, and ADR-0019 §8: 128 bits as 32 lowercase hex
 // characters. T003 validates the same shape downstream, so two spellings of one
 // id would be two ids there.
@@ -1533,6 +1542,135 @@ func TestASecondRegistrationNeverMovesTheBoundaryForward(t *testing.T) {
 
 	if got := openRepos(t, p).CollectsFrom(id); !got.Equal(first) {
 		t.Errorf("CollectsFrom() = %s, want the boundary the first registration recorded %s", got, first)
+	}
+}
+
+// A plain `wake init` on a repository that records no boundary records one.
+//
+// Recording where none exists is not the advancing the alternative above rejects:
+// there is no boundary to move, and the entry means "every event the harness holds is
+// in scope". A plain `init` prints the forward-only disclosure unconditionally, so if
+// this registration left the entry unbounded the very next hook-fired scan would
+// import the whole pre-existing history the sentence just declined — round 1 and
+// round 2 of T124's review, the second time narrowed to exactly this state.
+//
+// Two paths arrive here and both matter: `--full` clears the boundary by design, and
+// every table written before ADR-0025 carries none at all.
+func TestAPlainRegistrationRecordsABoundaryOntoAnUnboundedEntry(t *testing.T) {
+	p := testPaths(t)
+	root := mkdirAll(t, filepath.Join(tempRealDir(t), "repo"))
+
+	r := openRepos(t, p)
+	id := mustRegister(t, r, root, "repo")
+	if got := r.CollectsFrom(id); !got.IsZero() {
+		t.Fatalf("CollectsFrom() = %s, want the zero time — the fixture is not the unbounded state", got)
+	}
+
+	from := time.Now().UTC()
+	if again := mustRegisterFrom(t, r, root, "repo", from); again != id {
+		t.Fatalf("Register() = %q, want the id it already had %q", again, id)
+	}
+
+	// Read back through a second open, which is the process the trigger runs in: a
+	// boundary only the writing call can see would leave that scan unbounded.
+	reopened := openRepos(t, p)
+	if got := reopened.CollectsFrom(id); !got.Equal(from) {
+		t.Errorf("CollectsFrom() after reopening = %s, want the boundary this registration recorded %s", got, from)
+	}
+	// Re-signed, so the entry still resolves. An unbounded entry may carry the
+	// pre-ADR-0025 digest, and appending a boundary without re-signing would refuse the
+	// repository outright — collecting nothing where the ask was to collect forward.
+	if dropped := reopened.DroppedEntries(); dropped != 0 {
+		t.Errorf("DroppedEntries() = %d, want 0 — recording the boundary left an entry that does not verify", dropped)
+	}
+	if identity := mustIdentify(t, reopened, root); !identity.Matched || identity.ID != id {
+		t.Errorf("Identify() = %+v, want the recorded id %s matched", identity, id)
+	}
+}
+
+// The same registration against a table a build from before ADR-0025 wrote: no
+// boundary, and a digest over the pre-boundary construction.
+//
+// This is the state every existing installation is in, and it is the one the compat
+// fallback keeps resolving — so it is also the one where "the entry records no
+// boundary" cannot be read as "this build put none there". A plain `init` has to
+// record the boundary here too, and the entry has to come out signed by the current
+// construction rather than half-upgraded.
+func TestAPlainRegistrationBoundsAnEntrySignedBeforeTheBoundaryExisted(t *testing.T) {
+	p := testPaths(t)
+	root := mkdirAll(t, filepath.Join(tempRealDir(t), "repo"))
+	legacy := projectEntry{ID: derivedID(t, p, root), Label: "repo", Root: root}
+	writeProjectsJSON(t, p, fmt.Sprintf(`{
+  "version": 1,
+  "projects": [
+    {"id": %q, "label": "repo", "root": %q, "case_insensitive": false, "match_mac": %q}
+  ]
+}
+`, legacy.ID, root, derivedLegacyMAC(t, p, legacy)))
+
+	r := openRepos(t, p)
+	if dropped := r.DroppedEntries(); dropped != 0 {
+		t.Fatalf("DroppedEntries() = %d, want 0 — the fixture is not a resolving pre-ADR-0025 table", dropped)
+	}
+
+	from := time.Now().UTC()
+	if id := mustRegisterFrom(t, r, root, "repo", from); id != legacy.ID {
+		t.Fatalf("Register() = %q, want the id the table already recorded %q", id, legacy.ID)
+	}
+
+	reopened := openRepos(t, p)
+	if got := reopened.CollectsFrom(legacy.ID); !got.Equal(from) {
+		t.Errorf("CollectsFrom() = %s, want the boundary this registration recorded %s", got, from)
+	}
+	if dropped := reopened.DroppedEntries(); dropped != 0 {
+		t.Errorf("DroppedEntries() = %d, want 0 — the upgraded entry does not verify", dropped)
+	}
+	if identity := mustIdentify(t, reopened, filepath.Join(root, "pkg")); !identity.Matched || identity.ID != legacy.ID {
+		t.Errorf("Identify() = %+v, want the recorded id %s matched", identity, legacy.ID)
+	}
+}
+
+// A plain registration over an entry whose boundary this build cannot read leaves a
+// boundary it can.
+//
+// The refusal comes first — such an entry never reaches the table registration decides
+// against (fail closed, plan §3.4) — so this is the "no boundary recorded" case
+// arriving by a third route, and the outcome has to be the same: a readable boundary at
+// this instant, not a repaired copy of the unreadable one and not an unbounded entry.
+// Repairing it would resolve the repository under a value the user never consented to;
+// leaving it unbounded would print the forward-only promise over an unbounded scan.
+func TestAPlainRegistrationReplacesABoundaryThisBuildCannotRead(t *testing.T) {
+	p := testPaths(t)
+	root := mkdirAll(t, filepath.Join(tempRealDir(t), "repo"))
+	corrupt := projectEntry{ID: derivedID(t, p, root), Label: "repo", Root: root, CollectFrom: "yesterday"}
+	writeProjectsJSON(t, p, fmt.Sprintf(`{
+  "version": 1,
+  "projects": [
+    {"id": %q, "label": "repo", "root": %q, "case_insensitive": false, "collect_from": "yesterday", "match_mac": %q}
+  ]
+}
+`, corrupt.ID, root, derivedMAC(t, p, corrupt)))
+
+	r := openRepos(t, p)
+	if dropped := r.DroppedEntries(); dropped != 1 {
+		t.Fatalf("DroppedEntries() = %d, want 1 — the fixture is not the refused state", dropped)
+	}
+
+	from := time.Now().UTC()
+	id := mustRegisterFrom(t, r, root, "repo", from)
+
+	reopened := openRepos(t, p)
+	if got := reopened.CollectsFrom(id); !got.Equal(from) {
+		t.Errorf("CollectsFrom() = %s, want the boundary this registration recorded %s", got, from)
+	}
+	if dropped := reopened.DroppedEntries(); dropped != 0 {
+		t.Errorf("DroppedEntries() = %d, want 0 — the re-recorded entry does not verify", dropped)
+	}
+	if raw := readFileOrFail(t, p.ProjectsFile); strings.Contains(raw, "yesterday") {
+		t.Errorf("projects.json = %s; the unreadable boundary survived the registration", raw)
+	}
+	if identity := mustIdentify(t, reopened, root); !identity.Matched || identity.ID != id {
+		t.Errorf("Identify() = %+v, want the recorded id %s matched", identity, id)
 	}
 }
 
