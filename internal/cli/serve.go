@@ -9,6 +9,7 @@ import (
 	"github.com/SupermodularAI/agents-wake/internal/config"
 	"github.com/SupermodularAI/agents-wake/internal/inventory"
 	"github.com/SupermodularAI/agents-wake/internal/store"
+	"github.com/SupermodularAI/agents-wake/internal/style"
 	"github.com/SupermodularAI/agents-wake/internal/ui"
 )
 
@@ -44,7 +45,9 @@ func runServe(cmd *cobra.Command, port int) error {
 	primitives := inventory.New(paths.PrimitivesFile)
 	// Assigned, not redeclared: err is read again below, and a shadowed copy here
 	// would make the later reads ambiguous to a reader and to govet.
-	if err = primitives.Refresh(events, inventory.ClaudeCodeInScope(scope, names)); err != nil {
+	if err = style.WithSpinner(cmd.OutOrStdout(), ttyOutput(cmd), "Refreshing primitive inventory", func() error {
+		return primitives.Refresh(events, inventory.ClaudeCodeInScope(scope, names))
+	}); err != nil {
 		return err
 	}
 	listener, err := ui.Listen(port)

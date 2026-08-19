@@ -95,6 +95,18 @@ func isTerminal(file *os.File) bool {
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
+// ttyOutput decides whether a command may draw color, box-drawing, or an
+// animated spinner on the strength of one thing only: is stdout a real
+// terminal right now. There is no override — piped, redirected, or (in a
+// test) writing to a bytes.Buffer, cmd.OutOrStdout() is not an *os.File and
+// this returns false, which is what keeps every plain-text assertion in this
+// package's tests exactly what it was before any renderer here learned to be
+// pretty (ADR-0011, plan §7.3, §8).
+func ttyOutput(cmd *cobra.Command) bool {
+	file, ok := cmd.OutOrStdout().(*os.File)
+	return ok && isTerminal(file)
+}
+
 // Execute runs the root command and returns a process exit code.
 func Execute() int { return execute(runtime.GOOS, os.Stderr) }
 

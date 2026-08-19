@@ -9,6 +9,7 @@ import (
 	"github.com/SupermodularAI/agents-wake/internal/activation"
 	"github.com/SupermodularAI/agents-wake/internal/config"
 	"github.com/SupermodularAI/agents-wake/internal/detach"
+	"github.com/SupermodularAI/agents-wake/internal/style"
 )
 
 // discard consumes an error the hook-invoked path is forbidden to report.
@@ -52,14 +53,22 @@ func newIngestCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		var written int
+		label := "Importing activity for consented projects"
 		if rebuild {
-			written, err = activation.Rebuild(paths, claudeDir)
-		} else {
-			written, err = activation.Ingest(paths, claudeDir)
+			label = "Rebuilding the derived event store"
 		}
-		if err != nil {
-			return err
+		var written int
+		spinErr := style.WithSpinner(cmd.OutOrStdout(), ttyOutput(cmd), label, func() error {
+			var scanErr error
+			if rebuild {
+				written, scanErr = activation.Rebuild(paths, claudeDir)
+			} else {
+				written, scanErr = activation.Ingest(paths, claudeDir)
+			}
+			return scanErr
+		})
+		if spinErr != nil {
+			return spinErr
 		}
 		_, err = fmt.Fprintf(cmd.OutOrStdout(), "Imported %s.\n", terminalEvents(written))
 		return err
