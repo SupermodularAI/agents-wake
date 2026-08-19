@@ -189,7 +189,7 @@ func TestDoctorOutputNamesNoPathOrLabel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenRepos() error = %v", err)
 	}
-	id, err := repos.Register(root, marker+"-label")
+	id, err := repos.Register(root, marker+"-label", time.Time{})
 	if err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}

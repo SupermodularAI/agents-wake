@@ -61,7 +61,7 @@ func newIngestCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		_, err = fmt.Fprintf(cmd.OutOrStdout(), "Imported %d terminal events.\n", written)
+		_, err = fmt.Fprintf(cmd.OutOrStdout(), "Imported %s.\n", terminalEvents(written))
 		return err
 	}}
 	cmd.Flags().BoolVar(&quiet, "quiet", false, "run as the Claude Code trigger: scan in a detached child, print nothing, and always exit 0")

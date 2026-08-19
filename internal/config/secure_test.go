@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // writeSalt puts a well-formed salt at path, so a test that is about the file's
@@ -177,7 +178,7 @@ func TestOpenReposAcceptsAPrivateStateDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenRepos() = %v, want the 0700 baseline to open", err)
 	}
-	if _, err := r.Register(root, "repo"); err != nil {
+	if _, err := r.Register(root, "repo", time.Time{}); err != nil {
 		t.Fatalf("Register() = %v", err)
 	}
 	if _, err := OpenRepos(p); err != nil {
