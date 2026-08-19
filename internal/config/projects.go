@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/SupermodularAI/agents-wake/internal/atomicfile"
 )
@@ -68,9 +69,27 @@ type projectEntry struct {
 	// and folding would merge two repositories — and derivation cannot probe for
 	// it, so the answer is recorded here instead.
 	CaseInsensitive bool `json:"case_insensitive"`
+	// CollectFrom is the instant collection begins for this repository, spelled
+	// RFC3339Nano in UTC, or empty when the repository records no boundary.
+	//
+	// It is what makes ADR-0024's forward-only default hold for the scan a trigger
+	// fires and not only for `init` itself (ADR-0025). A plain `wake init` consents
+	// a repository from the moment it runs and imports nothing; the hook it installs
+	// then runs in a process that was not there to be told so, and would otherwise
+	// walk the whole history one session later — importing exactly what the
+	// disclosure said it would not.
+	//
+	// Empty means unbounded: every event the harness holds for the repository is in
+	// scope. That is what `wake init --full` asks for, and what every table written
+	// before this field existed says by saying nothing.
+	//
+	// It is covered by MatchMAC, so a boundary edited or deleted by hand refuses the
+	// entry rather than widening what the next scan imports.
+	CollectFrom string `json:"collect_from,omitempty"`
 	// MatchMAC is the keyed digest over everything resolution matches against:
 	// the canonical root, every alias, and the case-folding flag (ADR-0019 §3
-	// applied to the whole of what the entry resolves with).
+	// applied to the whole of what the entry resolves with) — and, since ADR-0025,
+	// the collection boundary it applies.
 	//
 	// ID covers Root and nothing else, so on its own it leaves the rest of the
 	// entry hand-editable: an alias added beside a legitimate root attributes a
@@ -111,7 +130,45 @@ func (e projectEntry) valid() bool {
 			return false
 		}
 	}
+	if _, ok := parseCollectFrom(e.CollectFrom); !ok {
+		return false
+	}
 	return true
+}
+
+// parseCollectFrom parses a recorded collection boundary. An empty value is no
+// boundary, which is valid and means unbounded.
+//
+// It is the only parser of the field, and valid() calls it, so an entry carrying a
+// boundary this build cannot read is refused rather than resolved as unbounded:
+// reading a broken boundary as "collect everything" would widen what the next scan
+// imports on the strength of a value that failed to parse, and fail closed exists to
+// rule that direction out (plan §3.4).
+//
+// The spelling has to be the canonical one this package writes, for the reason
+// validRoot rejects an uncleaned path: the match digest was computed over whatever
+// was recorded, so a value that needs normalising is a value the digest no longer
+// follows from.
+func parseCollectFrom(value string) (time.Time, bool) {
+	if value == "" {
+		return time.Time{}, true
+	}
+	at, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil || at.IsZero() || formatCollectFrom(at) != value {
+		return time.Time{}, false
+	}
+	return at, true
+}
+
+// formatCollectFrom renders a boundary in the one spelling parseCollectFrom accepts.
+// The zero time is no boundary and renders as none, so a caller cannot record an
+// instant that means "unbounded" and one that means "collect nothing older than the
+// zero time" as the same bytes.
+func formatCollectFrom(at time.Time) string {
+	if at.IsZero() {
+		return ""
+	}
+	return at.UTC().Format(time.RFC3339Nano)
 }
 
 // validID reports whether id has the exact shape ADR-0019 §8 fixes. Lower case

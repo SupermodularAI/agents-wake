@@ -331,7 +331,7 @@ func TestDiscoveryScopeGrantsProjectDiscoveryInsideAConsentedRepository(t *testi
 	if err != nil {
 		t.Fatalf("OpenRepos() error = %v", err)
 	}
-	if _, err := repos.Register(root, filepath.Base(root)); err != nil {
+	if _, err := repos.Register(root, filepath.Base(root), time.Time{}); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 
@@ -354,7 +354,7 @@ func TestDiscoveryScopeResolvesTheConsentedRootFromASubdirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenRepos() error = %v", err)
 	}
-	if _, registerErr := repos.Register(root, filepath.Base(root)); registerErr != nil {
+	if _, registerErr := repos.Register(root, filepath.Base(root), time.Time{}); registerErr != nil {
 		t.Fatalf("Register() error = %v", registerErr)
 	}
 

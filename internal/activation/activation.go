@@ -68,7 +68,17 @@ func Init(paths config.Paths, root, claudeDir, executable string, full bool) (in
 	if err != nil {
 		return 0, err
 	}
-	id, err := repos.Register(root, filepath.Base(root))
+	// The boundary is recorded at registration, before a single event is read, and it
+	// is the only durable trace of what this call promised: without it the trigger this
+	// command installs would walk the whole history at the next session start and import
+	// exactly what the disclosure said it would not (ADR-0024, ADR-0025). Under --full
+	// there is no boundary to record — the user asked for everything — and registering
+	// with none also clears one an earlier plain init left.
+	boundary := time.Now().UTC()
+	if full {
+		boundary = time.Time{}
+	}
+	id, err := repos.Register(root, filepath.Base(root), boundary)
 	if err != nil {
 		return 0, err
 	}
