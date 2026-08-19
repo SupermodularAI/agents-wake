@@ -109,8 +109,8 @@ func TestPlanUninstallResolvesASymlinkedExecutable(t *testing.T) {
 		t.Fatalf("resolving the temporary directory: %v", err)
 	}
 	link := filepath.Join(dir, "wake-link")
-	if err := os.Symlink(target, link); err != nil {
-		t.Fatalf("Symlink() error = %v", err)
+	if linkErr := os.Symlink(target, link); linkErr != nil {
+		t.Fatalf("Symlink() error = %v", linkErr)
 	}
 
 	plan, err := PlanUninstall(paths, claudeDir, link)
@@ -209,8 +209,8 @@ func TestRemoveIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PlanUninstall() error = %v", err)
 	}
-	if _, err := plan.Remove(); err != nil {
-		t.Fatalf("first Remove() error = %v", err)
+	if _, firstErr := plan.Remove(); firstErr != nil {
+		t.Fatalf("first Remove() error = %v", firstErr)
 	}
 
 	removed, err := plan.Remove()
