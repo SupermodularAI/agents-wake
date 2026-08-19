@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/adapter/claudecode"
 	"github.com/SupermodularAI/agents-wake/internal/config"
 	"github.com/SupermodularAI/agents-wake/internal/health"
 	"github.com/SupermodularAI/agents-wake/internal/inventory"
@@ -44,7 +46,7 @@ func TestInitPreservesHooksAndImportsOnlyConsentedHistory(t *testing.T) {
 		t.Fatalf("hookCommandFor() error = %v", err)
 	}
 
-	written, err := Init(paths, root, claudeDir, executable)
+	written, err := Init(paths, root, claudeDir, executable, true)
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -63,9 +65,151 @@ func TestInitPreservesHooksAndImportsOnlyConsentedHistory(t *testing.T) {
 	if string(raw) == settings || !containsCommand(raw, "existing command") || !containsCommand(raw, command) {
 		t.Fatalf("settings lost existing or Wake hook: %s", raw)
 	}
-	second, err := Init(paths, root, claudeDir, executable)
+	second, err := Init(paths, root, claudeDir, executable, true)
 	if err != nil || second != 0 {
 		t.Fatalf("second Init() = %d, %v; want 0, nil", second, err)
+	}
+	// The second --full pass re-scans the same source and writes nothing twice.
+	// event_id dedup in internal/store is the only mechanism (ADR-0004); no
+	// watermark is involved, which is what makes a re-scan safe rather than merely
+	// cheap.
+	entries, err = store.New(filepath.Join(paths.DataDir, eventsFile)).Entries(0)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("after a second full init: entries = %d, error = %v; want 1", len(entries), err)
+	}
+}
+
+// A plain `wake init` does not walk harness history at all.
+//
+// Asserted with a call counter rather than an empty result, because the two are the
+// same number: a walk over a machine with no transcripts also returns 0. The
+// fixture deliberately holds one terminal call, so an accidental walk would be
+// visible — and the --full leg at the end is the positive control that proves the
+// counter can move, without which the zero above proves nothing.
+func TestInitWithoutFullNeverWalksHarnessHistory(t *testing.T) {
+	paths := testPaths(t)
+	claudeDir, root := inventoryFixture(t)
+	original := importHistory
+	t.Cleanup(func() { importHistory = original })
+	walks := 0
+	importHistory = func(repos *config.Repos, claudeDir string, destination *store.Store, stale claudecode.Staleness) (int, health.Scan, error) {
+		walks++
+		return original(repos, claudeDir, destination, stale)
+	}
+
+	written, err := Init(paths, root, claudeDir, testExecutable(t), false)
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	if walks != 0 {
+		t.Errorf("Init() entered the history walk %d times, want 0", walks)
+	}
+	if written != 0 {
+		t.Errorf("Init() wrote %d events, want 0", written)
+	}
+	// The spool is never created, which is the same fact from the filesystem's side.
+	if _, statErr := os.Stat(filepath.Join(paths.DataDir, eventsFile)); !os.IsNotExist(statErr) {
+		t.Errorf("Stat(spool) = %v, want it never created", statErr)
+	}
+	// Registration, the consented list and the triggers are unconditional (ADR-0016
+	// layer 2, ADR-0010): only the import is gated.
+	repos, err := config.OpenRepos(paths)
+	if err != nil {
+		t.Fatalf("OpenRepos() error = %v", err)
+	}
+	consented, err := repos.ConsentedRoot(root)
+	if err != nil || consented != root {
+		t.Errorf("ConsentedRoot() = %q, %v; want %q", consented, err, root)
+	}
+	identity, err := repos.Identify(root)
+	if err != nil {
+		t.Fatalf("Identify() error = %v", err)
+	}
+	settings, err := config.Load(paths)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	list, err := settings.StringList("scan.repos")
+	if err != nil || !slices.Contains(list, identity.ID) {
+		t.Errorf("scan.repos = %v, %v; want it to hold the registered id", list, err)
+	}
+	if state, hookErr := HookState(claudeDir); hookErr != nil || state != 2 {
+		t.Errorf("HookState() = %d, %v; want 2 installed triggers", state, hookErr)
+	}
+	// The hook counters are recorded and the scan counters are not: a zero-valued
+	// health.Scan would read as "collects zero" for a state nobody measured, and
+	// doctor must be able to say "never scanned" instead (ADR-0010).
+	report, err := health.New(paths.HealthFile).Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if report.Hooks.Installed != 2 {
+		t.Errorf("Hooks.Installed = %d, want 2", report.Hooks.Installed)
+	}
+	if !report.Scan.At.IsZero() {
+		t.Errorf("Scan = %+v, want no scan recorded at all", report.Scan)
+	}
+
+	// A second plain init on an already-consented repo is still a no-op, and still
+	// does not walk.
+	second, err := Init(paths, root, claudeDir, testExecutable(t), false)
+	if err != nil || second != 0 || walks != 0 {
+		t.Fatalf("second plain Init() = %d, %v with %d walks; want 0, nil, 0", second, err, walks)
+	}
+
+	// The positive control: the same counter moves under --full, and the history
+	// the default path skipped is still there to be had.
+	full, err := Init(paths, root, claudeDir, testExecutable(t), true)
+	if err != nil {
+		t.Fatalf("Init(full) error = %v", err)
+	}
+	if walks != 1 || full != 1 {
+		t.Fatalf("Init(full) = %d events after %d walks; want 1 event after 1 walk", full, walks)
+	}
+}
+
+// A repo consented with a plain init and backfilled afterwards ends up
+// byte-identical in the store to one that imported from the start.
+//
+// Both halves run against one Paths on purpose. A second config directory would
+// carry a different salt, so the repo id — a salted hash of the consented root
+// (ADR-0019) — would differ and the bytes could not match however correct the code
+// was. Same salt, same source events, ids derived from those events (ADR-0004):
+// the spool is reproducible, and record.Record carries no write-time field that
+// could make it otherwise.
+func TestBackfillMatchesAFullInitByteForByte(t *testing.T) {
+	paths := testPaths(t)
+	claudeDir, root := inventoryFixture(t)
+	spool := filepath.Join(paths.DataDir, eventsFile)
+
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), false); err != nil {
+		t.Fatalf("plain Init() error = %v", err)
+	}
+	t.Chdir(root)
+	if _, err := Ingest(paths, claudeDir); err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+	viaIngest, err := os.ReadFile(spool)
+	if err != nil {
+		t.Fatalf("ReadFile() after the backfill error = %v", err)
+	}
+
+	if discardErr := store.New(spool).Discard(); discardErr != nil {
+		t.Fatalf("Discard() error = %v", discardErr)
+	}
+	if _, initErr := Init(paths, root, claudeDir, testExecutable(t), true); initErr != nil {
+		t.Fatalf("Init(full) error = %v", initErr)
+	}
+	viaFull, err := os.ReadFile(spool)
+	if err != nil {
+		t.Fatalf("ReadFile() after the full init error = %v", err)
+	}
+
+	if string(viaIngest) != string(viaFull) {
+		t.Errorf("backfilled spool and full-init spool differ:\n%s\n---\n%s", viaIngest, viaFull)
+	}
+	if len(viaIngest) == 0 {
+		t.Fatal("both spools are empty; the fixture proved nothing")
 	}
 }
 
@@ -85,7 +229,7 @@ func TestRebuildReplacesOnlyTheDerivedEventStore(t *testing.T) {
 		t.Fatalf("WriteFile() transcript error = %v", err)
 	}
 	paths := testPaths(t)
-	if _, err := Init(paths, root, claudeDir, testExecutable(t)); err != nil {
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 	projectsBefore, err := os.ReadFile(paths.ProjectsFile)
@@ -232,7 +376,7 @@ func TestIngestFromASubdirectoryInventoriesTheWholeRepository(t *testing.T) {
 	if err := os.MkdirAll(inside, 0o700); err != nil {
 		t.Fatalf("MkdirAll() error = %v", err)
 	}
-	if _, err := Init(paths, root, claudeDir, testExecutable(t)); err != nil {
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 	t.Chdir(inside)
@@ -304,7 +448,7 @@ func TestInitInventoriesTheProjectItJustConsented(t *testing.T) {
 	paths := testPaths(t)
 	claudeDir, root := inventoryFixture(t)
 
-	if _, err := Init(paths, root, claudeDir, testExecutable(t)); err != nil {
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 	raw, err := os.ReadFile(paths.PrimitivesFile)
@@ -331,16 +475,16 @@ func TestAnUnreadableCounterFileDoesNotStopAnyCommand(t *testing.T) {
 			var err error
 			switch name {
 			case "init":
-				_, err = Init(paths, root, claudeDir, testExecutable(t))
+				_, err = Init(paths, root, claudeDir, testExecutable(t), true)
 			case "ingest":
-				if _, initErr := Init(paths, root, claudeDir, testExecutable(t)); initErr != nil {
+				if _, initErr := Init(paths, root, claudeDir, testExecutable(t), true); initErr != nil {
 					t.Fatalf("Init() error = %v", initErr)
 				}
 				writeFixture(t, paths.HealthFile, `{"version":99}`)
 				t.Chdir(root)
 				_, err = Ingest(paths, claudeDir)
 			case "remove":
-				if _, initErr := Init(paths, root, claudeDir, testExecutable(t)); initErr != nil {
+				if _, initErr := Init(paths, root, claudeDir, testExecutable(t), true); initErr != nil {
 					t.Fatalf("Init() error = %v", initErr)
 				}
 				writeFixture(t, paths.HealthFile, `{"version":99}`)
@@ -368,7 +512,7 @@ func TestAnUnreadableCounterFileDoesNotStopAnyCommand(t *testing.T) {
 func TestUninstallStillReportsTheHooksItRemovedWhenTheCountersCannotBeWritten(t *testing.T) {
 	paths := testPaths(t)
 	claudeDir, root := inventoryFixture(t)
-	if _, err := Init(paths, root, claudeDir, testExecutable(t)); err != nil {
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 	// Read-only, so creating the counter file's lock fails. Restored afterwards, or
@@ -469,7 +613,7 @@ func TestIngestSurfacesPendingAndInterruptedCalls(t *testing.T) {
 	}
 	paths := testPaths(t)
 
-	written, err := Init(paths, root, claudeDir, testExecutable(t))
+	written, err := Init(paths, root, claudeDir, testExecutable(t), true)
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
@@ -525,7 +669,7 @@ func stalenessFixture(t *testing.T, age time.Duration) (config.Paths, string) {
 	}
 
 	paths := testPaths(t)
-	if _, err := Init(paths, root, claudeDir, testExecutable(t)); err != nil {
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 	return paths, claudeDir
