@@ -26,6 +26,25 @@ func seedSettings(t *testing.T) (claudeDir, original string) {
 	return claudeDir, original
 }
 
+// claudeDirWith writes a settings file holding content, for the documents this build
+// refuses to edit.
+func claudeDirWith(t *testing.T, content string) string {
+	t.Helper()
+	claudeDir := filepath.Join(t.TempDir(), "claude")
+	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	writeSettings(t, claudeDir, content)
+	return claudeDir
+}
+
+func writeSettings(t *testing.T, claudeDir, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(claudeDir, settingsFileName), []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+}
+
 // seedBothRoots fills the two roots with something a removal has to take with it.
 func seedBothRoots(t *testing.T, paths config.Paths) {
 	t.Helper()
@@ -43,6 +62,34 @@ func gone(t *testing.T, path string) {
 	t.Helper()
 	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("Stat(%s) error = %v, want fs.ErrNotExist", path, err)
+	}
+}
+
+func stillThere(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("Stat(%s) error = %v, want it left in place", path, err)
+	}
+}
+
+// assertRefusedNothingRemoved checks a refusal says the two things only the removal
+// command can say: that nothing has been removed, and which command to run once the
+// settings file is repaired. `wake init` is the one answer that must never appear —
+// it is the opposite of what the user asked for.
+func assertRefusedNothingRemoved(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("error = nil, want the settings document refused")
+	}
+	message := err.Error()
+	if strings.Contains(message, "wake init") {
+		t.Errorf("refusal = %q; it sends somebody who asked for removal to the command that installs", message)
+	}
+	if !strings.Contains(message, "run wake uninstall again") {
+		t.Errorf("refusal = %q, want it to name the command to run once the file is repaired", message)
+	}
+	if !strings.Contains(message, "nothing has been removed") {
+		t.Errorf("refusal = %q, want it to say plainly that nothing has been removed", message)
 	}
 }
 
@@ -98,6 +145,85 @@ func TestPlanUninstallRefusesARelativeExecutable(t *testing.T) {
 	}
 }
 
+// A settings document this build refuses to edit is refused before anything has been
+// disclosed, and refused in `uninstall`'s own words: nothing has been removed, and the
+// command to run once the file is repaired is the one the user asked for.
+func TestPlanUninstallRefusesASettingsDocumentItWillNotEdit(t *testing.T) {
+	// Named rather than keyed by content: t.Run puts the subtest's name in
+	// t.TempDir()'s path, and testExecutable refuses a path holding a character a
+	// hook command cannot carry — which every one of these documents does.
+	for _, c := range []struct{ name, content string }{
+		{"the document is null", `null`},
+		{"the document is an array", `[]`},
+		{"the document is a string", `"text"`},
+		{"the document is not JSON", `{not json`},
+		{"hooks is a number", `{"hooks":5}`},
+		{"a hook event is a number", `{"hooks":{"SessionStart":5}}`},
+		// Not one of hookEvents: removeHooks sweeps every event key, so the refusal
+		// this raises has to be pre-checked over every event key too.
+		{"an event this build does not register is a number", `{"hooks":{"SomeOtherEvent":5}}`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			paths := testPaths(t)
+			claudeDir := claudeDirWith(t, c.content)
+			seedBothRoots(t, paths)
+			executable := testExecutable(t)
+
+			plan, err := PlanUninstall(paths, claudeDir, executable)
+
+			assertRefusedNothingRemoved(t, err)
+			if plan != (UninstallPlan{}) {
+				t.Error("PlanUninstall() returned a plan alongside the refusal")
+			}
+			for _, path := range []string{paths.DataDir, paths.ConfigDir, executable} {
+				stillThere(t, path)
+			}
+		})
+	}
+}
+
+// A broken symlink is the same refusal by another route, and the realistic one: a
+// dotfile store whose link is committed and whose target is not checked out yet.
+func TestPlanUninstallRefusesABrokenSettingsLink(t *testing.T) {
+	paths := testPaths(t)
+	claudeDir := filepath.Join(t.TempDir(), "claude")
+	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "dotfiles", "settings.json"), filepath.Join(claudeDir, settingsFileName)); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	seedBothRoots(t, paths)
+	executable := testExecutable(t)
+
+	_, err := PlanUninstall(paths, claudeDir, executable)
+
+	assertRefusedNothingRemoved(t, err)
+	for _, path := range []string{paths.DataDir, paths.ConfigDir, executable} {
+		stillThere(t, path)
+	}
+}
+
+// The sentinels stopped carrying a command, so `init` has to name its own: a settings
+// document it refuses still tells the user to run `wake init` again.
+func TestInitNamesInitAsTheStepAfterASettingsRefusal(t *testing.T) {
+	paths := testPaths(t)
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	claudeDir := claudeDirWith(t, "null")
+
+	_, err := Init(paths, root, claudeDir, testExecutable(t))
+
+	if err == nil {
+		t.Fatal("Init() error = nil, want the settings document refused")
+	}
+	if !strings.Contains(err.Error(), "run wake init again") {
+		t.Errorf("refusal = %q, want it to name the command to run once the file is repaired", err.Error())
+	}
+}
+
 // An installation reached through a link has the real file recorded in its hook
 // command, so unlinking the link would leave the binary the hook named on disk.
 func TestPlanUninstallResolvesASymlinkedExecutable(t *testing.T) {
@@ -120,6 +246,57 @@ func TestPlanUninstallResolvesASymlinkedExecutable(t *testing.T) {
 	}
 	if plan.Executable != target {
 		t.Errorf("plan.Executable = %q, want the link's target %q", plan.Executable, target)
+	}
+	if plan.Launcher != link {
+		t.Errorf("plan.Launcher = %q, want the link the command was invoked through %q", plan.Launcher, link)
+	}
+}
+
+// A link left behind is a `wake` on PATH that resolves to nothing — an invocation that
+// fails with "No such file or directory" rather than "command not found", which is
+// worse than either. The ticket asks for nothing Wake-related left on disk, so the link
+// goes too, and it is disclosed because it is deleted.
+func TestRemoveAlsoRemovesTheLinkItWasInvokedThrough(t *testing.T) {
+	paths := testPaths(t)
+	claudeDir, _ := seedSettings(t)
+	seedBothRoots(t, paths)
+	target := testExecutable(t)
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolving the temporary directory: %v", err)
+	}
+	link := filepath.Join(dir, "wake-link")
+	if linkErr := os.Symlink(target, link); linkErr != nil {
+		t.Skipf("symlinks unavailable: %v", linkErr)
+	}
+	plan, err := PlanUninstall(paths, claudeDir, link)
+	if err != nil {
+		t.Fatalf("PlanUninstall() error = %v", err)
+	}
+
+	if _, removeErr := plan.Remove(); removeErr != nil {
+		t.Fatalf("Remove() error = %v", removeErr)
+	}
+
+	gone(t, target)
+	if _, lstatErr := os.Lstat(link); !errors.Is(lstatErr, fs.ErrNotExist) {
+		t.Errorf("Lstat(%s) error = %v; the link is still on PATH pointing at nothing", link, lstatErr)
+	}
+}
+
+// A plain file on PATH — what both documented installations leave — has no link to
+// disclose, so the run prints the same four paths it always did.
+func TestPlanUninstallHasNoLauncherForAPlainFile(t *testing.T) {
+	paths := testPaths(t)
+	claudeDir, _ := seedSettings(t)
+
+	plan, err := PlanUninstall(paths, claudeDir, testExecutable(t))
+
+	if err != nil {
+		t.Fatalf("PlanUninstall() error = %v", err)
+	}
+	if plan.Launcher != "" {
+		t.Errorf("plan.Launcher = %q, want empty for a path that is not a link", plan.Launcher)
 	}
 }
 
@@ -230,6 +407,9 @@ func TestRemoveKeepsTheBinaryWhenAnEarlierStepFails(t *testing.T) {
 		name string
 		// arrange breaks one step and returns the claude directory to plan against.
 		arrange func(t *testing.T, paths config.Paths) string
+		// breakAfterPlanning breaks a step PlanUninstall pre-checks, so the failure
+		// lands in Remove rather than in the plan.
+		breakAfterPlanning func(t *testing.T, claudeDir string)
 		// dataDirGone says whether the failure came after step 1 finished.
 		dataDirGone bool
 	}{
@@ -240,15 +420,16 @@ func TestRemoveKeepsTheBinaryWhenAnEarlierStepFails(t *testing.T) {
 			name: "a settings document this build refuses",
 			arrange: func(t *testing.T, paths config.Paths) string {
 				t.Helper()
-				claudeDir := filepath.Join(t.TempDir(), "claude")
-				if err := os.MkdirAll(claudeDir, 0o700); err != nil {
-					t.Fatalf("MkdirAll() error = %v", err)
-				}
-				if err := os.WriteFile(filepath.Join(claudeDir, settingsFileName), []byte("null"), 0o600); err != nil {
-					t.Fatalf("WriteFile() error = %v", err)
-				}
+				claudeDir, _ := seedSettings(t)
 				seedBothRoots(t, paths)
 				return claudeDir
+			},
+			// Replaced after the plan resolved: PlanUninstall refuses this document up
+			// front, so the only way step 1 still meets it is the race the pre-check
+			// cannot close.
+			breakAfterPlanning: func(t *testing.T, claudeDir string) {
+				t.Helper()
+				writeSettings(t, claudeDir, "null")
 			},
 		},
 		{
@@ -281,6 +462,9 @@ func TestRemoveKeepsTheBinaryWhenAnEarlierStepFails(t *testing.T) {
 			if err != nil {
 				t.Fatalf("PlanUninstall() error = %v", err)
 			}
+			if c.breakAfterPlanning != nil {
+				c.breakAfterPlanning(t, claudeDir)
+			}
 
 			_, err = plan.Remove()
 
@@ -294,5 +478,27 @@ func TestRemoveKeepsTheBinaryWhenAnEarlierStepFails(t *testing.T) {
 				gone(t, paths.DataDir)
 			}
 		})
+	}
+}
+
+// A settings file that changes shape between the pre-check and the sweep is refused in
+// the same words, because it is the same answer: nothing has been removed, and the
+// command to run once the file is repaired is `wake uninstall`.
+func TestRemoveRestatesALostRaceOnTheSettingsFileAsItsOwnRefusal(t *testing.T) {
+	paths := testPaths(t)
+	claudeDir, _ := seedSettings(t)
+	seedBothRoots(t, paths)
+	executable := testExecutable(t)
+	plan, err := PlanUninstall(paths, claudeDir, executable)
+	if err != nil {
+		t.Fatalf("PlanUninstall() error = %v", err)
+	}
+	writeSettings(t, claudeDir, "null")
+
+	_, err = plan.Remove()
+
+	assertRefusedNothingRemoved(t, err)
+	for _, path := range []string{paths.DataDir, paths.ConfigDir, executable} {
+		stillThere(t, path)
 	}
 }
