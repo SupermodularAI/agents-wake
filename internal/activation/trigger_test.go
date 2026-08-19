@@ -23,7 +23,7 @@ func triggerFixture(t *testing.T) (paths config.Paths, claudeDir, root string) {
 	t.Helper()
 	paths = testPaths(t)
 	claudeDir, root = inventoryFixture(t)
-	if _, err := Init(paths, root, claudeDir, testExecutable(t)); err != nil {
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 	return paths, claudeDir, root
@@ -51,7 +51,7 @@ func TestTriggerScansWhenTheLockIsFree(t *testing.T) {
 func TestTriggerSkipsWhenAnotherScanHoldsTheLock(t *testing.T) {
 	paths := testPaths(t)
 	claudeDir, root := inventoryFixture(t)
-	if _, err := Init(paths, root, claudeDir, testExecutable(t)); err != nil {
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 	// Init already scanned, so the spool exists; the assertion below is that this
@@ -129,7 +129,7 @@ func TestScanCountersDistinguishAnUnreadableSourceFromACleanZero(t *testing.T) {
 		if err := os.WriteFile(transcriptOf(claudeDir), []byte(`{"uuid":"entry-1","sessionId":"session-1","cwd":"`+root+`","timestamp":"`+recent+`","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`), 0o600); err != nil {
 			t.Fatalf("WriteFile() error = %v", err)
 		}
-		if _, err := Init(paths, root, claudeDir, testExecutable(t)); err != nil {
+		if _, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil {
 			t.Fatalf("Init() error = %v", err)
 		}
 
@@ -159,7 +159,7 @@ func TestScanCountersDistinguishAnUnreadableSourceFromACleanZero(t *testing.T) {
 		}, "\n")), 0o600); err != nil {
 			t.Fatalf("WriteFile() error = %v", err)
 		}
-		if _, err := Init(paths, root, claudeDir, testExecutable(t)); err != nil {
+		if _, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil {
 			t.Fatalf("Init() error = %v", err)
 		}
 
@@ -222,7 +222,7 @@ func TestScanCountersDistinguishAnUnreadableSourceFromACleanZero(t *testing.T) {
 			t.Fatalf("Chmod() error = %v", err)
 		}
 		t.Cleanup(func() { _ = os.Chmod(transcript, 0o600) })
-		if _, err := Init(paths, root, claudeDir, testExecutable(t)); err != nil {
+		if _, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil {
 			t.Fatalf("Init() error = %v", err)
 		}
 
@@ -320,7 +320,7 @@ func TestInitRejectsAnUnsupportedInstallationBeforeWritingAnything(t *testing.T)
 			executable := c.arrange(t, claudeDir)
 			before := settingsSnapshot(t, settingsPath(claudeDir))
 
-			if _, err := Init(paths, root, claudeDir, executable); err == nil {
+			if _, err := Init(paths, root, claudeDir, executable, true); err == nil {
 				t.Fatal("Init() error = nil, want a refusal for an installation that cannot host Wake's trigger")
 			}
 
@@ -408,7 +408,7 @@ func TestConcurrentInitAndRemoveLeaveValidJsonAndKeepThirdPartyHooks(t *testing.
 		go func() {
 			defer actors.Done()
 			if i%2 == 0 {
-				_, _ = Init(paths, root, claudeDir, executable)
+				_, _ = Init(paths, root, claudeDir, executable, true)
 				return
 			}
 			_, _ = Uninstall(paths, claudeDir, false)

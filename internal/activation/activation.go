@@ -29,7 +29,7 @@ const eventsFile = "events.ndjson"
 const ingestLockName = "ingest.lock"
 
 // Init records consent, adds Wake's trigger without replacing existing hooks,
-// and imports available Claude Code history.
+// and imports available Claude Code history only when full is set.
 //
 // Every refusal that can be decided from the arguments alone is raised first —
 // before consent is recorded, before config.toml is touched and before the settings
@@ -45,7 +45,18 @@ const ingestLockName = "ingest.lock"
 // its decoding rejects — is decided by claudeDir alone, so leaving any of them to
 // be raised from inside installHooks would raise it after Register and AddToList
 // had already written.
-func Init(paths config.Paths, root, claudeDir, executable string) (int, error) {
+//
+// full gates the historical import and nothing else (ADR-0024): the same root is
+// consented, the same refusals are raised first, the same trigger is written, and
+// the same disclosure is owed either way. Without it, collection starts forward
+// from this call, and a later `wake ingest`, a trigger, or `init --full` recovers
+// exactly the same history — every id is derived from the source event (ADR-0004)
+// and the cursor is an optimisation rather than a record of what has been seen
+// (ADR-0015). No scan record is written on that path either: RecordScan replaces
+// the scan counters wholesale, so a zero-valued health.Scan would report
+// "collects zero" for a state nobody measured and erase what an earlier import
+// did find — the distinction ADR-0010 asks doctor to keep.
+func Init(paths config.Paths, root, claudeDir, executable string, full bool) (int, error) {
 	command, err := hookCommandFor(executable)
 	if err != nil {
 		return 0, err
@@ -74,7 +85,17 @@ func Init(paths config.Paths, root, claudeDir, executable string) (int, error) {
 	}
 
 	events := store.New(filepath.Join(paths.DataDir, eventsFile))
-	written, scan, err := ingestHistory(repos, claudeDir, events, staleness(paths))
+	if !full {
+		// No walk, and deliberately no scan record either. RecordScan replaces the
+		// scan counters wholesale (internal/health), so a zero-valued health.Scan
+		// would render "collects zero" for a state nobody measured — the distinction
+		// ADR-0010 asks doctor to keep — and would erase what an earlier --full or
+		// `wake ingest` actually found. Forward-only is achieved by not calling the
+		// import; nothing stands in for it (ADR-0015: the cursor is an optimisation,
+		// not a correctness mechanism).
+		return 0, refreshInventory(paths, repos, claudeDir, root, events)
+	}
+	written, scan, err := importHistory(repos, claudeDir, events, staleness(paths))
 	// The counters are recorded whether the scan succeeded or not: a partial
 	// activation — hooks written, history import failed — is reported through
 	// doctor rather than repaired silently, and the counters are the report.
@@ -98,7 +119,7 @@ func Ingest(paths config.Paths, claudeDir string) (int, error) {
 		return 0, fmt.Errorf("resolving current directory: %w", err)
 	}
 	events := store.New(filepath.Join(paths.DataDir, eventsFile))
-	written, scan, err := ingestHistory(repos, claudeDir, events, staleness(paths))
+	written, scan, err := importHistory(repos, claudeDir, events, staleness(paths))
 	if recordErr := health.New(paths.HealthFile).RecordScan(scan); recordErr != nil && err == nil {
 		err = recordErr
 	}
@@ -202,6 +223,13 @@ func staleness(paths config.Paths) claudecode.Staleness {
 	}
 	return claudecode.Staleness{Timeout: timeout, Now: time.Now().UTC()}
 }
+
+// importHistory is ingestHistory behind a variable so a test can assert that a
+// plain `wake init` never enters it. An empty result is not that assertion — a walk
+// that found nothing and a walk that never ran produce the same number — and
+// ADR-0024's decision is about the walk, not about the count. Same device, and the
+// same reason, as internal/cli's hookChild.
+var importHistory = ingestHistory
 
 // ingestHistory imports every reachable transcript and reports both what it wrote
 // and what it could not do.
