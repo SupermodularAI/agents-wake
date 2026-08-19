@@ -46,8 +46,12 @@ wake report
 ```
 
 `wake init` explains what it will change before doing so. It consents the
-current project, imports its existing Claude Code history, and installs
-Wake-owned Claude Code session hooks. Existing hooks are preserved.
+current project and installs Wake-owned Claude Code session hooks, and
+collection starts from that moment. Existing hooks are preserved.
+
+Existing history is not imported by default. `wake init --full` imports this
+project's Claude Code history in the same call, and `wake ingest` does it
+afterwards for a project that is already consented.
 
 Open the local dashboard when you want a browser view:
 
@@ -59,6 +63,7 @@ Wake listens only on [127.0.0.1:8080](http://127.0.0.1:8080). The hooks keep
 collection current; use these commands when needed:
 
 ```sh
+wake init --full        # Consent and import existing history now
 wake ingest             # Re-scan consented history
 wake ingest --rebuild   # Rebuild the derived event store
 wake doctor             # Inspect collection and hook health
@@ -70,6 +75,7 @@ wake remove             # Remove Wake's Claude Code integration
 | `wake report` | Print local activity in the terminal. |
 | `wake serve` | Open the local dashboard. |
 | `wake init` | Enable collection for the current project. |
+| `wake init --full` | Enable collection and import existing history now. |
 | `wake ingest` | Import activity for consented projects. |
 | `wake doctor` | Show collection and hook health. |
 | `wake remove` | Remove Wake-owned Claude Code hooks. |
