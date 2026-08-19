@@ -200,7 +200,7 @@ func consent(t *testing.T, paths config.Paths, root string) {
 	if err != nil {
 		t.Fatalf("OpenRepos() error = %v", err)
 	}
-	if _, err := repos.Register(root, filepath.Base(root)); err != nil {
+	if _, err := repos.Register(root, filepath.Base(root), time.Time{}); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 }

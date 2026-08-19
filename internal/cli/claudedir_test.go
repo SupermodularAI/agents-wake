@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Acceptance criterion 2: every command that reads Claude Code's directory reads
@@ -79,7 +80,7 @@ func TestEveryCommandResolvesTheSameClaudeCodeDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ingest error = %v", err)
 	}
-	if !strings.Contains(out, "Imported 1 terminal events.") {
+	if !strings.Contains(out, "Imported 1 terminal event.") {
 		t.Errorf("ingest found no transcript under %q:\n%s", dir, out)
 	}
 
@@ -89,12 +90,20 @@ func TestEveryCommandResolvesTheSameClaudeCodeDirectory(t *testing.T) {
 	// nothing forever and never surfaces an error. Its witness is therefore the
 	// counters it leaves behind rather than anything it prints: a second transcript,
 	// which only a scan of dir can find, and which doctor then reads back.
+	//
+	// Its entries are timestamped now rather than in the past, because a trigger scan
+	// imports only what happened after the init that installed it (ADR-0024,
+	// ADR-0025): a historical transcript here would be correctly excluded, and the
+	// test would then be unable to tell a hook scan that resolved the wrong directory
+	// from one that resolved the right one and declined the history. The explicit
+	// `wake ingest` above is the opposite case and keeps its historical fixture.
 	hookScanDir := filepath.Join(dir, "projects", "hook-session")
 	if err = os.MkdirAll(hookScanDir, 0o700); err != nil {
 		t.Fatalf("MkdirAll() hook transcript error = %v", err)
 	}
-	hookTranscript := `{"uuid":"entry-3","sessionId":"session-2","cwd":"` + consented + `","timestamp":"2026-08-17T13:00:00Z","message":{"content":[{"type":"tool_use","id":"call-2","name":"Bash"}]}}
-{"uuid":"entry-4","sessionId":"session-2","cwd":"` + consented + `","timestamp":"2026-08-17T13:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}`
+	fired := time.Now().UTC().Format(time.RFC3339Nano)
+	hookTranscript := `{"uuid":"entry-3","sessionId":"session-2","cwd":"` + consented + `","timestamp":"` + fired + `","message":{"content":[{"type":"tool_use","id":"call-2","name":"Bash"}]}}
+{"uuid":"entry-4","sessionId":"session-2","cwd":"` + consented + `","timestamp":"` + fired + `","message":{"content":[{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}`
 	if err = os.WriteFile(filepath.Join(hookScanDir, "session.jsonl"), []byte(hookTranscript), 0o600); err != nil {
 		t.Fatalf("WriteFile() hook transcript error = %v", err)
 	}

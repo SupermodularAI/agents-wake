@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -59,7 +60,7 @@ func TestResolveDiscoveryScopeGrantsProjectDiscoveryInsideAConsentedRepository(t
 	if err != nil {
 		t.Fatalf("OpenRepos() error = %v", err)
 	}
-	if _, registerErr := repos.Register(cwd, filepath.Base(cwd)); registerErr != nil {
+	if _, registerErr := repos.Register(cwd, filepath.Base(cwd), time.Time{}); registerErr != nil {
 		t.Fatalf("Register() error = %v", registerErr)
 	}
 

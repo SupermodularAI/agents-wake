@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // packageDir is this package's path relative to the module root. The boundary
@@ -282,14 +283,14 @@ func TestNoErrorPathLeaksTheSaltOrARepoPath(t *testing.T) {
 		{
 			name: "a label holding a path separator",
 			run: func(t *testing.T, p Paths, outer, _ string) ([]string, error) {
-				_, err := openRepos(t, p).Register(outer, label+string(filepath.Separator)+"x")
+				_, err := openRepos(t, p).Register(outer, label+string(filepath.Separator)+"x", time.Time{})
 				return nil, err
 			},
 		},
 		{
 			name: "a root that does not exist",
 			run: func(t *testing.T, p Paths, outer, _ string) ([]string, error) {
-				_, err := openRepos(t, p).Register(filepath.Join(outer, "gone", innerName), label)
+				_, err := openRepos(t, p).Register(filepath.Join(outer, "gone", innerName), label, time.Time{})
 				return nil, err
 			},
 		},
@@ -298,7 +299,7 @@ func TestNoErrorPathLeaksTheSaltOrARepoPath(t *testing.T) {
 			run: func(t *testing.T, p Paths, outer, inner string) ([]string, error) {
 				r := openRepos(t, p)
 				mustRegister(t, r, outer, label)
-				_, err := r.Register(inner, label)
+				_, err := r.Register(inner, label, time.Time{})
 				return nil, err
 			},
 		},

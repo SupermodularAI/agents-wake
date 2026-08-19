@@ -104,7 +104,7 @@ func TestClaudeCodeIsIdempotent(t *testing.T) {
 	}, "\n")
 	destination := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
-	resolve := func(cwd string) (record.Hash, bool) { return repo, cwd == "/repo" }
+	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
 
 	first, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, destination)
 	if err != nil {
@@ -127,7 +127,7 @@ func TestClaudeCodePersistsBothToolCallsFromOneSourceEntry(t *testing.T) {
 	spool := filepath.Join(t.TempDir(), "events.ndjson")
 	destination := store.New(spool)
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
-	resolve := func(cwd string) (record.Hash, bool) { return repo, cwd == "/repo" }
+	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
 
 	first, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, destination)
 	if err != nil {
@@ -175,7 +175,7 @@ func TestClaudeCodeCountsARefusedSubagentCallWithoutWritingIt(t *testing.T) {
 	spool := filepath.Join(t.TempDir(), "events.ndjson")
 	destination := store.New(spool)
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
-	resolve := func(cwd string) (record.Hash, bool) { return repo, cwd == "/repo" }
+	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
 
 	result, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, destination)
 	if err != nil {
@@ -209,7 +209,7 @@ func TestClaudeCodePersistsNoPathShapedValue(t *testing.T) {
 	spool := filepath.Join(t.TempDir(), "events.ndjson")
 	destination := store.New(spool)
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
-	resolve := func(cwd string) (record.Hash, bool) { return repo, cwd == "/repo" }
+	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
 
 	result, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, destination)
 	if err != nil {
@@ -435,7 +435,7 @@ func TestClaudeCodeWritesAnInterruptedCallExactlyOnce(t *testing.T) {
 	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`
 	destination := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
-	resolve := func(cwd string) (record.Hash, bool) { return repo, cwd == "/repo" }
+	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
 	stale := claudecode.Staleness{
 		Timeout: time.Hour,
 		Now:     time.Date(2026, 8, 13, 14, 0, 0, 0, time.UTC),

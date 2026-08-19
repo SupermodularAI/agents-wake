@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/SupermodularAI/agents-wake/internal/keyeddigest"
 )
@@ -143,6 +144,13 @@ func (r *Repos) trustworthy(entries []projectEntry) (kept []projectEntry, refuse
 	for _, entry := range entries {
 		idOK := hmac.Equal([]byte(entry.ID), []byte(r.hashRoot(entry.Root)))
 		matchOK := hmac.Equal([]byte(entry.MatchMAC), []byte(r.matchMAC(entry)))
+		// An unbounded entry may also carry the digest a build from before the
+		// collection boundary existed wrote (legacyMatchMAC): the alternative is that
+		// adding a field to the digest silently stops resolving every repository
+		// already recorded. A bounded entry has exactly one acceptable digest.
+		if !matchOK && entry.CollectFrom == "" {
+			matchOK = hmac.Equal([]byte(entry.MatchMAC), []byte(r.legacyMatchMAC(entry)))
+		}
 		if !idOK || !matchOK {
 			refused++
 			continue
@@ -244,6 +252,32 @@ func (r *Repos) ConsentedRoot(cwd string) (string, error) {
 	return root, nil
 }
 
+// CollectsFrom returns the instant collection begins for the repository with this
+// id, or the zero time when it records no boundary and every event the harness holds
+// for it is therefore in scope (ADR-0025).
+//
+// It answers against the same snapshot Identify resolves against, touching no
+// filesystem, so one scan cannot filter two events by two different boundaries
+// (ADR-0019 §1). An id this table does not hold answers zero as well: the only caller
+// asks after Identify reported a match, so the id came from this snapshot, and an
+// unmatched directory is already outside collection.
+//
+// The boundary is a filter on what a scan imports, never a cursor: it is recorded
+// once, at registration, and no scan advances it (ADR-0015 keeps re-scanning safe by
+// deriving every id from the source event).
+func (r *Repos) CollectsFrom(id string) time.Time {
+	for _, entry := range r.table.Projects {
+		if entry.ID != id {
+			continue
+		}
+		// The value parses: an entry whose boundary this build cannot read never
+		// reaches the snapshot (projectEntry.valid, fail closed).
+		at, _ := parseCollectFrom(entry.CollectFrom)
+		return at
+	}
+	return time.Time{}
+}
+
 // match returns the recorded spelling and id of the entry cwd belongs to, or two
 // empty strings when no recorded spelling is a prefix of it.
 //
@@ -292,8 +326,31 @@ func (r *Repos) match(cwd string) (root, id string) {
 // part of the design, and an entry deleted by one is a consented repository that
 // collects nothing with no error. See withProjectsLock.
 //
+// from is the instant collection begins for a newly recorded repository — ADR-0024's
+// forward-only default, made durable by ADR-0025 so the scan a hook fires honours it
+// too. The zero time records no boundary, which is what an explicit full import asks
+// for: the user wants everything the harness holds, and no instant says that.
+//
+// The boundary is the one part of an existing entry that may change, and every edit
+// narrows what an unattended scan will import or opens it fully at the user's word:
+//
+//   - a zero from clears a recorded boundary, because a user who has asked for the
+//     whole history has asked for it from then on as well;
+//   - a non-zero from onto an entry that records none records it. An unbounded entry
+//     is one every scan imports everything for, so this narrows collection — and the
+//     call that asks for it is the one whose disclosure says collection starts now.
+//     The two ways an entry gets into that state are a full import, which clears the
+//     boundary, and a table written before the boundary existed;
+//   - a non-zero from never *moves* a boundary already recorded: the instant the user
+//     consented is the instant the disclosure was about, and moving it forward on a
+//     later `init` would silently skip everything collected in between.
+//
+// Nothing is lost by recording one: the history stays exactly as reachable as it was,
+// through `wake ingest` or `init --full`, since every id is derived from the source
+// event (ADR-0004).
+//
 // A refused registration writes nothing.
-func (r *Repos) Register(root, label string) (string, error) {
+func (r *Repos) Register(root, label string, from time.Time) (string, error) {
 	if label == "" || strings.ContainsAny(label, "/"+string(filepath.Separator)) {
 		// The label is a repository name, so the reason states the requirement
 		// and InvalidValueError.Value is left empty rather than echoing it.
@@ -335,7 +392,7 @@ func (r *Repos) Register(root, label string) (string, error) {
 		if readErr != nil {
 			return readErr
 		}
-		updated, entryID, changed, decideErr := r.registration(table, canonical, aliases, label, fold)
+		updated, entryID, changed, decideErr := r.registration(table, canonical, aliases, label, fold, from)
 		if decideErr != nil {
 			return decideErr
 		}
@@ -362,9 +419,10 @@ func (r *Repos) Register(root, label string) (string, error) {
 // canonical spelling and the case-folding flag, was obtained before the lock was
 // taken — so the caller can read the table, decide, and write inside one locked
 // section. changed reports whether there is anything to write.
-func (r *Repos) registration(table projectsFile, canonical string, aliases []string, label string, fold bool) (updated projectsFile, id string, changed bool, err error) {
+func (r *Repos) registration(table projectsFile, canonical string, aliases []string, label string, fold bool, from time.Time) (updated projectsFile, id string, changed bool, err error) {
 	// An exact match is a re-registration, not nesting: the id stands, and the
-	// only thing that may change is the set of spellings it answers to.
+	// only thing that may change is the set of spellings it answers to, plus a
+	// recorded boundary an explicit full import clears.
 	if i := slices.IndexFunc(table.Projects, func(e projectEntry) bool { return e.Root == canonical }); i >= 0 {
 		existing := table.Projects[i]
 		added := []string{}
@@ -373,25 +431,49 @@ func (r *Repos) registration(table projectsFile, canonical string, aliases []str
 				added = append(added, alias)
 			}
 		}
-		if len(added) == 0 {
+		// The boundary is the one recorded fact this entry allows to change, and only
+		// in the two directions Register describes.
+		//
+		// Clearing is the explicit full import: the user asked for the whole history in
+		// a call that found the repository already consented.
+		//
+		// Recording is a plain init on an entry that has none — after a full import,
+		// which clears it, or from a table written before the boundary existed. It is
+		// not the forward move Register refuses: there is nothing to move, and an
+		// unbounded entry is one every scan would import everything for. Leaving it
+		// unbounded here is what made a plain `init` print the forward-only disclosure
+		// and then hand the next hook-fired scan the whole history anyway — the
+		// disclosure is unconditional, so this is what makes it true.
+		clearBoundary := from.IsZero() && existing.CollectFrom != ""
+		recordBoundary := !from.IsZero() && existing.CollectFrom == ""
+		if len(added) == 0 && !clearBoundary && !recordBoundary {
 			return table, existing.ID, false, nil
 		}
-		// An alias is a recorded spelling, so ADR-0019 §5's refusal applies to it as
-		// well: a spelling that sits inside another consented root would attribute
-		// that subtree to this repository instead of the one the user consented to
-		// for it, and the recorded spellings would stop being mutually non-nested.
-		// Only the new spellings are checked — the canonical root is already
-		// recorded and any existing alias was checked when it was appended — and this
-		// entry is exempt, because a spelling nested inside its own root resolves to
-		// the same id either way and there is nothing ambiguous to refuse.
-		if nested := nestedWith(table.Projects, added, fold, i); nested != nil {
-			return table, "", false, nested
+		if len(added) > 0 {
+			// An alias is a recorded spelling, so ADR-0019 §5's refusal applies to it as
+			// well: a spelling that sits inside another consented root would attribute
+			// that subtree to this repository instead of the one the user consented to
+			// for it, and the recorded spellings would stop being mutually non-nested.
+			// Only the new spellings are checked — the canonical root is already
+			// recorded and any existing alias was checked when it was appended — and this
+			// entry is exempt, because a spelling nested inside its own root resolves to
+			// the same id either way and there is nothing ambiguous to refuse.
+			if nested := nestedWith(table.Projects, added, fold, i); nested != nil {
+				return table, "", false, nested
+			}
+		}
+		switch {
+		case clearBoundary:
+			existing.CollectFrom = ""
+		case recordBoundary:
+			existing.CollectFrom = formatCollectFrom(from)
 		}
 		// Cloned before appending: the entry is a copy of the recorded one, but its
 		// alias slice still shares the recorded backing array.
 		existing.Aliases = append(slices.Clone(existing.Aliases), added...)
-		// Re-signed, because the digest covers the spellings and this changed them.
-		// The id is not: this is the same repository under a new spelling.
+		// Re-signed, because the digest covers the spellings and the boundary and this
+		// changed one of them. The id is not: this is the same repository, under a new
+		// spelling or with the history it declined now asked for.
 		existing = r.signed(existing)
 		if !existing.valid() {
 			return table, "", false, errUnreadableEntry
@@ -411,6 +493,7 @@ func (r *Repos) registration(table projectsFile, canonical string, aliases []str
 		Root:            canonical,
 		Aliases:         aliases,
 		CaseInsensitive: fold,
+		CollectFrom:     formatCollectFrom(from),
 	})
 	if !entry.valid() {
 		return table, "", false, errUnreadableEntry
@@ -482,17 +565,50 @@ func (r *Repos) NameKey() []byte {
 const matchMACDomain = "wake/match-mac/v1"
 
 // matchMAC is the keyed digest over everything resolution matches an observed
-// working directory against: the entry's canonical root, its aliases in recorded
-// order, and its case-folding flag.
+// working directory against — the entry's canonical root, its aliases in recorded
+// order, and its case-folding flag — followed by the instant collection begins for
+// it.
+//
+// The boundary is in here because nothing else protects it. The id covers the root
+// alone, so a `collect_from` deleted out of a 0600 file would leave an entry that
+// still verifies and now imports every event the repository declined: no error, no
+// counter, and a disclosure that had already promised otherwise (ADR-0025). Covered,
+// the same edit refuses the entry.
 //
 // Not truncated, unlike the id: this value is never printed and never persisted
 // anywhere but the local table, so there is no brevity to trade the margin for.
 //
-// The parts are NUL-separated, which is injective here because a path cannot contain
-// a NUL byte — so no two different entries encode to the same input, and moving an
-// alias's spelling into the root cannot produce the same digest as leaving it where
-// it was.
+// The parts are NUL-separated, which is injective here because neither a path nor an
+// RFC3339 timestamp can contain a NUL byte — so no two different entries encode to
+// the same input, and moving an alias's spelling into the root cannot produce the
+// same digest as leaving it where it was. The boundary sits last and is always
+// terminated, so an entry with no boundary is not the same input as one whose
+// boundary was dropped from the encoding.
 func (r *Repos) matchMAC(entry projectEntry) string {
+	buf := append(matchInput(entry), entry.CollectFrom...)
+	return hex.EncodeToString(keyeddigest.Sum(r.salt, append(buf, 0)))
+}
+
+// legacyMatchMAC is matchMAC's construction from before the collection boundary
+// joined what the digest covers (ADR-0025).
+//
+// It is accepted on read, and only for an entry that records no boundary — which is
+// every entry a build writing this construction could have written. Both halves of
+// that sentence are load-bearing. Without the fallback, adding a field to the digest
+// would stop resolving every repository already in projects.json, and each would
+// hash as itself with Matched false until the user happened to re-run `wake init`.
+// Without the restriction, stripping a recorded boundary would produce an entry this
+// build still accepts, which is the widening the digest exists to catch: a boundary
+// this build wrote can never be edited down to a digest this build honours.
+func (r *Repos) legacyMatchMAC(entry projectEntry) string {
+	return hex.EncodeToString(keyeddigest.Sum(r.salt, matchInput(entry)))
+}
+
+// matchInput is the NUL-separated digest input up to but not including the
+// collection boundary. It is split out so the two constructions cannot drift: the
+// legacy one is this input exactly, which is what makes accepting it a statement
+// about one appended field rather than about a second encoder.
+func matchInput(entry projectEntry) []byte {
 	buf := append([]byte(matchMACDomain), 0)
 	if entry.CaseInsensitive {
 		buf = append(buf, 'f')
@@ -502,8 +618,7 @@ func (r *Repos) matchMAC(entry projectEntry) string {
 		buf = append(buf, spelling...)
 		buf = append(buf, 0)
 	}
-
-	return hex.EncodeToString(keyeddigest.Sum(r.salt, buf))
+	return buf
 }
 
 // signed returns entry with the match digest this build derives for it. Every write
