@@ -7,6 +7,10 @@ BINARY  := wake
 PKG     := github.com/SupermodularAI/agents-wake
 DIST    := dist
 
+# Same variable name and default as install.sh, so an already-exported
+# WAKE_INSTALL_DIR picks the same place whichever install path someone uses.
+WAKE_INSTALL_DIR ?= $(HOME)/.local/bin
+
 # Dev tools live in a separate module file so their ~230 dependencies stay out of
 # the main module's graph. See the comment at the top of go.tools.mod.
 TOOLS   := -modfile=go.tools.mod
@@ -24,7 +28,7 @@ LDFLAGS := -s -w \
 	-X $(PKG)/internal/version.Date=$(DATE)
 
 .DEFAULT_GOAL := help
-.PHONY: help build run test test-race vet lint fmt fmt-check validate tidy tools-update clean
+.PHONY: help build install run test test-race vet lint fmt fmt-check validate tidy tools-update clean
 
 help: ## Show this help
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -32,6 +36,19 @@ help: ## Show this help
 
 build: ## Build the static binary into dist/ (no cgo)
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o $(DIST)/$(BINARY) ./cmd/$(BINARY)
+
+# Plain `install -m 0755`, not `go install`: the latter puts the binary in
+# GOBIN or GOPATH/bin, a location most shells' PATH does not carry by
+# default, which is exactly the "command not found" this target exists to
+# avoid. WAKE_INSTALL_DIR is the same variable install.sh reads.
+install: build ## Build and install the binary to WAKE_INSTALL_DIR (default ~/.local/bin)
+	@mkdir -p $(WAKE_INSTALL_DIR)
+	install -m 0755 $(DIST)/$(BINARY) $(WAKE_INSTALL_DIR)/$(BINARY)
+	@echo "installed $(WAKE_INSTALL_DIR)/$(BINARY)"
+	@case ":$$PATH:" in \
+		*":$(WAKE_INSTALL_DIR):"*) ;; \
+		*) echo "add $(WAKE_INSTALL_DIR) to PATH to run $(BINARY) without its full path" ;; \
+	esac
 
 run: build ## Build and run
 	@./$(DIST)/$(BINARY)
