@@ -87,9 +87,9 @@ func TestInitRegistersTheEnclosingRepositoryRootFromASubdirectory(t *testing.T) 
 	}
 
 	// The disclosure still precedes the result, and still names the files this run
-	// will change (ADR-0010). The full five-path disclosure is covered by
-	// claudedir_test.go; these keep this case honest about the ordering without
-	// duplicating it.
+	// will change (ADR-0010). The whole list is asserted by
+	// TestInitDisclosesAndImportsHistoryOnlyWithFull below; these keep this case
+	// honest about the ordering without duplicating it.
 	for _, want := range []string{
 		paths.ConfigFile,
 		filepath.Join(claudeHome(t), "settings.json"),
@@ -109,6 +109,11 @@ func TestInitRegistersTheEnclosingRepositoryRootFromASubdirectory(t *testing.T) 
 // not about what was there to find. The spool's absence afterwards is the
 // filesystem's witness of the same thing.
 func TestInitDisclosesAndImportsHistoryOnlyWithFull(t *testing.T) {
+	// Neutralised for the reason its neighbour above neutralises them: root discovery
+	// runs git, and a global or system config — an includeIf, a safe.directory, a
+	// core.hooksPath — would otherwise decide what this test consents to.
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
 	paths := isolate(t)
 	root := filepath.Join(t.TempDir(), "repo")
 	if err := os.MkdirAll(root, 0o700); err != nil {
@@ -141,10 +146,15 @@ func TestInitDisclosesAndImportsHistoryOnlyWithFull(t *testing.T) {
 	}
 	for _, want := range []string{
 		paths.ConfigFile,
+		paths.SaltFile,
 		paths.ProjectsFile,
+		paths.PrimitivesFile,
 		paths.HealthFile,
 		filepath.Join(claudeHome(t), "settings.json"),
-		"Existing Claude Code history will not be imported, so " + spool + " is not written.",
+		"Existing Claude Code history will not be imported, so " + spool + " is not written;",
+		// The disclosure is about the triggers too, not only about this call: they are
+		// what would otherwise import the history one session later (ADR-0025).
+		"the session triggers this installs collect only what happens from now on",
 		`Run "wake init --full" to import it now.`,
 		"collection starts now",
 	} {
@@ -154,9 +164,18 @@ func TestInitDisclosesAndImportsHistoryOnlyWithFull(t *testing.T) {
 	}
 	// The count line is what an import that ran looks like, and it is the phrase to
 	// forbid here: the negative sentence above necessarily contains the word
-	// "imported", so the word alone cannot distinguish the two paths.
-	if strings.Contains(out, "terminal events") {
+	// "imported", so the word alone cannot distinguish the two paths. Singular, so it
+	// catches both spellings of the count.
+	if strings.Contains(out, "terminal event") {
 		t.Errorf("plain init reported a count of imported events it never scanned for:\n%s", out)
+	}
+	// Every path the disclosure listed is one this run actually wrote. A list that
+	// names a file init leaves alone is as much a wrong disclosure as one that omits a
+	// file it writes, and the two files added here are the ones nobody asks for.
+	for _, path := range []string{paths.ConfigFile, paths.SaltFile, paths.ProjectsFile, paths.PrimitivesFile, paths.HealthFile} {
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Errorf("Stat(%q) = %v, want a file the disclosure named to exist afterwards", path, statErr)
+		}
 	}
 	if _, statErr := os.Stat(spool); !os.IsNotExist(statErr) {
 		t.Errorf("Stat(spool) = %v, want plain init to create no spool", statErr)
@@ -171,7 +190,7 @@ func TestInitDisclosesAndImportsHistoryOnlyWithFull(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Existing Claude Code history will be imported now.",
-		"Claude Code collection enabled; imported 1 terminal events.",
+		"Claude Code collection enabled; imported 1 terminal event.",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("init --full output is missing %q; got:\n%s", want, out)
