@@ -78,6 +78,13 @@ func Init(paths config.Paths, root, claudeDir, executable string, full bool) (in
 	// exactly what the disclosure said it would not (ADR-0024, ADR-0025). Under --full
 	// there is no boundary to record — the user asked for everything — and registering
 	// with none also clears one an earlier plain init left.
+	//
+	// Every plain init records it, not only the first one in a repository. The
+	// disclosure `wake init` prints is unconditional, because the person typing it does
+	// not know the repository's recorded state, so this call has to make that sentence
+	// true whatever it finds: a repository already consented but unbounded — after a
+	// --full, or from a table written before the boundary existed — is bounded from here.
+	// Register decides which edit that is; it never moves a boundary forward.
 	boundary := time.Now().UTC()
 	if full {
 		boundary = time.Time{}
