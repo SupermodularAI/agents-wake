@@ -46,16 +46,20 @@ const ingestLockName = "ingest.lock"
 // be raised from inside installHooks would raise it after Register and AddToList
 // had already written.
 //
-// full gates the historical import and nothing else (ADR-0024): the same root is
-// consented, the same refusals are raised first, the same trigger is written, and
-// the same disclosure is owed either way. Without it, collection starts forward
-// from this call, and a later `wake ingest`, a trigger, or `init --full` recovers
-// exactly the same history — every id is derived from the source event (ADR-0004)
-// and the cursor is an optimisation rather than a record of what has been seen
-// (ADR-0015). No scan record is written on that path either: RecordScan replaces
-// the scan counters wholesale, so a zero-valued health.Scan would report
-// "collects zero" for a state nobody measured and erase what an earlier import
-// did find — the distinction ADR-0010 asks doctor to keep.
+// full gates the historical import (ADR-0024): the same root is consented, the same
+// refusals are raised first, the same trigger is written, and the same disclosure is
+// owed either way. Without it, collection starts forward from this call — and that is
+// recorded rather than merely intended, because the trigger this call installs runs in
+// a process that was never told (ADR-0025, and see Trigger). The history is still there
+// to be had whenever the user asks for it: `wake ingest` or a later `init --full`
+// recovers exactly the same records, since every id is derived from the source event
+// (ADR-0004) and the cursor is an optimisation rather than a record of what has been
+// seen (ADR-0015).
+//
+// No scan record is written on the default path: RecordScan replaces the scan counters
+// wholesale, so a zero-valued health.Scan would report "collects zero" for a state
+// nobody measured and erase what an earlier import did find — the distinction ADR-0010
+// asks doctor to keep.
 func Init(paths config.Paths, root, claudeDir, executable string, full bool) (int, error) {
 	command, err := hookCommandFor(executable)
 	if err != nil {
@@ -100,9 +104,13 @@ func Init(paths config.Paths, root, claudeDir, executable string, full bool) (in
 		// scan counters wholesale (internal/health), so a zero-valued health.Scan
 		// would render "collects zero" for a state nobody measured — the distinction
 		// ADR-0010 asks doctor to keep — and would erase what an earlier --full or
-		// `wake ingest` actually found. Forward-only is achieved by not calling the
-		// import; nothing stands in for it (ADR-0015: the cursor is an optimisation,
-		// not a correctness mechanism).
+		// `wake ingest` actually found.
+		//
+		// Not calling the import is only half of forward-only; the other half is the
+		// boundary recorded above, which is what the trigger's own scan honours. The
+		// boundary is not a cursor and does not stand in for one: it says what the user
+		// consented to, never what has been seen, so re-scanning stays safe for the
+		// reason it always was (ADR-0004, ADR-0015).
 		return 0, refreshInventory(paths, repos, claudeDir, root, events)
 	}
 	written, scan, err := importHistory(repos, claudeDir, events, staleness(paths), wholeHistory)
