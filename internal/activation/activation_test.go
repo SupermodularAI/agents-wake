@@ -92,9 +92,9 @@ func TestInitWithoutFullNeverWalksHarnessHistory(t *testing.T) {
 	original := importHistory
 	t.Cleanup(func() { importHistory = original })
 	walks := 0
-	importHistory = func(repos *config.Repos, claudeDir string, destination *store.Store, stale claudecode.Staleness) (int, health.Scan, error) {
+	importHistory = func(repos *config.Repos, claudeDir string, destination *store.Store, stale claudecode.Staleness, scope collectionScope) (int, health.Scan, error) {
 		walks++
-		return original(repos, claudeDir, destination, stale)
+		return original(repos, claudeDir, destination, stale, scope)
 	}
 
 	written, err := Init(paths, root, claudeDir, testExecutable(t), false)
@@ -168,8 +168,74 @@ func TestInitWithoutFullNeverWalksHarnessHistory(t *testing.T) {
 	}
 }
 
+// `init --full` on a repository consented forward-only lifts the boundary for good,
+// so the trigger stops holding anything back.
+//
+// The user has asked for the whole history; a boundary still in force afterwards
+// would be a filter nothing can clear, quietly narrowing every later scan for a
+// repository whose history is already in the spool. The spool is discarded and
+// refilled by a trigger on purpose: the assertion is about what the *unattended*
+// scan is willing to import, which is the only thing the boundary governs.
+func TestAFullInitLiftsTheBoundaryAnEarlierPlainInitRecorded(t *testing.T) {
+	paths := testPaths(t)
+	claudeDir, root := inventoryFixture(t)
+	spool := store.New(filepath.Join(paths.DataDir, eventsFile))
+
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), false); err != nil {
+		t.Fatalf("plain Init() error = %v", err)
+	}
+	if written, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil || written != 1 {
+		t.Fatalf("Init(full) = %d, %v; want the declined history imported", written, err)
+	}
+	if discardErr := spool.Discard(); discardErr != nil {
+		t.Fatalf("Discard() error = %v", discardErr)
+	}
+
+	if _, err := Trigger(paths, claudeDir); err != nil {
+		t.Fatalf("Trigger() error = %v", err)
+	}
+	entries, err := spool.Entries(0)
+	if err != nil {
+		t.Fatalf("Entries() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("Entries() = %+v, want the pre-existing call — the boundary outlived the full import", entries)
+	}
+}
+
+// A plain init after a --full leaves the scan counters where the import put them.
+//
+// This is the reason the default path records no scan at all: RecordScan replaces the
+// counters wholesale, so a zero-valued health.Scan written by a repeat `wake init`
+// would erase what an earlier import actually found and doctor would report
+// "collects zero" for a machine that had collected.
+func TestAPlainInitAfterAFullOneKeepsTheEarlierScanCounters(t *testing.T) {
+	paths := testPaths(t)
+	claudeDir, root := inventoryFixture(t)
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil {
+		t.Fatalf("Init(full) error = %v", err)
+	}
+	before := scanOf(t, paths)
+	if before.At.IsZero() || before.EventsWritten != 1 {
+		t.Fatalf("Scan = %+v, want the full import's counters", before)
+	}
+
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), false); err != nil {
+		t.Fatalf("plain Init() error = %v", err)
+	}
+
+	if after := scanOf(t, paths); after != before {
+		t.Errorf("Scan = %+v, want it untouched at %+v", after, before)
+	}
+}
+
 // A repo consented with a plain init and backfilled afterwards ends up
 // byte-identical in the store to one that imported from the start.
+//
+// It is also where the one deliberate asymmetry is pinned: `wake ingest` is the user
+// asking for the history, so it ignores the recorded boundary, while the trigger the
+// hooks fire honours it (ADR-0025). The boundary is about what happens when nobody
+// asked — if this test ever needs a flag to keep passing, the asymmetry has been lost.
 //
 // Both halves run against one Paths on purpose. A second config directory would
 // carry a different salt, so the repo id — a salted hash of the consented root

@@ -105,7 +105,7 @@ func Init(paths config.Paths, root, claudeDir, executable string, full bool) (in
 		// not a correctness mechanism).
 		return 0, refreshInventory(paths, repos, claudeDir, root, events)
 	}
-	written, scan, err := importHistory(repos, claudeDir, events, staleness(paths))
+	written, scan, err := importHistory(repos, claudeDir, events, staleness(paths), wholeHistory)
 	// The counters are recorded whether the scan succeeded or not: a partial
 	// activation — hooks written, history import failed — is reported through
 	// doctor rather than repaired silently, and the counters are the report.
@@ -119,7 +119,24 @@ func Init(paths config.Paths, root, claudeDir, executable string, full bool) (in
 }
 
 // Ingest imports available transcripts for consented repositories only.
+//
+// It is the form the user asks for — `wake ingest`, `wake ingest --rebuild`, and the
+// import inside `wake init --full` — so it imports everything the harness holds for a
+// consented repository, including what predates the repository's registration. That
+// is the backfill route a forward-only `init` names in its own output, and it is why
+// `init --full` and a plain `init` followed by `wake ingest` leave byte-identical
+// stores.
+//
+// ADR-0024's forward-only default is about what happens when nobody asked, which is
+// Trigger's scan and not this one.
 func Ingest(paths config.Paths, claudeDir string) (int, error) {
+	return ingestScoped(paths, claudeDir, wholeHistory)
+}
+
+// ingestScoped is Ingest with the scope decision left to the caller, so the one
+// difference between a scan the user asked for and a scan a hook fired is the scope
+// and nothing else: same walk, same counters, same inventory refresh.
+func ingestScoped(paths config.Paths, claudeDir string, scope collectionScope) (int, error) {
 	repos, err := config.OpenRepos(paths)
 	if err != nil {
 		return 0, err
@@ -129,7 +146,7 @@ func Ingest(paths config.Paths, claudeDir string) (int, error) {
 		return 0, fmt.Errorf("resolving current directory: %w", err)
 	}
 	events := store.New(filepath.Join(paths.DataDir, eventsFile))
-	written, scan, err := importHistory(repos, claudeDir, events, staleness(paths))
+	written, scan, err := importHistory(repos, claudeDir, events, staleness(paths), scope)
 	if recordErr := health.New(paths.HealthFile).RecordScan(scan); recordErr != nil && err == nil {
 		err = recordErr
 	}
@@ -150,9 +167,17 @@ func Ingest(paths config.Paths, claudeDir string) (int, error) {
 // of what has been seen (ADR-0015) — which is what lets ADR-0016 say a trigger "can
 // be arbitrarily unreliable without ever producing a wrong number". Whatever this
 // run skips, the next SessionStart picks up.
+//
+// It is also the one scan nobody asked for, so it is the one that honours each
+// repository's recorded collection boundary (ADR-0024, ADR-0025). A repository
+// consented by a plain `wake init` was promised that its existing history would not be
+// imported; this scan runs from the hook that same command installed, in a process
+// that was never told, and importing the history here would undo the promise one
+// session later without anyone typing anything. An explicit `wake ingest` is the user
+// asking, and imports everything.
 func Trigger(paths config.Paths, claudeDir string) (bool, error) {
 	return lockfile.TryWithLock(filepath.Join(paths.DataDir, ingestLockName), func() error {
-		_, err := Ingest(paths, claudeDir)
+		_, err := ingestScoped(paths, claudeDir, consentedWindow)
 		return err
 	})
 }
@@ -234,6 +259,51 @@ func staleness(paths config.Paths) claudecode.Staleness {
 	return claudecode.Staleness{Timeout: timeout, Now: time.Now().UTC()}
 }
 
+// collectionScope decides which of a consented repository's events one scan may
+// import.
+//
+// The two exist because ADR-0024's forward-only default has to hold for the scan the
+// hook fires, not only for `init` itself. Which of them a scan uses is decided by who
+// asked for it, never by what it finds: a user typing `wake ingest` has asked for the
+// history, and a trigger has asked for nothing.
+type collectionScope int
+
+const (
+	// consentedWindow honours each repository's recorded boundary: a repository
+	// consented by a plain `wake init` collects forward from that instant only. The
+	// scan still walks and still counts everything it reads — the boundary excludes
+	// events, it does not narrow the walk — so doctor's numbers stay about the source
+	// rather than about the filter.
+	consentedWindow collectionScope = iota
+	// wholeHistory imports every event the harness holds for a consented repository,
+	// which is what `wake init --full`, `wake ingest` and `wake ingest --rebuild` are.
+	wholeHistory
+)
+
+// resolverFor builds the consent answer one scan resolves every event against
+// (ADR-0010, ADR-0024): which repository the event's working directory belongs to,
+// and whether an event at that instant is one the repository consented to collect.
+//
+// One resolver per scan, closed over one *Repos snapshot, so every event in a scan is
+// judged against the same table and the same boundaries (ADR-0019 §1). The id is
+// returned even when the answer is no: the reader ignores it, and computing it
+// unconditionally keeps this function a pure question about consent.
+func resolverFor(repos *config.Repos, scope collectionScope) claudecode.Resolver {
+	return func(cwd string, at time.Time) (record.Hash, bool) {
+		identity, err := repos.Identify(cwd)
+		if err != nil || !identity.Matched {
+			return record.Hash(identity.ID), false
+		}
+		if scope == wholeHistory {
+			return record.Hash(identity.ID), true
+		}
+		// An event exactly at the boundary is inside it: the boundary is the instant
+		// collection began, not the instant after.
+		from := repos.CollectsFrom(identity.ID)
+		return record.Hash(identity.ID), !at.Before(from)
+	}
+}
+
 // importHistory is ingestHistory behind a variable so a test can assert that a
 // plain `wake init` never enters it. An empty result is not that assertion — a walk
 // that found nothing and a walk that never ran produce the same number — and
@@ -249,9 +319,10 @@ var importHistory = ingestHistory
 // rather than an error that breaks the command (plan §4.3). Swallowed and
 // uncounted, though, they are indistinguishable from a machine with no history —
 // which is the confusion ADR-0010 asks doctor to end.
-func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Store, stale claudecode.Staleness) (int, health.Scan, error) {
+func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Store, stale claudecode.Staleness, scope collectionScope) (int, health.Scan, error) {
 	written := 0
 	scan := health.Scan{At: time.Now().UTC(), RefusedProjects: repos.DroppedEntries()}
+	resolve := resolverFor(repos, scope)
 	err := filepath.WalkDir(filepath.Join(claudeDir, "projects"), func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			// "Not there" arrives by this same route as "could not be read":
@@ -275,10 +346,7 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 			return nil
 		}
 		defer file.Close()
-		result, ingestErr := ingest.ClaudeCode(file, func(cwd string, _ time.Time) (record.Hash, bool) {
-			identity, identifyErr := repos.Identify(cwd)
-			return record.Hash(identity.ID), identifyErr == nil && identity.Matched
-		}, record.NewNamer(repos.NameKey()), stale, destination)
+		result, ingestErr := ingest.ClaudeCode(file, resolve, record.NewNamer(repos.NameKey()), stale, destination)
 		if ingestErr != nil {
 			scan.ParseErrors++
 			return nil
