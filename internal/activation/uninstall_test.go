@@ -214,7 +214,7 @@ func TestInitNamesInitAsTheStepAfterASettingsRefusal(t *testing.T) {
 	}
 	claudeDir := claudeDirWith(t, "null")
 
-	_, err := Init(paths, root, claudeDir, testExecutable(t))
+	_, err := Init(paths, root, claudeDir, testExecutable(t), false)
 
 	if err == nil {
 		t.Fatal("Init() error = nil, want the settings document refused")

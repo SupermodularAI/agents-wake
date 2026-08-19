@@ -745,7 +745,7 @@ func TestIngestSurfacesAmbiguousSkillRuns(t *testing.T) {
 	}
 	paths := testPaths(t)
 
-	written, err := Init(paths, root, claudeDir, testExecutable(t))
+	written, err := Init(paths, root, claudeDir, testExecutable(t), true)
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}

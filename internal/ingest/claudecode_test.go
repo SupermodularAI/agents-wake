@@ -256,7 +256,7 @@ func TestClaudeCodeReportsOneSkillRunAsOneInvocation(t *testing.T) {
 	spool := filepath.Join(t.TempDir(), "events.ndjson")
 	destination := store.New(spool)
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
-	resolve := func(cwd string) (record.Hash, bool) { return repo, cwd == "/repo" }
+	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
 
 	result, err := ClaudeCode(strings.NewReader(input), resolve, names, closingStaleness, destination)
 	if err != nil {
@@ -295,7 +295,7 @@ func TestClaudeCodeReportsAShapeASkillRunAsOneInvocation(t *testing.T) {
 	spool := filepath.Join(t.TempDir(), "events.ndjson")
 	destination := store.New(spool)
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
-	resolve := func(cwd string) (record.Hash, bool) { return repo, cwd == "/repo" }
+	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
 
 	first, err := ClaudeCode(strings.NewReader(input), resolve, names, closingStaleness, destination)
 	if err != nil {
@@ -349,7 +349,7 @@ func TestClaudeCodeNeverReportsASidechainTurnAsASkillInvocation(t *testing.T) {
 	spool := filepath.Join(t.TempDir(), "events.ndjson")
 	destination := store.New(spool)
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
-	resolve := func(cwd string) (record.Hash, bool) { return repo, cwd == "/repo" }
+	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
 
 	result, err := ClaudeCode(strings.NewReader(input), resolve, names, closingStaleness, destination)
 	if err != nil {
@@ -377,7 +377,7 @@ func TestClaudeCodeStillReportsOneSubagentRunAsOneInvocation(t *testing.T) {
 	spool := filepath.Join(t.TempDir(), "events.ndjson")
 	destination := store.New(spool)
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
-	resolve := func(cwd string) (record.Hash, bool) { return repo, cwd == "/repo" }
+	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
 
 	result, err := ClaudeCode(strings.NewReader(input), resolve, names, closingStaleness, destination)
 	if err != nil {
@@ -404,7 +404,7 @@ func TestClaudeCodeReportsTheAmbiguityCounterWithoutASecondInvocation(t *testing
 	spool := filepath.Join(t.TempDir(), "events.ndjson")
 	destination := store.New(spool)
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
-	resolve := func(cwd string) (record.Hash, bool) { return repo, cwd == "/repo" }
+	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
 
 	result, err := ClaudeCode(strings.NewReader(input), resolve, names, closingStaleness, destination)
 	if err != nil {

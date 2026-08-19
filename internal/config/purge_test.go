@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // seedConfigRoot fills the config root with everything RemoveConfigRoot has to take
@@ -50,7 +51,7 @@ func TestRemoveConfigRootKeepsTheDataRoot(t *testing.T) {
 		t.Fatalf("OpenRepos() error = %v", err)
 	}
 	root := t.TempDir()
-	if _, err := repos.Register(root, "fixture"); err != nil {
+	if _, err := repos.Register(root, "fixture", time.Time{}); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 	if _, err := os.Stat(p.ProjectsFile); err != nil {
