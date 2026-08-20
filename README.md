@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/SupermodularAI/agents-wake/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SupermodularAI/agents-wake/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/SupermodularAI/agents-wake?display_name=tag&sort=semver)](https://github.com/SupermodularAI/agents-wake/releases)
-[![License](https://img.shields.io/github/license/SupermodularAI/agents-wake)](LICENSE)
+[![License](https://img.shields.io/github/license/SupermodularAI/agents-wake?cacheSeconds=3600)](LICENSE)
 
 Wake is a local CLI for understanding which agent primitives a developer uses,
 which ones fail, and which ones are never used. It currently supports Claude
