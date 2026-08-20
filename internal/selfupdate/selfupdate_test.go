@@ -1,6 +1,9 @@
 package selfupdate
 
 import (
+	"errors"
+	"fmt"
+	"os"
 	"strings"
 	"testing"
 
@@ -80,6 +83,90 @@ func TestCompareDistinguishesUntaggedCurrentAndOutdated(t *testing.T) {
 		if got := Compare(c.running, c.latest); got != c.want {
 			t.Errorf("Compare(%q, %q) = %v, want %v", c.running, c.latest, got, c.want)
 		}
+	}
+}
+
+// fakeFetcher serves bytes from memory. It exists so this package's tests can
+// exercise the whole sequence with no network and no HTTP client anywhere
+// (ADR-0026 covers tests too).
+type fakeFetcher struct {
+	effective string
+	files     map[string][]byte
+	resolves  int
+	downloads []string
+	fail      error
+}
+
+func (f *fakeFetcher) EffectiveURL(string) (string, error) {
+	f.resolves++
+	if f.fail != nil {
+		return "", f.fail
+	}
+	return f.effective, nil
+}
+
+func (f *fakeFetcher) Download(url, dest string) error {
+	f.downloads = append(f.downloads, url)
+	body, ok := f.files[url]
+	if !ok {
+		return fmt.Errorf("no such asset: %s", url)
+	}
+	return os.WriteFile(dest, body, 0o600)
+}
+
+func TestLatestReadsTheTagFromTheRedirectTarget(t *testing.T) {
+	fake := &fakeFetcher{effective: "https://github.com/" + Repo + "/releases/tag/v1.2.3"}
+	updater := Updater{Fetch: fake, GOOS: platform.OS()[0], GOARCH: platform.Arch()[0]}
+	tag, err := updater.Latest()
+	if err != nil {
+		t.Fatalf("Latest() error = %v", err)
+	}
+	if tag != "v1.2.3" {
+		t.Errorf("Latest() = %q, want %q", tag, "v1.2.3")
+	}
+	// One resolve and no download: --check reaches the network once and pulls
+	// nothing (ADR-0026).
+	if fake.resolves != 1 {
+		t.Errorf("Latest() resolved %d times, want 1", fake.resolves)
+	}
+	if len(fake.downloads) != 0 {
+		t.Errorf("Latest() downloaded %v, want nothing", fake.downloads)
+	}
+}
+
+// install.sh refuses anything that is not v-prefixed, because a redirect that
+// lands somewhere else means there is no release, not that the release is called
+// "releases".
+func TestLatestRejectsARedirectThatNamesNoTag(t *testing.T) {
+	effective := "https://github.com/" + Repo + "/releases"
+	updater := Updater{Fetch: &fakeFetcher{effective: effective}, GOOS: platform.OS()[0], GOARCH: platform.Arch()[0]}
+	_, err := updater.Latest()
+	if err == nil {
+		t.Fatal("Latest() on a redirect naming no tag = nil, want an error")
+	}
+	if !strings.Contains(err.Error(), effective) {
+		t.Errorf("error = %q, want it to name the URL it landed on", err)
+	}
+}
+
+func TestLatestPropagatesAResolveFailure(t *testing.T) {
+	fake := &fakeFetcher{fail: errors.New("curl exited 6")}
+	updater := Updater{Fetch: fake, GOOS: platform.OS()[0], GOARCH: platform.Arch()[0]}
+	if _, err := updater.Latest(); err == nil {
+		t.Fatal("Latest() with a failing fetcher = nil, want the failure")
+	}
+}
+
+// The platform refusal comes before the network, so a machine with no published
+// asset is told that plainly instead of being shown a release it cannot install.
+func TestLatestRefusesAnUnsupportedPlatformBeforeTouchingTheNetwork(t *testing.T) {
+	fake := &fakeFetcher{effective: "https://github.com/" + Repo + "/releases/tag/v1.2.3"}
+	updater := Updater{Fetch: fake, GOOS: "windows", GOARCH: platform.Arch()[0]}
+	if _, err := updater.Latest(); err == nil {
+		t.Fatal("Latest() on an unsupported platform = nil, want a refusal")
+	}
+	if fake.resolves != 0 {
+		t.Errorf("Latest() resolved %d times before refusing, want 0", fake.resolves)
 	}
 }
 

@@ -12,7 +12,9 @@
 package selfupdate
 
 import (
+	"errors"
 	"fmt"
+	"path"
 	"slices"
 	"strings"
 
@@ -55,6 +57,56 @@ func assetName(tag, goos, goarch string) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("%s_%s_%s_%s.tar.gz", binaryName, strings.TrimPrefix(tag, "v"), goos, goarch), nil
+}
+
+// errNoFetcher reports an Updater built without the one field it cannot default.
+var errNoFetcher = errors.New("no fetcher configured")
+
+// Updater performs one update, or one check, for a single running binary.
+//
+// Every field is explicit rather than read from the process: the resolve →
+// verify → replace sequence is the part that must be exercisable from a test
+// without a network, a release, or a binary the test is willing to overwrite.
+type Updater struct {
+	// Fetch performs the network steps. Required.
+	Fetch Fetcher
+	// GOOS and GOARCH select the release asset.
+	GOOS, GOARCH string
+	// Running is the version the current binary reports (version.Version).
+	Running string
+	// Executable is the path of the binary Apply replaces. Required by Apply,
+	// unused by Latest.
+	Executable string
+}
+
+// Latest resolves the newest published tag from LatestReleaseURL's redirect,
+// downloading nothing.
+//
+// The platform refusal comes first, before the network: a machine with no
+// published asset must be told that plainly rather than be shown an available
+// release it cannot install, or a raw 404 from curl (ADR-0021).
+func (u Updater) Latest() (string, error) {
+	if err := supported(u.GOOS, u.GOARCH); err != nil {
+		return "", err
+	}
+	if u.Fetch == nil {
+		return "", errNoFetcher
+	}
+	effective, err := u.Fetch.EffectiveURL(LatestReleaseURL)
+	if err != nil {
+		return "", err
+	}
+	// path, not filepath: this is a URL, and on no supported platform would the
+	// separator differ anyway — but the type of the thing being split is what
+	// decides which package parses it.
+	tag := path.Base(strings.TrimSuffix(effective, "/"))
+	// install.sh's `case "$version" in v*) ;; *) fail`: a redirect that lands
+	// anywhere but a tag page means there is no release to install, and guessing
+	// a name from it would produce a download URL that 404s.
+	if !strings.HasPrefix(tag, "v") {
+		return "", fmt.Errorf("could not determine the latest release from %s", effective)
+	}
+	return tag, nil
 }
 
 // Status is the outcome of comparing the running version against the latest tag.
