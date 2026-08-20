@@ -380,6 +380,226 @@ func TestExtractWritesOutsideNothingNamedByTheArchive(t *testing.T) {
 	}
 }
 
+// serveRelease builds a fake serving one release for this machine's announced
+// platform: the archive and the checksums.txt that verifies it.
+//
+// The platform comes from internal/platform rather than runtime, so the test
+// asserts against the set wake publishes instead of the runner it happens to be
+// on.
+func serveRelease(t *testing.T, tag string, payload []byte) (*fakeFetcher, string) {
+	t.Helper()
+	name, err := assetName(tag, platform.OS()[0], platform.Arch()[0])
+	if err != nil {
+		t.Fatalf("assetName() error = %v", err)
+	}
+	archive := tarGz(t, map[string][]byte{binaryName: payload, "LICENSE": []byte("a licence")})
+	return &fakeFetcher{
+		effective: "https://github.com/" + Repo + "/releases/tag/" + tag,
+		files: map[string][]byte{
+			assetURL(tag, name):          archive,
+			assetURL(tag, checksumsName): []byte(checksumLine(name, archive)),
+		},
+	}, name
+}
+
+// installedBinary writes a stand-in for the running binary, so a test can watch
+// it be replaced — or watch it not be.
+func installedBinary(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), binaryName)
+	if err := os.WriteFile(path, []byte(content), binaryMode); err != nil {
+		t.Fatalf("writing the stand-in binary: %v", err)
+	}
+	return path
+}
+
+func assertContent(t *testing.T, path, want string) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	if string(got) != want {
+		t.Errorf("%s holds %q, want %q", path, got, want)
+	}
+}
+
+func updaterFor(fake Fetcher, running, executable string) Updater {
+	return Updater{
+		Fetch:      fake,
+		GOOS:       platform.OS()[0],
+		GOARCH:     platform.Arch()[0],
+		Running:    running,
+		Executable: executable,
+	}
+}
+
+func TestApplyReplacesTheBinaryWithTheVerifiedRelease(t *testing.T) {
+	fake, _ := serveRelease(t, "v1.2.3", []byte("the new binary"))
+	executable := installedBinary(t, "the old binary")
+
+	result, err := updaterFor(fake, "v1.0.0", executable).Apply()
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if want := (Result{Tag: "v1.2.3", Replaced: true}); result != want {
+		t.Errorf("Apply() = %+v, want %+v", result, want)
+	}
+	assertContent(t, executable, "the new binary")
+	info, err := os.Stat(executable)
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	// Executable, the way install.sh's `install -m 0755` leaves it: a replacement
+	// that lost the bit would report success and never run again.
+	if info.Mode().Perm() != binaryMode {
+		t.Errorf("replaced binary mode = %v, want %v", info.Mode().Perm(), binaryMode)
+	}
+}
+
+func TestApplyIsANoOpWhenAlreadyOnTheLatestRelease(t *testing.T) {
+	fake, _ := serveRelease(t, "v1.2.3", []byte("the new binary"))
+	executable := installedBinary(t, "the old binary")
+
+	result, err := updaterFor(fake, "v1.2.3", executable).Apply()
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if want := (Result{Tag: "v1.2.3", Replaced: false}); result != want {
+		t.Errorf("Apply() = %+v, want %+v", result, want)
+	}
+	// Nothing downloaded and nothing written: "already on the latest release"
+	// means the command did no work, not that it redid it quietly.
+	if len(fake.downloads) != 0 {
+		t.Errorf("Apply() downloaded %v, want nothing", fake.downloads)
+	}
+	assertContent(t, executable, "the old binary")
+}
+
+func TestApplyRefusesATamperedChecksumAndLeavesTheBinaryUntouched(t *testing.T) {
+	fake, name := serveRelease(t, "v1.2.3", []byte("the new binary"))
+	line := fake.files[assetURL("v1.2.3", checksumsName)]
+	flipped := byte('0')
+	if line[0] == '0' {
+		flipped = '1'
+	}
+	fake.files[assetURL("v1.2.3", checksumsName)] = append([]byte{flipped}, line[1:]...)
+	executable := installedBinary(t, "the old binary")
+
+	_, err := updaterFor(fake, "v1.0.0", executable).Apply()
+	if err == nil {
+		t.Fatal("Apply() with a tampered checksum = nil, want a refusal")
+	}
+	if !strings.Contains(err.Error(), name) {
+		t.Errorf("error = %q, want it to name the asset that failed", err)
+	}
+	assertContent(t, executable, "the old binary")
+}
+
+func TestApplyRefusesACorruptedDownloadAndLeavesTheBinaryUntouched(t *testing.T) {
+	fake, _ := serveRelease(t, "v1.2.3", []byte("the new binary"))
+	name, err := assetName("v1.2.3", platform.OS()[0], platform.Arch()[0])
+	if err != nil {
+		t.Fatalf("assetName() error = %v", err)
+	}
+	fake.files[assetURL("v1.2.3", name)] = append(fake.files[assetURL("v1.2.3", name)], 'x')
+	executable := installedBinary(t, "the old binary")
+
+	if _, err := updaterFor(fake, "v1.0.0", executable).Apply(); err == nil {
+		t.Fatal("Apply() with a corrupted download = nil, want a refusal")
+	}
+	assertContent(t, executable, "the old binary")
+}
+
+// An archive that verifies but carries no binary must not leave the old one
+// replaced by nothing, or reported as replaced.
+func TestApplyRefusesAnArchiveWithoutTheBinaryAndLeavesTheBinaryUntouched(t *testing.T) {
+	name, err := assetName("v1.2.3", platform.OS()[0], platform.Arch()[0])
+	if err != nil {
+		t.Fatalf("assetName() error = %v", err)
+	}
+	archive := tarGz(t, map[string][]byte{"LICENSE": []byte("a licence")})
+	fake := &fakeFetcher{
+		effective: "https://github.com/" + Repo + "/releases/tag/v1.2.3",
+		files: map[string][]byte{
+			assetURL("v1.2.3", name):          archive,
+			assetURL("v1.2.3", checksumsName): []byte(checksumLine(name, archive)),
+		},
+	}
+	executable := installedBinary(t, "the old binary")
+
+	if _, err := updaterFor(fake, "v1.0.0", executable).Apply(); err == nil {
+		t.Fatal("Apply() on an archive with no binary = nil, want a refusal")
+	}
+	assertContent(t, executable, "the old binary")
+}
+
+func TestApplyRefusesAnUnsupportedPlatformBeforeTouchingTheNetwork(t *testing.T) {
+	fake, _ := serveRelease(t, "v1.2.3", []byte("the new binary"))
+	executable := installedBinary(t, "the old binary")
+	updater := updaterFor(fake, "v1.0.0", executable)
+	updater.GOARCH = "386"
+
+	if _, err := updater.Apply(); err == nil {
+		t.Fatal("Apply() on an unsupported platform = nil, want a refusal")
+	}
+	if fake.resolves != 0 || len(fake.downloads) != 0 {
+		t.Errorf("Apply() resolved %d times and downloaded %v before refusing, want 0 and nothing", fake.resolves, fake.downloads)
+	}
+	assertContent(t, executable, "the old binary")
+}
+
+// A wake reached through a symlink must have the real file replaced: overwriting
+// the link with a regular file would break every other name pointing at it.
+func TestApplyReplacesTheFileASymlinkPointsAt(t *testing.T) {
+	fake, _ := serveRelease(t, "v1.2.3", []byte("the new binary"))
+	target := installedBinary(t, "the old binary")
+	link := filepath.Join(t.TempDir(), binaryName)
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	if _, err := updaterFor(fake, "v1.0.0", link).Apply(); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("Lstat() error = %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Error("the symlink was replaced by a regular file, want the link left alone")
+	}
+	assertContent(t, target, "the new binary")
+}
+
+// The download directory is this command's, and a failure is exactly when a
+// leftover would go unnoticed.
+func TestApplyLeavesNoTemporaryDirectoryBehind(t *testing.T) {
+	pattern := filepath.Join(os.TempDir(), "wake-update-*")
+	before, err := filepath.Glob(pattern)
+	if err != nil {
+		t.Fatalf("Glob() error = %v", err)
+	}
+
+	fake, _ := serveRelease(t, "v1.2.3", []byte("the new binary"))
+	if _, err = updaterFor(fake, "v1.0.0", installedBinary(t, "the old binary")).Apply(); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	broken, _ := serveRelease(t, "v1.2.3", []byte("the new binary"))
+	delete(broken.files, assetURL("v1.2.3", checksumsName))
+	if _, err = updaterFor(broken, "v1.0.0", installedBinary(t, "the old binary")).Apply(); err == nil {
+		t.Fatal("Apply() with no checksums published = nil, want a refusal")
+	}
+
+	after, err := filepath.Glob(pattern)
+	if err != nil {
+		t.Fatalf("Glob() error = %v", err)
+	}
+	if len(after) != len(before) {
+		t.Errorf("Apply() left %d temporary directories behind", len(after)-len(before))
+	}
+}
+
 func TestIsUntaggedTracksTheVersionSentinel(t *testing.T) {
 	if !IsUntagged(version.Untagged) {
 		t.Errorf("IsUntagged(%q) = false, want true", version.Untagged)

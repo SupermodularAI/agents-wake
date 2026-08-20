@@ -28,6 +28,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/SupermodularAI/agents-wake/internal/atomicfile"
 	"github.com/SupermodularAI/agents-wake/internal/platform"
 	"github.com/SupermodularAI/agents-wake/internal/version"
 )
@@ -240,6 +241,95 @@ func (u Updater) Latest() (string, error) {
 		return "", fmt.Errorf("could not determine the latest release from %s", effective)
 	}
 	return tag, nil
+}
+
+// downloadBase is the prefix a release's assets hang off, per tag.
+const downloadBase = "https://github.com/" + Repo + "/releases/download"
+
+// assetURL is where a named asset of one release hangs.
+func assetURL(tag, name string) string { return downloadBase + "/" + tag + "/" + name }
+
+// errNoExecutable reports an Apply with no binary to replace.
+var errNoExecutable = errors.New("no executable path to replace")
+
+// Result reports what Apply did.
+type Result struct {
+	// Tag is the latest published tag, whether or not it was installed.
+	Tag string
+	// Replaced is false when the running binary was already that tag, in which
+	// case nothing was downloaded and nothing was written.
+	Replaced bool
+}
+
+// Apply installs the latest release over the running binary, or reports that it
+// is already installed.
+//
+// The order is the guarantee: refuse an unsupported platform, resolve the tag,
+// stop when it is the one already running, download the archive and the
+// checksums, verify, unpack, and only then replace. Anything that fails before
+// the last step leaves the existing binary exactly as it was.
+//
+// Callers handle StatusUntagged themselves; Apply treats any Running that is not
+// the latest tag as out of date.
+func (u Updater) Apply() (Result, error) {
+	tag, err := u.Latest()
+	if err != nil {
+		return Result{}, err
+	}
+	// No download and no write when the tag is the one already running: "already
+	// on the latest release" has to mean no work happened, not that the same
+	// bytes were fetched and re-verified.
+	if Compare(u.Running, tag) == StatusCurrent {
+		return Result{Tag: tag}, nil
+	}
+	if u.Executable == "" {
+		return Result{}, errNoExecutable
+	}
+	// A wake reached through a symlink has the file the link points at replaced,
+	// not the link overwritten with a regular file — the same link-awareness
+	// uninstall's plan already has.
+	target, err := filepath.EvalSymlinks(u.Executable)
+	if err != nil {
+		return Result{}, fmt.Errorf("resolving %s: %w", u.Executable, err)
+	}
+	name, err := assetName(tag, u.GOOS, u.GOARCH)
+	if err != nil {
+		return Result{}, err
+	}
+
+	dir, err := os.MkdirTemp("", "wake-update-")
+	if err != nil {
+		return Result{}, fmt.Errorf("creating a temporary directory: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+
+	archivePath := filepath.Join(dir, name)
+	checksumsPath := filepath.Join(dir, checksumsName)
+	if err = u.Fetch.Download(assetURL(tag, name), archivePath); err != nil {
+		return Result{}, err
+	}
+	if err = u.Fetch.Download(assetURL(tag, checksumsName), checksumsPath); err != nil {
+		return Result{}, err
+	}
+	if err = verify(archivePath, checksumsPath, name); err != nil {
+		return Result{}, err
+	}
+	binary, err := extract(archivePath, dir)
+	if err != nil {
+		return Result{}, err
+	}
+
+	// The whole binary in memory (~15 MB) buys the tested temp-in-the-same-
+	// directory → fsync → rename → dir-sync sequence instead of a second
+	// hand-rolled one, and the process is about to be replaced anyway.
+	data, err := os.ReadFile(binary)
+	if err != nil {
+		return Result{}, fmt.Errorf("reading the unpacked %s: %w", binaryName, err)
+	}
+	if err = atomicfile.Publish(target, data, binaryMode); err != nil {
+		return Result{}, err
+	}
+	return Result{Tag: tag, Replaced: true}, nil
 }
 
 // Status is the outcome of comparing the running version against the latest tag.
