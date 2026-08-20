@@ -91,6 +91,8 @@ wake init --full        # Consent and import existing history now
 wake ingest             # Re-scan consented history
 wake ingest --rebuild   # Rebuild the derived event store
 wake doctor             # Inspect collection and hook health
+wake update             # Install the newest release, verifying its checksum
+wake update --check     # Report whether a newer release exists; download nothing
 wake remove             # Remove the Claude Code integration; keep local data
 wake remove --purge     # ...and delete collected data; ~/.config/wake is kept
 wake uninstall          # Remove everything, including ~/.config/wake and the binary
@@ -108,6 +110,8 @@ wake uninstall          # Remove everything, including ~/.config/wake and the bi
 | `wake doctor` | Show collection and hook health. |
 | `wake remove` | Remove Wake-owned Claude Code hooks. `--purge` also deletes collected data; `~/.config/wake` is kept either way, so a later `wake init` keeps the same repository identity. |
 | `wake uninstall` | Irreversible. Removes the integration, all collected data, `~/.config/wake` (configuration and the identity salt) and the binary itself — plus the symlink you invoked it through, if the `wake` on your PATH is a link. It prints every path before deleting anything, and removes nothing at all if it cannot take its hook entry out of `settings.json` first. |
+| `wake update` | Download the newest release, verify its SHA-256 against the published `checksums.txt`, and replace this binary in place. Refuses and changes nothing if the checksum does not match. |
+| `wake update --check` | Report whether a newer release exists and stop there — it downloads nothing. On a build with no release tag it says so rather than guessing. |
 
 ## Privacy And Enterprise Use
 
@@ -128,6 +132,10 @@ review. Its default design keeps the sensitive path local:
   stays local with restrictive permissions.
 - The official binaries contain no remote-delivery code. Wake sends no
   transcript data or telemetry, and the dashboard is bound to loopback only.
+- `wake update` and `wake update --check` are the only commands that reach the
+  network, and only when you run them: nothing checks for updates in the
+  background, and both shell out to `curl` rather than linking a network client,
+  so the binary itself still carries no network code.
 - `wake doctor` reports safe counters, never transcript content or repository
   paths, so its output is suitable for sharing in support requests.
 
