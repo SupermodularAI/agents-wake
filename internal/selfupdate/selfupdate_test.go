@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -598,6 +599,62 @@ func TestApplyLeavesNoTemporaryDirectoryBehind(t *testing.T) {
 	if len(after) != len(before) {
 		t.Errorf("Apply() left %d temporary directories behind", len(after)-len(before))
 	}
+}
+
+// Neither command may run unless it was asked for, and the mechanical form of
+// that is: nothing else imports this package. A future doctor or serve that
+// started checking for updates in the background would have to add an import
+// here to do it, and this fails when it does (ADR-0026).
+func TestOnlyTheUpdateCommandImportsSelfupdate(t *testing.T) {
+	const self = "internal/selfupdate"
+	allowed := map[string]bool{
+		filepath.Join("..", "..", "internal", "cli", "update.go"): true,
+	}
+	err := filepath.WalkDir(filepath.Join("..", ".."), func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", ".agent", "dist":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		// This package's own files, by directory rather than by name, so a file
+		// added here later is covered without editing the test.
+		if dir, _ := filepath.Abs(filepath.Dir(path)); dir == packageDir(t) {
+			return nil
+		}
+		if allowed[filepath.Clean(path)] {
+			return nil
+		}
+		raw, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if strings.Contains(string(raw), self) {
+			t.Errorf("%s imports %s; only the update command may, so that no other command can check for updates as a side effect", path, self)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking the repository: %v", err)
+	}
+}
+
+// packageDir is this package's absolute directory, so the walk can recognise its
+// own files whatever relative path it reaches them by.
+func packageDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatalf("resolving the package directory: %v", err)
+	}
+	return dir
 }
 
 func TestIsUntaggedTracksTheVersionSentinel(t *testing.T) {
