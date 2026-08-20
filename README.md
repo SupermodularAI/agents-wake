@@ -8,6 +8,8 @@ Wake is a local CLI for understanding which agent primitives a developer uses,
 which ones fail, and which ones are never used. It currently supports Claude
 Code and collects only from projects the developer explicitly enables.
 
+![wake report](docs/wake_report.gif)
+
 ## Install
 
 Official binaries are available for macOS and Linux on amd64 and arm64:
