@@ -12,15 +12,19 @@
 package selfupdate
 
 import (
+	"archive/tar"
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -125,6 +129,67 @@ func verify(archivePath, checksumsPath, name string) error {
 		return fmt.Errorf("checksum verification failed for %s: the download does not match the published checksum", name)
 	}
 	return nil
+}
+
+// binaryMode is the mode a replaced binary is published at, matching
+// install.sh's `install -m 0755`.
+const binaryMode fs.FileMode = 0o755
+
+// maxBinary caps what extract will write. A gzip stream can claim any size, and
+// this one is a ~15 MB binary; the cap is what keeps a malformed or hostile
+// archive from filling the disk before the write fails.
+const maxBinary = 256 << 20
+
+// extract writes the wake binary out of archivePath into dir, returning its path.
+//
+// The destination is always dir/binaryName, never a path taken from the archive,
+// so a crafted entry name cannot escape dir. Only a regular file whose base name
+// is binaryName is accepted; a release archive that carries no such entry is a
+// failure rather than a silent no-op.
+func extract(archivePath, dir string) (string, error) {
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return "", fmt.Errorf("opening %s: %w", filepath.Base(archivePath), err)
+	}
+	defer func() { _ = f.Close() }()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", filepath.Base(archivePath), err)
+	}
+	defer func() { _ = gz.Close() }()
+
+	tr := tar.NewReader(gz)
+	for {
+		hdr, nextErr := tr.Next()
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			return "", fmt.Errorf("reading %s: %w", filepath.Base(archivePath), nextErr)
+		}
+		if hdr.Typeflag != tar.TypeReg || path.Base(hdr.Name) != binaryName {
+			continue
+		}
+		dest := filepath.Join(dir, binaryName)
+		out, openErr := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, binaryMode)
+		if openErr != nil {
+			return "", fmt.Errorf("creating %s: %w", dest, openErr)
+		}
+		// One byte past the cap, so a stream that claims more is detected rather
+		// than silently truncated into a binary that would not run.
+		written, copyErr := io.Copy(out, io.LimitReader(tr, maxBinary+1))
+		closeErr := out.Close()
+		switch {
+		case copyErr != nil:
+			return "", fmt.Errorf("writing %s: %w", dest, copyErr)
+		case closeErr != nil:
+			return "", fmt.Errorf("writing %s: %w", dest, closeErr)
+		case written > maxBinary:
+			return "", fmt.Errorf("%s claims a %s larger than %d bytes", filepath.Base(archivePath), binaryName, maxBinary)
+		}
+		return dest, nil
+	}
+	return "", fmt.Errorf("%s contains no %s binary", filepath.Base(archivePath), binaryName)
 }
 
 // errNoFetcher reports an Updater built without the one field it cannot default.

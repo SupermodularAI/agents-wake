@@ -290,6 +290,96 @@ func TestVerifyIgnoresUnrelatedLines(t *testing.T) {
 	}
 }
 
+// The three files .goreleaser.yaml puts in a release archive, so the test
+// exercises the same shape a real download has rather than a bare binary.
+func TestExtractWritesTheBinaryFromTheArchive(t *testing.T) {
+	payload := []byte("the new binary")
+	archive := tarGz(t, map[string][]byte{
+		binaryName:  payload,
+		"LICENSE":   []byte("a licence"),
+		"README.md": []byte("# wake"),
+	})
+	dir := t.TempDir()
+	archivePath := filepath.Join(dir, "wake_1.2.3_test_arch.tar.gz")
+	if err := os.WriteFile(archivePath, archive, 0o600); err != nil {
+		t.Fatalf("writing the archive: %v", err)
+	}
+	into := t.TempDir()
+
+	got, err := extract(archivePath, into)
+	if err != nil {
+		t.Fatalf("extract() error = %v", err)
+	}
+	if want := filepath.Join(into, binaryName); got != want {
+		t.Errorf("extract() = %q, want %q", got, want)
+	}
+	written, err := os.ReadFile(got)
+	if err != nil {
+		t.Fatalf("reading the extracted binary: %v", err)
+	}
+	if !bytes.Equal(written, payload) {
+		t.Errorf("extracted %q, want %q", written, payload)
+	}
+	// Only the binary: a release's LICENSE and README are not this command's to
+	// scatter around the filesystem.
+	entries, err := os.ReadDir(into)
+	if err != nil {
+		t.Fatalf("ReadDir() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("extract() wrote %d entries, want only %s", len(entries), binaryName)
+	}
+}
+
+func TestExtractRejectsAnArchiveWithoutTheBinary(t *testing.T) {
+	dir := t.TempDir()
+	archivePath := filepath.Join(dir, "wake_1.2.3_test_arch.tar.gz")
+	if err := os.WriteFile(archivePath, tarGz(t, map[string][]byte{"LICENSE": []byte("a licence")}), 0o600); err != nil {
+		t.Fatalf("writing the archive: %v", err)
+	}
+	_, err := extract(archivePath, t.TempDir())
+	if err == nil {
+		t.Fatal("extract() on an archive with no binary = nil, want an error")
+	}
+	if !strings.Contains(err.Error(), binaryName) {
+		t.Errorf("error = %q, want it to name the missing %s", err, binaryName)
+	}
+}
+
+func TestExtractRejectsANonGzipArchive(t *testing.T) {
+	dir := t.TempDir()
+	archivePath := filepath.Join(dir, "wake_1.2.3_test_arch.tar.gz")
+	if err := os.WriteFile(archivePath, []byte("not a gzip stream at all"), 0o600); err != nil {
+		t.Fatalf("writing the archive: %v", err)
+	}
+	if _, err := extract(archivePath, t.TempDir()); err == nil {
+		t.Fatal("extract() on a non-gzip file = nil, want an error")
+	}
+}
+
+// The destination is composed, never taken from the archive, so a crafted entry
+// name cannot write outside the directory it was handed.
+func TestExtractWritesOutsideNothingNamedByTheArchive(t *testing.T) {
+	payload := []byte("the new binary")
+	dir := t.TempDir()
+	archivePath := filepath.Join(dir, "wake_1.2.3_test_arch.tar.gz")
+	if err := os.WriteFile(archivePath, tarGz(t, map[string][]byte{"../../escaped/" + binaryName: payload}), 0o600); err != nil {
+		t.Fatalf("writing the archive: %v", err)
+	}
+	into := t.TempDir()
+
+	got, err := extract(archivePath, into)
+	if err != nil {
+		t.Fatalf("extract() error = %v", err)
+	}
+	if want := filepath.Join(into, binaryName); got != want {
+		t.Errorf("extract() = %q, want the composed path %q", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(into, "..", "..", "escaped")); !os.IsNotExist(err) {
+		t.Errorf("the archive's own path was honoured: Stat(escaped) error = %v, want not-exist", err)
+	}
+}
+
 func TestIsUntaggedTracksTheVersionSentinel(t *testing.T) {
 	if !IsUntagged(version.Untagged) {
 		t.Errorf("IsUntagged(%q) = false, want true", version.Untagged)
