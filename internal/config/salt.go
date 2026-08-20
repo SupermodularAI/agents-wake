@@ -154,7 +154,7 @@ func readSalt(p Paths) ([]byte, error) {
 		return nil, err
 	}
 	if len(salt) != saltLen {
-		return nil, fmt.Errorf("%s holds %d bytes, want %d: %w", p.SaltFile, len(salt), saltLen, errSaltWrongLength)
+		return nil, fmt.Errorf("the repository-id salt holds %d bytes, want %d: %w", len(salt), saltLen, errSaltWrongLength)
 	}
 	return salt, nil
 }
