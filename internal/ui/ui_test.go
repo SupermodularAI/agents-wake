@@ -1,0 +1,175 @@
+package ui
+
+import (
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/SupermodularAI/agents-wake/internal/inventory"
+	"github.com/SupermodularAI/agents-wake/internal/record"
+	"github.com/SupermodularAI/agents-wake/internal/store"
+)
+
+func TestHandlerRendersStoredMetrics(t *testing.T) {
+	source := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	ok := record.OutcomeOK
+	failed := record.OutcomeError
+	if _, err := source.Append([]record.Record{event("one", &ok), event("two", &failed)}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	primitives := inventory.New(filepath.Join(t.TempDir(), "primitives.json"))
+	if err := primitives.Refresh(source, inventory.Discovery{Primitives: []inventory.Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "review"}}, ProjectScanned: true}); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	response := httptest.NewRecorder()
+	Handler(source, primitives).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d", response.Code)
+	}
+	body := response.Body.String()
+	for _, want := range []string{"Terminal invocations", ">2<", "50.0%", "review", "Primitive usage", "Unused primitives", "Local-only telemetry"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard is missing %q: %s", want, body)
+		}
+	}
+}
+
+func TestHandlerRendersEmptyState(t *testing.T) {
+	response := httptest.NewRecorder()
+	Handler(store.New(filepath.Join(t.TempDir(), "events.ndjson")), inventory.New(filepath.Join(t.TempDir(), "primitives.json"))).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "No primitive inventory or terminal events yet") {
+		t.Fatalf("empty dashboard = %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestHandlerExcludesBuiltinToolsFromPrimitiveTable(t *testing.T) {
+	source := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	ok := record.OutcomeOK
+	builtin := event("builtin", &ok)
+	builtin.Name = "Bash"
+	builtin.Kind = record.KindBuiltinTool
+	skill := event("skill", &ok)
+	skill.Name = "pr-review"
+	if _, err := source.Append([]record.Record{builtin, skill}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	primitives := inventory.New(filepath.Join(t.TempDir(), "primitives.json"))
+	if err := primitives.Refresh(source, inventory.Discovery{Primitives: []inventory.Primitive{{Harness: "claude-code", Kind: record.KindBuiltinTool, Name: "Bash"}, {Harness: "claude-code", Kind: record.KindSkill, Name: "pr-review"}}, ProjectScanned: true}); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	response := httptest.NewRecorder()
+	Handler(source, primitives).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := response.Body.String()
+	if strings.Contains(body, ">Bash<") || !strings.Contains(body, ">pr-review<") {
+		t.Fatalf("primitive table did not filter built-ins: %s", body)
+	}
+}
+
+func TestHandlerShowsAvailablePrimitivesWithoutUsage(t *testing.T) {
+	response := httptest.NewRecorder()
+	available := []inventory.Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "available-skill"}}
+	source := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	primitives := inventory.New(filepath.Join(t.TempDir(), "primitives.json"))
+	if err := primitives.Refresh(source, inventory.Discovery{Primitives: available, ProjectScanned: true}); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	Handler(source, primitives).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := response.Body.String()
+	for _, want := range []string{">available-skill<", "Unused primitives", "without any recorded activity"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard is missing %q: %s", want, body)
+		}
+	}
+}
+
+func event(id string, outcome *record.Outcome) record.Record {
+	return record.Record{SchemaVersion: record.SchemaVersion, EventID: record.DeriveEventID("claude-code", record.Identifier(id)), Timestamp: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC), Harness: "claude-code", SessionID: "session-1", Repo: "0123456789abcdef0123456789abcdef", Kind: record.KindSkill, Name: "review", Invoker: record.InvokerModel, Outcome: outcome}
+}
+
+func TestListenBindsLoopbackOnly(t *testing.T) {
+	listener, err := Listen(0)
+	if err != nil {
+		t.Fatalf("Listen(0) error = %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	if got := listener.Addr().String(); !strings.HasPrefix(got, "127.0.0.1:") {
+		t.Errorf("Listen(0) bound %s, want a 127.0.0.1 address", got)
+	}
+}
+
+// Acceptance: a port collision is reported, so the caller can decline to
+// announce a dashboard that is not listening.
+func TestListenReportsAnOccupiedPort(t *testing.T) {
+	first, err := Listen(0)
+	if err != nil {
+		t.Fatalf("Listen(0) error = %v", err)
+	}
+	t.Cleanup(func() { _ = first.Close() })
+	port := first.Addr().(*net.TCPAddr).Port
+	second, err := Listen(port)
+	if err == nil {
+		_ = second.Close()
+		t.Fatalf("Listen(%d) on an occupied port = nil error, want a failure", port)
+	}
+}
+
+func TestServerBoundsEveryRequestPhase(t *testing.T) {
+	limits := defaultTimeouts()
+	server := newServer(nil, limits)
+	for _, phase := range []struct {
+		name string
+		got  time.Duration
+		want time.Duration
+	}{
+		{"ReadHeaderTimeout", server.ReadHeaderTimeout, limits.Header},
+		{"ReadTimeout", server.ReadTimeout, limits.Read},
+		{"WriteTimeout", server.WriteTimeout, limits.Write},
+		{"IdleTimeout", server.IdleTimeout, limits.Idle},
+	} {
+		if phase.got != phase.want {
+			t.Errorf("%s = %v, want %v", phase.name, phase.got, phase.want)
+		}
+		if phase.got <= 0 {
+			t.Errorf("%s is unbounded", phase.name)
+		}
+	}
+}
+
+// Acceptance: a half-written request cannot hold a connection indefinitely. The
+// headers below are deliberately never terminated; the header timeout is what
+// makes the read return instead of blocking until the client gives up.
+func TestPartialRequestDoesNotHoldTheConnection(t *testing.T) {
+	listener, err := Listen(0)
+	if err != nil {
+		t.Fatalf("Listen(0) error = %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	handler := Handler(
+		store.New(filepath.Join(t.TempDir(), "events.ndjson")),
+		inventory.New(filepath.Join(t.TempDir(), "primitives.json")),
+	)
+	go func() {
+		_ = serve(listener, handler, timeouts{Header: 50 * time.Millisecond, Read: 100 * time.Millisecond, Write: time.Second, Idle: 100 * time.Millisecond})
+	}()
+
+	conn, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if _, err := conn.Write([]byte("GET / HTTP/1.1\r\nHost: dashboard\r\n")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline() error = %v", err)
+	}
+	// A deadline error here means the server kept the half-written request open.
+	if _, err := io.ReadAll(conn); err != nil {
+		t.Errorf("reading a half-written request's connection error = %v, want the server to close it", err)
+	}
+}

@@ -1,0 +1,470 @@
+package ingest
+
+import (
+	"bytes"
+	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/SupermodularAI/agents-wake/internal/adapter/claudecode"
+	"github.com/SupermodularAI/agents-wake/internal/inventory"
+	"github.com/SupermodularAI/agents-wake/internal/record"
+	"github.com/SupermodularAI/agents-wake/internal/report"
+	"github.com/SupermodularAI/agents-wake/internal/store"
+)
+
+// names keys the scope digest for this package's tests, standing in for the
+// subkey config.Repos.NameKey derives in production.
+var names = record.NewNamer([]byte("test scope key"))
+
+// transcriptInstant is when this file's fixture entries happen. Every test that needs
+// a session judged closed computes its clock from it rather than reading the wall
+// clock: the real threshold errs deliberately long (24h) and must never be shortened
+// to make a test easier to write.
+var transcriptInstant = time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+
+// closingStaleness is a staleness value under which every session in this file's
+// fixtures has gone quiet past the threshold. ADR-0023 makes session close the
+// terminal boundary for an attributed skill run's fallback record, so a test that
+// wants one written has to say the session ended.
+var closingStaleness = claudecode.Staleness{Timeout: time.Hour, Now: transcriptInstant.Add(8 * time.Hour)}
+
+// spoolLines counts the records in the spool at path. A missing spool is zero: a scan
+// that wrote nothing never creates the file.
+func spoolLines(t *testing.T, path string) int {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0
+	}
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	lines := 0
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		if len(line) > 0 {
+			lines++
+		}
+	}
+	return lines
+}
+
+// reportedCalls returns the CALLS column of the USED PRIMITIVES row naming name — the
+// number a person reads out of `wake report`. The last field of the row rather than a
+// substring search, because the row also carries a timestamp full of digits.
+func reportedCalls(t *testing.T, rendered, name string) string {
+	t.Helper()
+	for line := range strings.Lines(rendered) {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] != name {
+			continue
+		}
+		return fields[len(fields)-1]
+	}
+	t.Fatalf("report names no primitive %q:\n%s", name, rendered)
+	return ""
+}
+
+// invocationsOf refreshes the primitive inventory from the spool and returns what the
+// snapshot says about one primitive — the number `wake report` and the dashboard
+// render. Both go through inventory.Read over metrics.Aggregate, so one assertion here
+// covers all three renderers: ADR-0011's single aggregation layer is what makes the
+// reader's collapse inherited rather than re-implemented per output.
+func invocationsOf(t *testing.T, spool *store.Store, statePath string, kind record.Kind, name record.Identifier) uint64 {
+	t.Helper()
+	primitives := inventory.New(statePath)
+	discovery := inventory.Discovery{
+		Primitives:     []inventory.Primitive{{Harness: "claude-code", Kind: kind, Name: name}},
+		ProjectScanned: true,
+	}
+	if err := primitives.Refresh(spool, discovery); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	snapshot, err := primitives.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	for _, usage := range snapshot {
+		if usage.Kind == kind && usage.Name == name {
+			return usage.Invocations
+		}
+	}
+	t.Fatalf("inventory holds no %s named %q: %+v", kind, name, snapshot)
+	return 0
+}
+
+func TestClaudeCodeIsIdempotent(t *testing.T) {
+	input := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+	}, "\n")
+	destination := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	repo := record.Hash("0123456789abcdef0123456789abcdef")
+	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
+
+	first, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, destination)
+	if err != nil {
+		t.Fatalf("first ClaudeCode() error = %v", err)
+	}
+	second, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, destination)
+	if err != nil {
+		t.Fatalf("second ClaudeCode() error = %v", err)
+	}
+	if first.Written != 1 || second.Duplicate != 1 {
+		t.Fatalf("results = %+v, %+v", first, second)
+	}
+}
+
+func TestClaudeCodePersistsBothToolCallsFromOneSourceEntry(t *testing.T) {
+	input := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"},{"type":"tool_use","id":"call-2","name":"Task","input":{"subagent_type":"explorer"}}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false},{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}`,
+	}, "\n")
+	spool := filepath.Join(t.TempDir(), "events.ndjson")
+	destination := store.New(spool)
+	repo := record.Hash("0123456789abcdef0123456789abcdef")
+	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
+
+	first, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, destination)
+	if err != nil {
+		t.Fatalf("first ClaudeCode() error = %v", err)
+	}
+	if first.Written != 2 || first.Duplicate != 0 || first.Dropped != 0 {
+		t.Fatalf("first ClaudeCode() = %+v, want two written records", first)
+	}
+
+	before, err := os.ReadFile(spool)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	second, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, destination)
+	if err != nil {
+		t.Fatalf("second ClaudeCode() error = %v", err)
+	}
+	if second.Written != 0 || second.Duplicate != 2 {
+		t.Fatalf("second ClaudeCode() = %+v, want both records recognised as duplicates", second)
+	}
+	after, err := os.ReadFile(spool)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("re-ingest changed the spool:\nbefore %s\nafter  %s", before, after)
+	}
+
+	lines := 0
+	for _, line := range bytes.Split(after, []byte("\n")) {
+		if len(line) > 0 {
+			lines++
+		}
+	}
+	if lines != 2 {
+		t.Fatalf("events.ndjson holds %d lines, want 2: %s", lines, after)
+	}
+}
+
+func TestClaudeCodeCountsARefusedSubagentCallWithoutWritingIt(t *testing.T) {
+	input := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Task"}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+	}, "\n")
+	spool := filepath.Join(t.TempDir(), "events.ndjson")
+	destination := store.New(spool)
+	repo := record.Hash("0123456789abcdef0123456789abcdef")
+	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
+
+	result, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, destination)
+	if err != nil {
+		t.Fatalf("ClaudeCode() error = %v", err)
+	}
+	if result.Refused != 1 {
+		t.Errorf("Refused = %d, want 1: the reader's refusal has to reach the caller", result.Refused)
+	}
+	// The refusal is its own fail-closed point: not a record the store dropped, not
+	// an unusable line, and nothing parsed or written.
+	if result.Written != 0 || result.Parsed != 0 || result.Malformed != 0 || result.Dropped != 0 {
+		t.Errorf("ClaudeCode() = %+v, want nothing parsed, written or dropped", result)
+	}
+	if _, statErr := os.Stat(spool); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Errorf("Stat(spool) error = %v, want the spool never created", statErr)
+	}
+}
+
+func TestClaudeCodePersistsNoPathShapedValue(t *testing.T) {
+	input := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Skill","input":{"skill":"usr/local/bin"}}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","attributionSkill":"a/../secrets","attributionMcpServer":"plugin:a/../evil:tool","message":{"model":"C:/Users/me","content":[{"type":"tool_use","id":"call-2","name":"Bash"}]}}`,
+		`{"uuid":"entry-4","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:03Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}`,
+		// A directory-scoped subagent reference, carried on the Task call that is the
+		// subagent invocation: only the keyed digest of the scope may be persisted,
+		// never the path fragment it was derived from (ADR-0020).
+		`{"uuid":"entry-5","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:04Z","message":{"content":[{"type":"tool_use","id":"call-3","name":"Task","input":{"subagent_type":"apps/web:reviewer"}}]}}`,
+		`{"uuid":"entry-6","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:05Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-3","is_error":false}]}}`,
+	}, "\n")
+	spool := filepath.Join(t.TempDir(), "events.ndjson")
+	destination := store.New(spool)
+	repo := record.Hash("0123456789abcdef0123456789abcdef")
+	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
+
+	result, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, destination)
+	if err != nil {
+		t.Fatalf("ClaudeCode() error = %v", err)
+	}
+	if result.Written != 2 {
+		t.Fatalf("ClaudeCode() = %+v, want 2 written", result)
+	}
+
+	raw, err := os.ReadFile(spool)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	lines := 0
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		if len(line) > 0 {
+			lines++
+		}
+	}
+	if lines != 2 {
+		t.Fatalf("events.ndjson holds %d lines: %s", lines, raw)
+	}
+	for _, fragment := range []string{"/", `\`, "usr/local", "secrets", "Users", "evil", "apps", "web"} {
+		if bytes.Contains(raw, []byte(fragment)) {
+			t.Fatalf("events.ndjson contains %q: %s", fragment, raw)
+		}
+	}
+	if !bytes.Contains(raw, []byte("reviewer")) {
+		t.Fatalf("events.ndjson dropped the safe half of a scoped reference: %s", raw)
+	}
+}
+
+// One skill run is one invocation all the way to what a person reads. Claude Code's
+// storage describes the run twice — the Skill tool_use/tool_result pair, and the
+// attributed end_turn entry the run's own turn leaves behind — and the two carry
+// legitimately distinct event ids, so the store cannot collapse them and the reader has
+// to (ADR-0004, ADR-0002's invocation grain).
+func TestClaudeCodeReportsOneSkillRunAsOneInvocation(t *testing.T) {
+	input := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-1","name":"Skill","input":{"skill":"pr-review"}}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
+		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+	}, "\n")
+	spool := filepath.Join(t.TempDir(), "events.ndjson")
+	destination := store.New(spool)
+	repo := record.Hash("0123456789abcdef0123456789abcdef")
+	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
+
+	result, err := ClaudeCode(strings.NewReader(input), resolve, names, closingStaleness, destination)
+	if err != nil {
+		t.Fatalf("ClaudeCode() error = %v", err)
+	}
+	if result.Written != 1 || result.AmbiguousSkillRuns != 0 {
+		t.Fatalf("ClaudeCode() = %+v, want one record and nothing uncertain", result)
+	}
+	if lines := spoolLines(t, spool); lines != 1 {
+		t.Fatalf("events.ndjson holds %d lines, want 1", lines)
+	}
+
+	primitiveState := filepath.Join(t.TempDir(), "primitives.json")
+	if got := invocationsOf(t, destination, primitiveState, record.KindSkill, "pr-review"); got != 1 {
+		t.Errorf("inventory invocations = %d, want 1", got)
+	}
+
+	// The literal `wake report` path, so the number a person reads is asserted and not
+	// inferred from the layer beneath it.
+	var rendered bytes.Buffer
+	if err := report.Print(&rendered, destination, inventory.New(primitiveState), report.Options{Usage: true}); err != nil {
+		t.Fatalf("Print() error = %v", err)
+	}
+	if calls := reportedCalls(t, rendered.String(), "pr-review"); calls != "1" {
+		t.Errorf("`wake report` shows %s calls for pr-review, want 1", calls)
+	}
+}
+
+// A skill invoked as a slash command leaves no Skill tool call at all — the shape
+// ADR-0023 §4 keeps a fallback record for. It resolves once the session closes, carries
+// no outcome, and re-ingesting the same transcript writes nothing more: its event id
+// comes from the source event, so the new record path is idempotent like every other
+// (ADR-0004).
+func TestClaudeCodeReportsAShapeASkillRunAsOneInvocation(t *testing.T) {
+	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"run-sdlc","message":{"model":"sonnet","stop_reason":"end_turn"}}`
+	spool := filepath.Join(t.TempDir(), "events.ndjson")
+	destination := store.New(spool)
+	repo := record.Hash("0123456789abcdef0123456789abcdef")
+	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
+
+	first, err := ClaudeCode(strings.NewReader(input), resolve, names, closingStaleness, destination)
+	if err != nil {
+		t.Fatalf("first ClaudeCode() error = %v", err)
+	}
+	if first.Written != 1 {
+		t.Fatalf("first ClaudeCode() = %+v, want one record written", first)
+	}
+
+	entries, err := destination.Entries(0)
+	if err != nil {
+		t.Fatalf("Entries() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("Entries() = %+v, want exactly one record", entries)
+	}
+	// An end_turn entry describes no result, and unknown is never success (ADR-0005).
+	if outcome := entries[0].Record.Outcome; outcome != nil {
+		t.Errorf("Outcome = %v, want none", outcome)
+	}
+	if got := invocationsOf(t, destination, filepath.Join(t.TempDir(), "primitives.json"), record.KindSkill, "run-sdlc"); got != 1 {
+		t.Errorf("inventory invocations = %d, want 1", got)
+	}
+
+	before, err := os.ReadFile(spool)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	second, err := ClaudeCode(strings.NewReader(input), resolve, names, closingStaleness, destination)
+	if err != nil {
+		t.Fatalf("second ClaudeCode() error = %v", err)
+	}
+	if second.Written != 0 || second.Duplicate != 1 {
+		t.Fatalf("second ClaudeCode() = %+v, want the record recognised as a duplicate", second)
+	}
+	after, err := os.ReadFile(spool)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("re-ingest changed the spool:\nbefore %s\nafter  %s", before, after)
+	}
+}
+
+// A subagent's own sidechain turn inherits the parent skill's attributionSkill, so it
+// meets the attributed-run condition without being a skill invocation — the commonest
+// attributed shape on a real machine (ADR-0023 §1). Nothing is written for it, and the
+// spool is never created.
+func TestClaudeCodeNeverReportsASidechainTurnAsASkillInvocation(t *testing.T) {
+	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","isSidechain":true,"attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`
+	spool := filepath.Join(t.TempDir(), "events.ndjson")
+	destination := store.New(spool)
+	repo := record.Hash("0123456789abcdef0123456789abcdef")
+	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
+
+	result, err := ClaudeCode(strings.NewReader(input), resolve, names, closingStaleness, destination)
+	if err != nil {
+		t.Fatalf("ClaudeCode() error = %v", err)
+	}
+	// Not a refusal and nothing uncertain: the entry is readable and Wake deliberately
+	// collects nothing from it, which must not read as lost collection in doctor.
+	if result.Written != 0 || result.Parsed != 0 || result.Refused != 0 || result.AmbiguousSkillRuns != 0 {
+		t.Errorf("ClaudeCode() = %+v, want a clean zero", result)
+	}
+	if _, statErr := os.Stat(spool); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Errorf("Stat(spool) error = %v, want the spool never created", statErr)
+	}
+}
+
+// T111's regression, at the layer that renders. A subagent run is described twice the
+// same way a skill run is, and the fix for the skill half must not change what the
+// subagent half already does: attributionAgent derives no record at all.
+func TestClaudeCodeStillReportsOneSubagentRunAsOneInvocation(t *testing.T) {
+	input := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-1","name":"Task","input":{"subagent_type":"explorer"}}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","attributionAgent":"explorer","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
+		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+	}, "\n")
+	spool := filepath.Join(t.TempDir(), "events.ndjson")
+	destination := store.New(spool)
+	repo := record.Hash("0123456789abcdef0123456789abcdef")
+	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
+
+	result, err := ClaudeCode(strings.NewReader(input), resolve, names, closingStaleness, destination)
+	if err != nil {
+		t.Fatalf("ClaudeCode() error = %v", err)
+	}
+	if result.Written != 1 {
+		t.Fatalf("ClaudeCode() = %+v, want one record for one subagent run", result)
+	}
+	if got := invocationsOf(t, destination, filepath.Join(t.TempDir(), "primitives.json"), record.KindSubagent, "explorer"); got != 1 {
+		t.Errorf("inventory invocations = %d, want 1", got)
+	}
+}
+
+// The accepted limitation ADR-0023 documents, carried to the caller: several
+// attributed end_turn entries for one skill in one session are one record and a count
+// of what was collapsed. The counter is uncertainty about that number and never a
+// second invocation, so the spool holds one line and the inventory reports one.
+func TestClaudeCodeReportsTheAmbiguityCounterWithoutASecondInvocation(t *testing.T) {
+	input := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
+		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
+	}, "\n")
+	spool := filepath.Join(t.TempDir(), "events.ndjson")
+	destination := store.New(spool)
+	repo := record.Hash("0123456789abcdef0123456789abcdef")
+	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
+
+	result, err := ClaudeCode(strings.NewReader(input), resolve, names, closingStaleness, destination)
+	if err != nil {
+		t.Fatalf("ClaudeCode() error = %v", err)
+	}
+	if result.Written != 1 {
+		t.Fatalf("ClaudeCode() = %+v, want exactly one record written", result)
+	}
+	if result.AmbiguousSkillRuns != 2 {
+		t.Errorf("AmbiguousSkillRuns = %d, want 2 — the reader's count has to reach the caller", result.AmbiguousSkillRuns)
+	}
+	if lines := spoolLines(t, spool); lines != 1 {
+		t.Errorf("events.ndjson holds %d lines, want 1", lines)
+	}
+	// The renderers' number, not just the store's: what doctor reports as uncertainty
+	// may never appear as an invocation.
+	if got := invocationsOf(t, destination, filepath.Join(t.TempDir(), "primitives.json"), record.KindSkill, "pr-review"); got != 1 {
+		t.Errorf("inventory invocations = %d, want 1", got)
+	}
+}
+
+func TestClaudeCodeWritesAnInterruptedCallExactlyOnce(t *testing.T) {
+	// A session killed mid-call leaves a tool_use with no tool_result. Once the
+	// staleness threshold has passed, the reader resolves it to outcome interrupted —
+	// and because the id comes from the source event rather than from the scan
+	// (ADR-0004), a second scan of the same transcript writes nothing more. That is
+	// what makes a retry, a rescan and two concurrent scans all safe.
+	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`
+	destination := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	repo := record.Hash("0123456789abcdef0123456789abcdef")
+	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
+	stale := claudecode.Staleness{
+		Timeout: time.Hour,
+		Now:     time.Date(2026, 8, 13, 14, 0, 0, 0, time.UTC),
+	}
+
+	first, err := ClaudeCode(strings.NewReader(input), resolve, names, stale, destination)
+	if err != nil {
+		t.Fatalf("first ClaudeCode() error = %v", err)
+	}
+	if first.Written != 1 || first.Interrupted != 1 || first.Duplicate != 0 || first.Pending != 0 {
+		t.Fatalf("first ClaudeCode() = %+v", first)
+	}
+
+	second, err := ClaudeCode(strings.NewReader(input), resolve, names, stale, destination)
+	if err != nil {
+		t.Fatalf("second ClaudeCode() error = %v", err)
+	}
+	if second.Written != 0 || second.Duplicate != 1 || second.Interrupted != 1 {
+		t.Fatalf("second ClaudeCode() = %+v", second)
+	}
+
+	entries, err := destination.Entries(0)
+	if err != nil {
+		t.Fatalf("Entries() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("Entries() = %+v, want exactly one record", entries)
+	}
+	if outcome := entries[0].Record.Outcome; outcome == nil || *outcome != record.OutcomeInterrupted {
+		t.Fatalf("Outcome = %v, want interrupted", outcome)
+	}
+}

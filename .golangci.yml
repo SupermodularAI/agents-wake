@@ -1,0 +1,64 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    # A counting tool that silently drops an error reports wrong numbers, which
+    # ADR-0004 and plan §12 treat as the failure that costs all the trust.
+    - errcheck
+    - errorlint
+    # ADR-0007: the record type is the privacy allowlist. These catch the
+    # accidental paths a hand-review misses.
+    - bodyclose
+    - copyloopvar
+    - gocritic
+    - govet
+    - ineffassign
+    - misspell
+    - nilerr
+    - revive
+    - staticcheck
+    - unconvert
+    - unused
+    - usestdlibvars
+    - wastedassign
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    govet:
+      enable-all: true
+      disable:
+        # fieldalignment fights readability on config-shaped structs; the store
+        # is ~3.6 MB/month (ADR-0014), so struct packing is not a real cost.
+        - fieldalignment
+    revive:
+      rules:
+        - name: exported
+        - name: package-comments
+        - name: error-strings
+        - name: error-return
+        - name: context-as-argument
+        - name: indent-error-flow
+
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - std-error-handling
+    rules:
+      # Test files may assert loosely and shadow freely.
+      - path: _test\.go$
+        linters:
+          - errcheck
+          - gocritic
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/SupermodularAI/agents-wake
