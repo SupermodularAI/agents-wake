@@ -311,16 +311,38 @@ func TestReadEmitsSkillFallbacksInADeterministicOrder(t *testing.T) {
 	}
 }
 
-// A read that could not rule out one of its lines may not conclude a session went
-// silent, so it may not emit a Shape-A fallback either. That record is permanent —
-// ADR-0015 rejects upsert and ADR-0004 deduplicates the correction away — and deriving
-// it from a line the reader is blind to is what plan §3.3 forbids. The candidate stays
-// buffered and the session stays open, which costs a later scan and never a wrong
-// record.
-func TestReadDoesNotResolveASkillCandidateWhenALineWasUnusable(t *testing.T) {
+// An oversized line does not gate this rule: maxLineBytes is a fixed internal
+// constant, so the line is oversized on every future scan and deferring never
+// resolves it (see the comment above result.Malformed += skipped in Read).
+func TestReadResolvesASkillCandidateDespiteAnOversizedLine(t *testing.T) {
 	candidate := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`
 
 	result, err := Read(strings.NewReader(candidate+"\n"+oversizedResult(t)+"\n"), resolver, names, closedSession)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 1 || result.AmbiguousSkillRuns != 0 {
+		t.Fatalf("Read() = %+v, want the fallback resolved", result)
+	}
+	if result.Malformed != 1 {
+		t.Errorf("Malformed = %d, want 1 — the blindness doctor reports", result.Malformed)
+	}
+	if result.OpenSessions != 0 {
+		t.Errorf("OpenSessions = %d, want 0 — an oversized line no longer blocks the staleness judgement", result.OpenSessions)
+	}
+}
+
+// A read that could not rule out a genuinely unreadable line may not conclude a
+// session went silent, so it may not emit a Shape-A fallback either. That record
+// is permanent — ADR-0015 rejects upsert and ADR-0004 deduplicates the correction
+// away — and deriving it from a line the reader is blind to is what plan §3.3
+// forbids. The candidate stays buffered and the session stays open, which costs a
+// later scan and never a wrong record.
+func TestReadDoesNotResolveASkillCandidateWhenALineWasUnreadable(t *testing.T) {
+	candidate := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`
+	unreadable := `{"uuid":"entry-2","sessionId":"session-1",`
+
+	result, err := Read(strings.NewReader(candidate+"\n"+unreadable+"\n"), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1414,6 +1436,26 @@ func oversizedResult(t *testing.T) string {
 	return line
 }
 
+// An oversized line does not gate the staleness rule: maxLineBytes is a fixed
+// internal constant, so the line is oversized on every future scan and deferring
+// never resolves it (see the comment above result.Malformed += skipped in Read).
+// The call is judged on the read's other activity instead, and here that leaves
+// it stale.
+func TestReadInterruptsAStaleCallDespiteAnOversizedLine(t *testing.T) {
+	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
+
+	result, err := Read(strings.NewReader(unterminatedCall+"\n"+oversizedResult(t)+"\n"), resolver, names, stale)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if result.Malformed != 1 {
+		t.Errorf("Malformed = %d, want 1", result.Malformed)
+	}
+	if len(result.Records) != 1 || result.Interrupted != 1 || result.Pending != 0 {
+		t.Fatalf("Read() = %+v, want the stale call resolved to interrupted", result)
+	}
+}
+
 func TestReadDoesNotInterruptACallWhenALineWasUnusable(t *testing.T) {
 	// The unusable line is the tool_result that terminated the call successfully. The
 	// reader cannot see that, so it must not conclude the opposite: emitting
@@ -1421,7 +1463,6 @@ func TestReadDoesNotInterruptACallWhenALineWasUnusable(t *testing.T) {
 	// succeeded (ADR-0004 dedups, ADR-0015 rejects upsert), and inferring a terminal
 	// outcome from a line it is blind to is exactly what plan §3.3 forbids.
 	cases := map[string]string{
-		"oversized": oversizedResult(t),
 		"malformed": `{"uuid":"entry-2","sessionId":"session-1",`,
 		// Decodes, and the reader can see a tool_result for the buffered call in it —
 		// but the entry's own identity is unusable, so the result could not be attributed
@@ -1493,13 +1534,36 @@ func TestReadDoesNotInterruptACallTerminatedByAnyResultShape(t *testing.T) {
 	}
 }
 
-func TestReadKeepsEverySessionOpenWhenALineWasUnusable(t *testing.T) {
-	// An unusable line is never observed as activity, so every session's last activity
-	// is known-understated once the reader skipped one — including a session whose only
-	// recent line is the one it could not read. Reporting such a session closed would
-	// let a future cursor (ADR-0023 §5) advance past a session that is still alive, so
-	// the whole read declines to judge: the floor stays at the start of the source.
+// An oversized line does not gate the cursor floor either: maxLineBytes is a
+// fixed internal constant, so deferring the judgement never resolves it (see the
+// comment above result.Malformed += skipped in Read). The session is judged on
+// the read's other activity instead, and here that leaves it closed.
+func TestReadResolvesSessionsDespiteAnOversizedLine(t *testing.T) {
 	input := strings.Join([]string{unterminatedCall, oversizedResult(t)}, "\n")
+	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
+
+	result, err := Read(strings.NewReader(input), resolver, names, stale)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+
+	if result.OpenSessions != 0 {
+		t.Errorf("OpenSessions = %d, want 0", result.OpenSessions)
+	}
+	if result.CursorFloor != 0 {
+		t.Errorf("CursorFloor = %d, want 0", result.CursorFloor)
+	}
+}
+
+func TestReadKeepsEverySessionOpenWhenALineWasUnreadable(t *testing.T) {
+	// An unreadable line is never observed as activity, so every session's last
+	// activity is known-understated once the reader could not attribute one —
+	// including a session whose only recent line is the one it could not read.
+	// Reporting such a session closed would let a future cursor (ADR-0023 §5)
+	// advance past a session that is still alive, so the whole read declines to
+	// judge: the floor stays at the start of the source.
+	unreadable := `{"sessionId":"session-1","cwd":"/repo","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`
+	input := strings.Join([]string{unterminatedCall, unreadable}, "\n")
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
 
 	result, err := Read(strings.NewReader(input), resolver, names, stale)

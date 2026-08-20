@@ -248,10 +248,15 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 	}
 	// A line too long to deliver is unusable in the same way a line that does not
 	// parse is: counted as malformed so doctor can report blindness, and nothing is
-	// synthesised from it — no call is opened, so no result can terminate one. It was
-	// never delivered, so its contents could not be ruled out either.
+	// synthesised from it — no call is opened, so no result can terminate one.
+	//
+	// It does not join unreadable below, unlike a line whose bytes arrived but made
+	// no sense. maxLineBytes is a fixed internal constant, not a limit a user can
+	// raise (see above), so an oversized line is oversized on every future scan —
+	// there is no later scan for the staleness rule to defer to. Gating on it would
+	// not buy a slower-but-correct read; it would pin this file's pending calls and
+	// cursor floor forever.
 	result.Malformed += skipped
-	unreadable += skipped
 	// A read that could not rule out one of its lines may not judge a session silent.
 	// That line may be the tool_result that terminated a buffered call, and it was not
 	// observed as activity either — so last activity is known-understated, not merely
