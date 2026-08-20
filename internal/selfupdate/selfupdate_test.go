@@ -1,9 +1,14 @@
 package selfupdate
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -167,6 +172,121 @@ func TestLatestRefusesAnUnsupportedPlatformBeforeTouchingTheNetwork(t *testing.T
 	}
 	if fake.resolves != 0 {
 		t.Errorf("Latest() resolved %d times before refusing, want 0", fake.resolves)
+	}
+}
+
+// tarGz builds a gzipped tar of files, so a test can produce a real release
+// archive without one existing.
+func tarGz(t *testing.T, files map[string][]byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for name, body := range files {
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o755, Size: int64(len(body)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatalf("WriteHeader(%q): %v", name, err)
+		}
+		if _, err := tw.Write(body); err != nil {
+			t.Fatalf("Write(%q): %v", name, err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("closing the tar writer: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("closing the gzip writer: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// checksumLine renders the `<sha256>  <name>` line GoReleaser publishes.
+func checksumLine(name string, archive []byte) string {
+	return fmt.Sprintf("%x  %s\n", sha256.Sum256(archive), name)
+}
+
+// writeArchiveAndChecksums lays a downloaded pair out in dir the way Apply does,
+// returning the two paths.
+func writeArchiveAndChecksums(t *testing.T, dir, name string, archive []byte, checksums string) (string, string) {
+	t.Helper()
+	archivePath := filepath.Join(dir, name)
+	checksumsPath := filepath.Join(dir, checksumsName)
+	if err := os.WriteFile(archivePath, archive, 0o600); err != nil {
+		t.Fatalf("writing the archive: %v", err)
+	}
+	if err := os.WriteFile(checksumsPath, []byte(checksums), 0o600); err != nil {
+		t.Fatalf("writing the checksums: %v", err)
+	}
+	return archivePath, checksumsPath
+}
+
+func TestVerifyAcceptsAMatchingDigest(t *testing.T) {
+	archive := tarGz(t, map[string][]byte{binaryName: []byte("the new binary")})
+	name := "wake_1.2.3_test_arch.tar.gz"
+	archivePath, checksumsPath := writeArchiveAndChecksums(t, t.TempDir(), name, archive, checksumLine(name, archive))
+	if err := verify(archivePath, checksumsPath, name); err != nil {
+		t.Errorf("verify() on a matching digest = %v, want nil", err)
+	}
+}
+
+func TestVerifyRefusesATamperedChecksumLine(t *testing.T) {
+	archive := tarGz(t, map[string][]byte{binaryName: []byte("the new binary")})
+	name := "wake_1.2.3_test_arch.tar.gz"
+	line := checksumLine(name, archive)
+	// One flipped hex character: the published digest no longer describes these
+	// bytes, and there is no way to tell which of the two was tampered with — so
+	// neither is trusted.
+	flipped := byte('0')
+	if line[0] == '0' {
+		flipped = '1'
+	}
+	archivePath, checksumsPath := writeArchiveAndChecksums(t, t.TempDir(), name, archive, string(flipped)+line[1:])
+	err := verify(archivePath, checksumsPath, name)
+	if err == nil {
+		t.Fatal("verify() on a tampered checksum line = nil, want a refusal")
+	}
+	if !strings.Contains(err.Error(), name) {
+		t.Errorf("error = %q, want it to name the asset that failed", err)
+	}
+}
+
+func TestVerifyRefusesACorruptedArchive(t *testing.T) {
+	archive := tarGz(t, map[string][]byte{binaryName: []byte("the new binary")})
+	name := "wake_1.2.3_test_arch.tar.gz"
+	line := checksumLine(name, archive)
+	archivePath, checksumsPath := writeArchiveAndChecksums(t, t.TempDir(), name, append(archive, 'x'), line)
+	if err := verify(archivePath, checksumsPath, name); err == nil {
+		t.Fatal("verify() on a corrupted download = nil, want a refusal")
+	}
+}
+
+// A missing line is a failure too: an archive the release published no digest for
+// is unverified, not verified.
+func TestVerifyRefusesWhenTheChecksumFileHasNoEntryForTheAsset(t *testing.T) {
+	archive := tarGz(t, map[string][]byte{binaryName: []byte("the new binary")})
+	name := "wake_1.2.3_test_arch.tar.gz"
+	other := checksumLine("wake_1.2.3_other_arch.tar.gz", archive)
+	archivePath, checksumsPath := writeArchiveAndChecksums(t, t.TempDir(), name, archive, other)
+	err := verify(archivePath, checksumsPath, name)
+	if err == nil {
+		t.Fatal("verify() with no line for the asset = nil, want a refusal")
+	}
+	if !strings.Contains(err.Error(), name) {
+		t.Errorf("error = %q, want it to name the asset with no published digest", err)
+	}
+}
+
+// A real checksums.txt lists every artefact of the release, so matching the right
+// line among several is the normal case rather than an edge one.
+func TestVerifyIgnoresUnrelatedLines(t *testing.T) {
+	archive := tarGz(t, map[string][]byte{binaryName: []byte("the new binary")})
+	name := "wake_1.2.3_test_arch.tar.gz"
+	other := tarGz(t, map[string][]byte{binaryName: []byte("some other platform's binary")})
+	checksums := checksumLine("wake_1.2.3_a_b.tar.gz", other) +
+		checksumLine(name, archive) +
+		checksumLine("wake_1.2.3_c_d.tar.gz", other)
+	archivePath, checksumsPath := writeArchiveAndChecksums(t, t.TempDir(), name, archive, checksums)
+	if err := verify(archivePath, checksumsPath, name); err != nil {
+		t.Errorf("verify() against a full checksums.txt = %v, want nil", err)
 	}
 }
 

@@ -12,8 +12,14 @@
 package selfupdate
 
 import (
+	"bufio"
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path"
 	"slices"
 	"strings"
@@ -57,6 +63,68 @@ func assetName(tag, goos, goarch string) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("%s_%s_%s_%s.tar.gz", binaryName, strings.TrimPrefix(tag, "v"), goos, goarch), nil
+}
+
+// checksumsName is what .goreleaser.yaml's checksum.name_template publishes.
+const checksumsName = "checksums.txt"
+
+// maxChecksums caps the checksum file a release is allowed to publish. It is a
+// list of one line per artefact; anything larger is not that file.
+const maxChecksums = 1 << 20
+
+// verify fails unless archive's SHA-256 equals the digest checksums.txt
+// publishes for name.
+//
+// A gate, not a warning: nothing is unpacked and nothing is moved until this
+// returns nil (ADR-0001, ticket Scope). A missing line is a failure too — an
+// archive the release did not publish a digest for is unverified, not verified.
+func verify(archivePath, checksumsPath, name string) error {
+	// The size is checked before the read rather than after: whatever curl left
+	// at this path is not necessarily the file the release publishes, and reading
+	// it first would already have spent the memory the cap exists to protect.
+	info, err := os.Stat(checksumsPath)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", checksumsName, err)
+	}
+	if info.Size() > maxChecksums {
+		return fmt.Errorf("%s is %d bytes, which is not a list of checksums", checksumsName, info.Size())
+	}
+	raw, err := os.ReadFile(checksumsPath)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", checksumsName, err)
+	}
+
+	var published string
+	scanner := bufio.NewScanner(bytes.NewReader(raw))
+	for scanner.Scan() {
+		// GoReleaser writes `<sha256>  <artefact>`, which is the same shape
+		// install.sh greps for.
+		fields := strings.Fields(scanner.Text())
+		if len(fields) == 2 && fields[1] == name {
+			published = fields[0]
+			break
+		}
+	}
+	if scanErr := scanner.Err(); scanErr != nil {
+		return fmt.Errorf("reading %s: %w", checksumsName, scanErr)
+	}
+	if published == "" {
+		return fmt.Errorf("%s publishes no checksum for %s", checksumsName, name)
+	}
+
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return fmt.Errorf("opening %s: %w", name, err)
+	}
+	defer func() { _ = f.Close() }()
+	digest := sha256.New()
+	if _, err := io.Copy(digest, f); err != nil {
+		return fmt.Errorf("hashing %s: %w", name, err)
+	}
+	if !strings.EqualFold(hex.EncodeToString(digest.Sum(nil)), published) {
+		return fmt.Errorf("checksum verification failed for %s: the download does not match the published checksum", name)
+	}
+	return nil
 }
 
 // errNoFetcher reports an Updater built without the one field it cannot default.
