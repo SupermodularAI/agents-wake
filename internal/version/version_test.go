@@ -17,6 +17,15 @@ func TestStringNamesAllThreeValues(t *testing.T) {
 	}
 }
 
+// The sentinel and the default are the same string by construction, so a package
+// that special-cases an un-injected build (internal/selfupdate) can compare
+// against Untagged rather than carry a second "dev" literal of its own.
+func TestUntaggedIsTheDefaultVersion(t *testing.T) {
+	if Version != Untagged {
+		t.Errorf("Version default = %q, want the Untagged sentinel %q", Version, Untagged)
+	}
+}
+
 func TestDefaultsAreNotPlausibleVersions(t *testing.T) {
 	// An un-injected binary must be obvious. If these ever become real-looking
 	// values, a build with no ldflags becomes indistinguishable from a release.

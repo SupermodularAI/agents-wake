@@ -7,9 +7,14 @@
 // indistinguishable from a release.
 package version
 
+// Untagged is the Version of a binary built outside the Makefile and
+// .goreleaser.yaml pipelines — neither pipeline can produce it, so a binary
+// reporting it has no release tag to compare itself against.
+const Untagged = "dev"
+
 var (
 	// Version is the release version, from `git describe`.
-	Version = "dev"
+	Version = Untagged
 	// Commit is the short commit hash the binary was built from.
 	Commit = "none"
 	// Date is the RFC3339 UTC build timestamp.
