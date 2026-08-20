@@ -107,8 +107,15 @@ func Init(paths config.Paths, root, claudeDir, executable string, full bool) (in
 		return 0, withSettingsFix(err, "then run wake init again")
 	}
 	counters := health.New(paths.HealthFile)
-	if recordErr := counters.RecordHooks(health.Hooks{At: time.Now().UTC(), Installed: installed}); recordErr != nil {
-		return 0, recordErr
+	// Only written when something changed: installHooks reports groups changed,
+	// not groups present, so a no-op re-run reporting installed == 0 would
+	// otherwise stomp the stored counter to zero while both hook groups remain
+	// live in settings.json — the same erase-what-was-measured hazard RecordScan
+	// guards against below.
+	if installed > 0 {
+		if recordErr := counters.RecordHooks(health.Hooks{At: time.Now().UTC(), Installed: installed}); recordErr != nil {
+			return 0, recordErr
+		}
 	}
 
 	events := store.New(filepath.Join(paths.DataDir, eventsFile))
@@ -248,7 +255,7 @@ func Uninstall(paths config.Paths, claudeDir string, purge bool) (bool, error) {
 	}
 	if purge {
 		if err := os.RemoveAll(paths.DataDir); err != nil {
-			return false, err
+			return removed > 0, err
 		}
 	}
 	return removed > 0, nil
