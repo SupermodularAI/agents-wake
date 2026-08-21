@@ -20,6 +20,7 @@ make validate
 ```
 
 This runs the same gate CI runs: `fmt-check` → `vet` → `lint` → `test`. A
+green local run means the lint/vet/test portion of CI will pass. Also run:
 green local run means a green CI run. Also run:
 
 ```sh
