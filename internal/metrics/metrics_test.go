@@ -28,6 +28,26 @@ func TestAggregateExcludesUnknownOutcomes(t *testing.T) {
 	}
 }
 
+func TestAggregateExcludesBuiltinToolActivity(t *testing.T) {
+	ok := record.OutcomeOK
+	skill := testRecord("skill-call", &ok)
+	builtin := testRecord("bash-call", &ok)
+	builtin.Kind = record.KindBuiltinTool
+	builtin.Name = "Bash"
+	builtin.SessionID = "session-builtin-only"
+	summary := Aggregate([]record.Record{skill, builtin})
+
+	if summary.Invocations != 1 || summary.Sessions != 1 {
+		t.Fatalf("summary counts = %+v, want only the skill call counted", summary)
+	}
+	if summary.Outcomes[record.OutcomeOK] != 1 {
+		t.Fatalf("Outcomes[ok] = %d, want 1 (builtin tool ok must not count)", summary.Outcomes[record.OutcomeOK])
+	}
+	if len(summary.Primitives) != 1 || summary.Primitives[0].Kind == record.KindBuiltinTool {
+		t.Fatalf("Primitives = %+v, want only the skill", summary.Primitives)
+	}
+}
+
 func TestAggregateOrdersPrimitiveUsage(t *testing.T) {
 	ok := record.OutcomeOK
 	first := testRecord("one", &ok)

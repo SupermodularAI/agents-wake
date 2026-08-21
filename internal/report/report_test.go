@@ -30,11 +30,15 @@ func TestRenderShowsCurrentMetricsAndPrimitiveActivity(t *testing.T) {
 	text := output.String()
 	for _, want := range []string{
 		"WAKE REPORT",
-		"Terminal invocations  4",
+		// The builtin record (Bash, kind builtin_tool) never reaches OVERVIEW or
+		// OUTCOMES: only "review" and "failed" (skills) and "retry" (unknown
+		// outcome, also a skill) count, so invocations is 3, not 4, and the
+		// error rate's denominator is the 2 known skill calls, not 3.
+		"Terminal invocations  3",
 		"Error rate",
-		"33.3% (1/3 known; 1 unknown)",
+		"50.0% (1/2 known; 1 unknown)",
 		"Health coverage",
-		"3 known; 1 unknown excluded",
+		"2 known; 1 unknown excluded",
 		"unknown  1 (excluded from health rates)",
 		"review",
 		"USED PRIMITIVES",

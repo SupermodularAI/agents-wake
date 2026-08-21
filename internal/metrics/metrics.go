@@ -74,6 +74,13 @@ type Summary struct {
 
 // Aggregate derives the MVP's metrics from terminal records. Unknown outcomes
 // remain usage evidence but are excluded from health-rate denominators.
+//
+// Built-in tool calls (Bash, Read, Edit, ...) are excluded before anything is
+// counted. Every renderer built on Summary — OVERVIEW, OUTCOMES, the dashboard's
+// stat tiles — is meant to describe the primitives Wake tracks, the same
+// population USED PRIMITIVES lists below them; a session's ordinary tool calls
+// outnumber its primitive calls and would otherwise dominate every rate with
+// activity the primitive table never shows.
 func Aggregate(records []record.Record) Summary {
 	summary := Summary{Outcomes: make(map[record.Outcome]uint64)}
 	allSessions := make(map[record.Identifier]struct{})
@@ -81,7 +88,7 @@ func Aggregate(records []record.Record) Summary {
 	var known, unknown, failures uint64
 
 	for _, event := range records {
-		if !record.IsTerminal(event) {
+		if !record.IsTerminal(event) || event.Kind == record.KindBuiltinTool {
 			continue
 		}
 		summary.Invocations++
