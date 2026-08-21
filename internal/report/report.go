@@ -180,12 +180,12 @@ func primitiveUsage(writer io.Writer, available []inventory.Usage, pretty bool) 
 	if _, err := fmt.Fprintln(writer, "\n"+heading(pretty, "USED PRIMITIVES")); err != nil {
 		return err
 	}
-	rows := newTable("PRIMITIVE", "TYPE", "HARNESS", "LAST USED", "CALLS")
+	rows := newTable("PRIMITIVE", "TYPE", "HARNESS", "LAST USED", "CALLS", "ERRORS")
 	for _, usage := range available {
 		if usage.Invocations == 0 {
 			continue
 		}
-		rows.add(string(usage.Name), kind(usage.Kind), string(usage.Harness), usage.LastUsed.UTC().Format(time.RFC3339), fmt.Sprintf("%d", usage.Invocations))
+		rows.add(string(usage.Name), kind(usage.Kind), string(usage.Harness), usage.LastUsed.UTC().Format(time.RFC3339), fmt.Sprintf("%d", usage.Invocations), errorCell(usage))
 	}
 	if len(rows.rows) == 0 {
 		_, err := fmt.Fprintln(writer, "No primitive activity observed.")
@@ -243,4 +243,20 @@ func rate(ratio metrics.Ratio) string {
 		return fmt.Sprintf("%.1f%% (%d/%d known; %d unknown)", percent, ratio.Numerator(), ratio.Denominator(), ratio.Excluded())
 	}
 	return fmt.Sprintf("not available (0 known; %d unknown)", ratio.Excluded())
+}
+
+// errorCell is a single per-primitive table cell, not the OVERVIEW-wide rate:
+// a count first because that is what a busy reader scans a column for, then
+// the percentage in parentheses for the ones who want the rate too. A
+// primitive with no failures says "0" rather than "0 (0.0%)" — a rate is only
+// interesting once there is one.
+func errorCell(usage inventory.Usage) string {
+	if usage.Failures == 0 {
+		return "0"
+	}
+	ratio := metrics.NewRatio(usage.Failures, usage.Invocations-usage.Unknown, usage.Unknown, usage.Invocations)
+	if percent, ok := ratio.Percent(); ok {
+		return fmt.Sprintf("%d (%.1f%%)", usage.Failures, percent)
+	}
+	return fmt.Sprintf("%d", usage.Failures)
 }

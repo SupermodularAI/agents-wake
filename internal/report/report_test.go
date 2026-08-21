@@ -54,6 +54,27 @@ func TestRenderShowsCurrentMetricsAndPrimitiveActivity(t *testing.T) {
 	}
 }
 
+func TestRenderShowsPerPrimitiveErrorsAsCountAndPercentage(t *testing.T) {
+	summary := metrics.Aggregate(nil)
+	available := []inventory.Usage{
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "flaky", Invocations: 4, Failures: 1, Unknown: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "solid", Invocations: 2, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)},
+	}
+
+	var output bytes.Buffer
+	if err := Render(&output, summary, available, Options{}); err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	text := output.String()
+	// flaky: 1 failure out of 3 known (4 invocations, 1 excluded as unknown).
+	if !strings.Contains(text, "flaky") || !strings.Contains(text, "33.3%") {
+		t.Fatalf("report missing flaky primitive's error rate:\n%s", text)
+	}
+	if line := lineStartingWith(text, "solid"); !strings.Contains(line, "0") || strings.Contains(line, "%") {
+		t.Fatalf("failure-free primitive should report a bare 0, got %q:\n%s", line, text)
+	}
+}
+
 func TestRenderRespectsPrimitiveSectionFilters(t *testing.T) {
 	available := []inventory.Usage{{Harness: "claude-code", Kind: record.KindSkill, Name: "used", Invocations: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)}, {Harness: "claude-code", Kind: record.KindSkill, Name: "unused"}}
 	for _, test := range []struct {

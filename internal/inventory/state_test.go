@@ -51,6 +51,34 @@ func TestRefreshPersistsDiscoveredPrimitivesAndCurrentUsage(t *testing.T) {
 	}
 }
 
+func TestRefreshCarriesFailuresAndUnknownOutcomesIntoUsage(t *testing.T) {
+	events := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	failed := record.OutcomeError
+	ok := record.OutcomeOK
+	records := []record.Record{
+		outcomeRecord("first", "flaky", &failed, time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)),
+		outcomeRecord("second", "flaky", &ok, time.Date(2026, time.August, 13, 12, 1, 0, 0, time.UTC)),
+		outcomeRecord("third", "flaky", nil, time.Date(2026, time.August, 13, 12, 2, 0, 0, time.UTC)),
+	}
+	if _, err := events.Append(records); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	statePath := filepath.Join(t.TempDir(), "primitives.json")
+	primitives := New(statePath)
+	available := []Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "flaky"}}
+	if err := primitives.Refresh(events, Discovery{Primitives: available, ProjectScanned: true}); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	items, err := primitives.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(items) != 1 || items[0].Invocations != 3 || items[0].Failures != 1 || items[0].Unknown != 1 {
+		t.Fatalf("usage = %+v, want 3 invocations, 1 failure, 1 unknown", items)
+	}
+}
+
 func TestRefreshDropsPrimitivesWithUnsafeNames(t *testing.T) {
 	events := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
 	statePath := filepath.Join(t.TempDir(), "primitives.json")
@@ -117,6 +145,19 @@ func TestRefreshCarriesForwardWhatAnUnscannedPassCouldNotSee(t *testing.T) {
 	}
 	if items[1].Name != "global-skill" {
 		t.Fatalf("inventory = %+v", items)
+	}
+}
+
+func TestReadRejectsInconsistentFailureCounts(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "primitives.json")
+	// 2 invocations cannot hold 1 unknown and 2 failures: only 1 invocation is
+	// left "known" to have failed.
+	content := `{"version":1,"refreshed_at":"2026-08-13T12:00:00Z","primitives":[{"harness":"claude-code","kind":"skill","name":"flaky","invocations":2,"failures":2,"unknown":1,"last_used":"2026-08-13T12:00:00Z"}]}`
+	if err := os.WriteFile(statePath, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if _, err := New(statePath).Read(); err == nil {
+		t.Fatal("Read() accepted a primitive with more failures than known invocations")
 	}
 }
 
@@ -261,4 +302,10 @@ func inventoryRecord(id, name string, timestamp time.Time) record.Record {
 		Name:          record.Identifier(name),
 		Invoker:       record.InvokerModel,
 	}
+}
+
+func outcomeRecord(id, name string, outcome *record.Outcome, timestamp time.Time) record.Record {
+	r := inventoryRecord(id, name, timestamp)
+	r.Outcome = outcome
+	return r
 }
