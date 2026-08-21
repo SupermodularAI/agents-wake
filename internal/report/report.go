@@ -64,22 +64,18 @@ func Render(writer io.Writer, summary metrics.Summary, available []inventory.Usa
 		_, err := fmt.Fprintln(writer, "No terminal events yet. Run `wake ingest` after using a consented harness.")
 		return err
 	}
-
-	// Invocation counts and outcomes describe activity, so they belong to the
-	// usage view. A bare `--unused` asks the opposite question — what was never
-	// invoked — and an invocation overview above that answer reads as a
-	// non sequitur; the count of unused primitives by kind is the overview that
-	// question actually wants.
-	options = normalized(options)
-	if options.Usage {
-		if err := overview(writer, summary, pretty); err != nil {
-			return err
-		}
-		if err := outcomes(writer, summary, pretty); err != nil {
-			return err
-		}
-	} else if err := unusedOverview(writer, available, pretty); err != nil {
+	if err := lastObserved(writer, summary); err != nil {
 		return err
+	}
+
+	// A bare `--unused` asks what was never invoked, not how much invocation
+	// happened — so it gets a count of unused primitives by kind instead of the
+	// usage view's tables.
+	options = normalized(options)
+	if !options.Usage {
+		if err := unusedOverview(writer, available, pretty); err != nil {
+			return err
+		}
 	}
 	if options.Usage {
 		if err := primitiveUsage(writer, available, pretty); err != nil {
@@ -95,25 +91,21 @@ func Render(writer io.Writer, summary metrics.Summary, available []inventory.Usa
 	return err
 }
 
-func overview(writer io.Writer, summary metrics.Summary, pretty bool) error {
-	if _, err := fmt.Fprintln(writer, "\n"+heading(pretty, "OVERVIEW")); err != nil {
-		return err
-	}
-	lastObserved := "not observed"
+// lastObserved is a one-line stand-in for what used to be a whole OVERVIEW
+// section (invocation counts, error rate, outcomes breakdown): those numbers
+// spanned every primitive combined, which never reconciled with any single
+// row of USED PRIMITIVES below them. The timestamp has no such mismatch — it
+// is worth keeping on its own.
+func lastObserved(writer io.Writer, summary metrics.Summary) error {
+	observed := "not observed"
 	if !summary.LastObserved.IsZero() {
-		lastObserved = summary.LastObserved.UTC().Format(time.RFC3339)
+		observed = summary.LastObserved.UTC().Format(time.RFC3339)
 	}
-	table := tabwriter.NewWriter(writer, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintf(table, "Terminal invocations\t%d\nDistinct sessions\t%d\nError rate\t%s\nLast observed\t%s\n", summary.Invocations, summary.Sessions, rate(summary.ErrorRate), lastObserved); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(table, "Health coverage\t%d known; %d unknown excluded\n", summary.ErrorRate.Denominator(), summary.ErrorRate.Excluded()); err != nil {
-		return err
-	}
-	return table.Flush()
+	_, err := fmt.Fprintf(writer, "Last observed: %s\n", observed)
+	return err
 }
 
-// unusedOverview stands in for overview+outcomes on a bare `--unused` report:
+// unusedOverview stands in for a bare `--unused` report's overview:
 // a count of unused primitives by kind, so the one figure the ask was for is
 // the first thing on screen rather than something to find inside the table
 // below. It prints nothing when every discovered primitive has activity —
@@ -151,29 +143,6 @@ func unusedOverview(writer io.Writer, available []inventory.Usage, pretty bool) 
 		return err
 	}
 	return table.Flush()
-}
-
-func outcomes(writer io.Writer, summary metrics.Summary, pretty bool) error {
-	if _, err := fmt.Fprintln(writer, "\n"+heading(pretty, "OUTCOMES")); err != nil {
-		return err
-	}
-	outcomeNames := make([]string, 0, len(summary.Outcomes))
-	for outcome := range summary.Outcomes {
-		outcomeNames = append(outcomeNames, string(outcome))
-	}
-	slices.Sort(outcomeNames)
-	if len(outcomeNames) == 0 && summary.ErrorRate.Excluded() == 0 {
-		_, err := fmt.Fprintln(writer, "No outcomes reported.")
-		return err
-	}
-	rows := newTable("OUTCOME", "COUNT")
-	for _, name := range outcomeNames {
-		rows.add(outcomePaint(pretty, name), fmt.Sprintf("%d", summary.Outcomes[record.Outcome(name)]))
-	}
-	if summary.ErrorRate.Excluded() > 0 {
-		rows.add(style.Paint(pretty, style.Dim, "unknown"), fmt.Sprintf("%d (excluded from health rates)", summary.ErrorRate.Excluded()))
-	}
-	return rows.write(writer, pretty)
 }
 
 func primitiveUsage(writer io.Writer, available []inventory.Usage, pretty bool) error {
@@ -236,13 +205,6 @@ func capitalize(s string) string {
 		return s
 	}
 	return strings.ToUpper(s[:1]) + s[1:]
-}
-
-func rate(ratio metrics.Ratio) string {
-	if percent, ok := ratio.Percent(); ok {
-		return fmt.Sprintf("%.1f%% (%d/%d known; %d unknown)", percent, ratio.Numerator(), ratio.Denominator(), ratio.Excluded())
-	}
-	return fmt.Sprintf("not available (0 known; %d unknown)", ratio.Excluded())
 }
 
 // errorCell is a single per-primitive table cell, not the OVERVIEW-wide rate:

@@ -11,7 +11,7 @@ import (
 	"github.com/SupermodularAI/agents-wake/internal/record"
 )
 
-func TestRenderShowsCurrentMetricsAndPrimitiveActivity(t *testing.T) {
+func TestRenderShowsPrimitiveActivityAndLastObserved(t *testing.T) {
 	ok := record.OutcomeOK
 	failed := record.OutcomeError
 	builtin := reportRecord("builtin", &ok)
@@ -30,16 +30,7 @@ func TestRenderShowsCurrentMetricsAndPrimitiveActivity(t *testing.T) {
 	text := output.String()
 	for _, want := range []string{
 		"WAKE REPORT",
-		// The builtin record (Bash, kind builtin_tool) never reaches OVERVIEW or
-		// OUTCOMES: only "review" and "failed" (skills) and "retry" (unknown
-		// outcome, also a skill) count, so invocations is 3, not 4, and the
-		// error rate's denominator is the 2 known skill calls, not 3.
-		"Terminal invocations  3",
-		"Error rate",
-		"50.0% (1/2 known; 1 unknown)",
-		"Health coverage",
-		"2 known; 1 unknown excluded",
-		"unknown  1 (excluded from health rates)",
+		"Last observed: 2026-08-13T12:00:00Z",
 		"review",
 		"USED PRIMITIVES",
 		"Only currently discovered, non-built-in primitives are listed.",
@@ -118,15 +109,13 @@ func TestRenderLabelsAbsentActivityWithoutAZeroTimestamp(t *testing.T) {
 	if err := Render(&output, metrics.Aggregate(nil), available, Options{Usage: true}); err != nil {
 		t.Fatalf("Render() error = %v", err)
 	}
-	if !strings.Contains(output.String(), "Last observed         not observed") || strings.Contains(output.String(), "0001-01-01") {
+	if !strings.Contains(output.String(), "Last observed: not observed") || strings.Contains(output.String(), "0001-01-01") {
 		t.Fatalf("zero-activity report = %s", output.String())
 	}
 }
 
-// A bare `--unused` asks what was never invoked, not how much invocation
-// happened — so its OVERVIEW answers that question directly (a count by
-// kind) instead of showing the invocation/outcome overview a usage view
-// needs.
+// A bare `--unused` asks what was never invoked, so it gets its own OVERVIEW —
+// a count of unused primitives by kind — rather than the usage view's tables.
 func TestRenderUnusedOnlyReplacesInvocationOverviewWithUnusedCountsByKind(t *testing.T) {
 	ok := record.OutcomeOK
 	summary := metrics.Aggregate([]record.Record{reportRecord("used", &ok)})
@@ -219,7 +208,7 @@ func TestRenderPrettyDrawsColorAndBoxedTablesOnlyWhenAsked(t *testing.T) {
 	}
 	// A pretty report is the same content as a plain one with styling stripped.
 	stripped := stripANSI(text)
-	for _, want := range []string{"WAKE REPORT", "OVERVIEW", "OUTCOMES", "USED PRIMITIVES", "review"} {
+	for _, want := range []string{"WAKE REPORT", "Last observed:", "USED PRIMITIVES", "review"} {
 		if !strings.Contains(stripped, want) {
 			t.Fatalf("pretty report lost content %q once styling is stripped:\n%s", want, stripped)
 		}

@@ -11,17 +11,6 @@ import (
 
 func heading(pretty bool, text string) string { return style.Heading(pretty, text) }
 
-// outcomePaint colors a reported outcome so a scan of the OUTCOMES table reads
-// at a glance: ok is the only outcome that is not, in some way, a thing to look
-// into (ADR-0005 — outcome is nullable and unknown is never success, so "ok" is
-// the sole good case this can highlight).
-func outcomePaint(pretty bool, name string) string {
-	if name == "ok" {
-		return style.Paint(pretty, style.Green, name)
-	}
-	return style.Paint(pretty, style.Red, name)
-}
-
 // table is a small buffered table: rows are collected before anything is
 // written because the boxed form needs every column's width up front, unlike
 // tabwriter's streaming alignment.
