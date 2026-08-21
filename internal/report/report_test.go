@@ -11,7 +11,7 @@ import (
 	"github.com/SupermodularAI/agents-wake/internal/record"
 )
 
-func TestRenderShowsCurrentMetricsAndPrimitiveActivity(t *testing.T) {
+func TestRenderShowsPrimitiveActivityAndLastObserved(t *testing.T) {
 	ok := record.OutcomeOK
 	failed := record.OutcomeError
 	builtin := reportRecord("builtin", &ok)
@@ -30,12 +30,7 @@ func TestRenderShowsCurrentMetricsAndPrimitiveActivity(t *testing.T) {
 	text := output.String()
 	for _, want := range []string{
 		"WAKE REPORT",
-		"Terminal invocations  4",
-		"Error rate",
-		"33.3% (1/3 known; 1 unknown)",
-		"Health coverage",
-		"3 known; 1 unknown excluded",
-		"unknown  1 (excluded from health rates)",
+		"Last observed: 2026-08-13T12:00:00Z",
 		"review",
 		"USED PRIMITIVES",
 		"Only currently discovered, non-built-in primitives are listed.",
@@ -51,6 +46,27 @@ func TestRenderShowsCurrentMetricsAndPrimitiveActivity(t *testing.T) {
 	// (--unused), not a second table every plain `wake report` scrolls past.
 	if strings.Contains(text, "UNUSED PRIMITIVES") || strings.Contains(text, "unused-skill") {
 		t.Fatalf("wake report with no flags showed unused primitives:\n%s", text)
+	}
+}
+
+func TestRenderShowsPerPrimitiveErrorsAsCountAndPercentage(t *testing.T) {
+	summary := metrics.Aggregate(nil)
+	available := []inventory.Usage{
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "flaky", Invocations: 4, Failures: 1, Unknown: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "solid", Invocations: 2, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)},
+	}
+
+	var output bytes.Buffer
+	if err := Render(&output, summary, available, Options{}); err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	text := output.String()
+	// flaky: 1 failure out of 3 known (4 invocations, 1 excluded as unknown).
+	if !strings.Contains(text, "flaky") || !strings.Contains(text, "33.3%") {
+		t.Fatalf("report missing flaky primitive's error rate:\n%s", text)
+	}
+	if line := lineStartingWith(text, "solid"); !strings.Contains(line, "0") || strings.Contains(line, "%") {
+		t.Fatalf("failure-free primitive should report a bare 0, got %q:\n%s", line, text)
 	}
 }
 
@@ -93,15 +109,13 @@ func TestRenderLabelsAbsentActivityWithoutAZeroTimestamp(t *testing.T) {
 	if err := Render(&output, metrics.Aggregate(nil), available, Options{Usage: true}); err != nil {
 		t.Fatalf("Render() error = %v", err)
 	}
-	if !strings.Contains(output.String(), "Last observed         not observed") || strings.Contains(output.String(), "0001-01-01") {
+	if !strings.Contains(output.String(), "Last observed: not observed") || strings.Contains(output.String(), "0001-01-01") {
 		t.Fatalf("zero-activity report = %s", output.String())
 	}
 }
 
-// A bare `--unused` asks what was never invoked, not how much invocation
-// happened — so its OVERVIEW answers that question directly (a count by
-// kind) instead of showing the invocation/outcome overview a usage view
-// needs.
+// A bare `--unused` asks what was never invoked, so it gets its own OVERVIEW —
+// a count of unused primitives by kind — rather than the usage view's tables.
 func TestRenderUnusedOnlyReplacesInvocationOverviewWithUnusedCountsByKind(t *testing.T) {
 	ok := record.OutcomeOK
 	summary := metrics.Aggregate([]record.Record{reportRecord("used", &ok)})
@@ -194,7 +208,7 @@ func TestRenderPrettyDrawsColorAndBoxedTablesOnlyWhenAsked(t *testing.T) {
 	}
 	// A pretty report is the same content as a plain one with styling stripped.
 	stripped := stripANSI(text)
-	for _, want := range []string{"WAKE REPORT", "OVERVIEW", "OUTCOMES", "USED PRIMITIVES", "review"} {
+	for _, want := range []string{"WAKE REPORT", "Last observed:", "USED PRIMITIVES", "review"} {
 		if !strings.Contains(stripped, want) {
 			t.Fatalf("pretty report lost content %q once styling is stripped:\n%s", want, stripped)
 		}

@@ -58,7 +58,7 @@ func TestReportCommandPrintsStoredActivity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wake report error = %v: %s", err, out)
 	}
-	for _, want := range []string{"WAKE REPORT", "Terminal invocations  1", "USED PRIMITIVES", "report"} {
+	for _, want := range []string{"WAKE REPORT", "Last observed: 2026-08-13T12:00:00Z", "USED PRIMITIVES", "report"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("wake report missing %q:\n%s", want, out)
 		}
@@ -118,7 +118,7 @@ func TestReportOutsideAConsentedRepositoryLeavesConsentedUsageIntact(t *testing.
 	if err != nil {
 		t.Fatalf("wake report error = %v: %s", err, out)
 	}
-	if !strings.Contains(out, "Terminal invocations  1") {
+	if !strings.Contains(out, "Last observed: 2026-08-13T12:00:00Z") {
 		t.Fatalf("wake report withheld event-derived counters:\n%s", out)
 	}
 }

@@ -24,11 +24,19 @@ const (
 
 // Usage is a locally available primitive and its activity derived from the
 // event spool. Its fields are identifiers, enums, timestamps, and counters only.
+//
+// Failures and Unknown are raw counts, not a Ratio: metrics.Ratio's fields are
+// private so it cannot round-trip through JSON, and a renderer that wants a
+// rate can rebuild one with metrics.NewRatio(Failures, Invocations-Unknown,
+// Unknown, Invocations) — every terminal invocation is either known or
+// unknown, so those four counts are always consistent.
 type Usage struct {
 	Harness     record.Identifier `json:"harness"`
 	Kind        record.Kind       `json:"kind"`
 	Name        record.Identifier `json:"name"`
 	Invocations uint64            `json:"invocations"`
+	Failures    uint64            `json:"failures,omitempty"`
+	Unknown     uint64            `json:"unknown,omitempty"`
 	LastUsed    time.Time         `json:"last_used,omitempty"`
 }
 
@@ -141,6 +149,8 @@ func derive(summary metrics.Summary, available []Primitive) []Usage {
 		usage := observed[key]
 		usage.Harness, usage.Kind, usage.Name = primitive.Harness, primitive.Kind, primitive.Name
 		usage.Invocations += primitive.Invocations
+		usage.Failures += primitive.ErrorRate.Numerator()
+		usage.Unknown += primitive.ErrorRate.Excluded()
 		if primitive.LastUsed.After(usage.LastUsed) {
 			usage.LastUsed = primitive.LastUsed
 		}
@@ -199,6 +209,9 @@ func (u Usage) valid() bool {
 		return false
 	}
 	if !validKind(u.Kind) {
+		return false
+	}
+	if u.Unknown > u.Invocations || u.Failures > u.Invocations-u.Unknown {
 		return false
 	}
 	return (u.Invocations == 0 && u.LastUsed.IsZero()) || (u.Invocations > 0 && !u.LastUsed.IsZero())

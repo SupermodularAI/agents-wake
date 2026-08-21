@@ -70,6 +70,25 @@ func TestHandlerExcludesBuiltinToolsFromPrimitiveTable(t *testing.T) {
 	}
 }
 
+func TestHandlerShowsPerPrimitiveErrorCount(t *testing.T) {
+	source := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	ok := record.OutcomeOK
+	failed := record.OutcomeError
+	if _, err := source.Append([]record.Record{event("one", &ok), event("two", &failed), event("three", &failed)}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	primitives := inventory.New(filepath.Join(t.TempDir(), "primitives.json"))
+	if err := primitives.Refresh(source, inventory.Discovery{Primitives: []inventory.Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "review"}}, ProjectScanned: true}); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	response := httptest.NewRecorder()
+	Handler(source, primitives).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := response.Body.String()
+	if !strings.Contains(body, "Errors") || !strings.Contains(body, "2 (66.7%)") {
+		t.Fatalf("dashboard did not show review's per-primitive error count: %s", body)
+	}
+}
+
 func TestHandlerShowsAvailablePrimitivesWithoutUsage(t *testing.T) {
 	response := httptest.NewRecorder()
 	available := []inventory.Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "available-skill"}}

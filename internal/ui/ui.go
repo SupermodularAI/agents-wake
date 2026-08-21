@@ -108,7 +108,7 @@ type dashboardView struct {
 	Unused       []primitiveView
 }
 
-type primitiveView struct{ Name, Kind, Harness, LastUsed, Invocations string }
+type primitiveView struct{ Name, Kind, Harness, LastUsed, Invocations, Errors string }
 
 func view(summary metrics.Summary, available []inventory.Usage) dashboardView {
 	result := dashboardView{Empty: summary.Invocations == 0 && len(available) == 0, Invocations: number(summary.Invocations), Sessions: number(summary.Sessions), ErrorRate: rate(summary.ErrorRate), ErrorDetail: ratioDetail(summary.ErrorRate)}
@@ -126,6 +126,7 @@ func view(summary metrics.Summary, available []inventory.Usage) dashboardView {
 			continue
 		}
 		view.LastUsed = primitive.LastUsed.Local().Format("Jan 02 15:04")
+		view.Errors = errorCell(primitive)
 		result.Usage = append(result.Usage, view)
 	}
 	return result
@@ -140,4 +141,17 @@ func rate(ratio metrics.Ratio) string {
 }
 func ratioDetail(ratio metrics.Ratio) string {
 	return number(ratio.Numerator()) + " / " + number(ratio.Denominator()) + " known; " + number(ratio.Excluded()) + " excluded"
+}
+
+// errorCell mirrors internal/report's cell of the same name: a count first,
+// then the percentage in parentheses once there is a failure to rate.
+func errorCell(usage inventory.Usage) string {
+	if usage.Failures == 0 {
+		return "0"
+	}
+	ratio := metrics.NewRatio(usage.Failures, usage.Invocations-usage.Unknown, usage.Unknown, usage.Invocations)
+	if percent, ok := ratio.Percent(); ok {
+		return fmt.Sprintf("%d (%.1f%%)", usage.Failures, percent)
+	}
+	return number(usage.Failures)
 }
