@@ -54,17 +54,20 @@ func spoolLines(t *testing.T, path string) int {
 }
 
 // reportedCalls returns the CALLS column of the USED PRIMITIVES row naming name — the
-// number a person reads out of `wake report`. The second-to-last field of the row
-// (ERRORS is last) rather than a substring search, because the row also carries a
-// timestamp full of digits.
+// number a person reads out of `wake report`. Anchored from the front, at the field past
+// PRIMITIVE, TYPE, HARNESS and LAST USED, rather than a substring search or a from-the-end
+// offset: those four columns are each a single token by construction, but ERRORS (last)
+// renders as two tokens ("1 (33.3%)") whenever a primitive has failures, which would shift
+// a from-the-end offset onto the failure count instead of CALLS.
 func reportedCalls(t *testing.T, rendered, name string) string {
 	t.Helper()
+	const callsIndex = 4 // PRIMITIVE, TYPE, HARNESS, LAST USED, then CALLS
 	for line := range strings.Lines(rendered) {
 		fields := strings.Fields(line)
-		if len(fields) < 3 || fields[0] != name {
+		if len(fields) <= callsIndex || fields[0] != name {
 			continue
 		}
-		return fields[len(fields)-2]
+		return fields[callsIndex]
 	}
 	t.Fatalf("report names no primitive %q:\n%s", name, rendered)
 	return ""
