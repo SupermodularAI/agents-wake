@@ -28,7 +28,7 @@ LDFLAGS := -s -w \
 	-X $(PKG)/internal/version.Date=$(DATE)
 
 .DEFAULT_GOAL := help
-.PHONY: help build install run test test-race vet lint fmt fmt-check validate tidy tools-update clean
+.PHONY: help build install run test test-race vet lint fmt fmt-check validate validate-remote tidy tools-update clean
 
 help: ## Show this help
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -74,9 +74,25 @@ fmt: ## Format the tree in place
 fmt-check: ## Fail if anything is unformatted
 	$(LINT) fmt --diff
 
+# The //go:build remote surface, which every target above is blind to: `go
+# build`, `go vet`, golangci-lint and `go test` all honour build constraints, so
+# without this target the remote delivery path is compiled by nothing and its
+# tests are executed by nothing. `remote` is the only build tag in the tree
+# (ADR-0012), so one extra run covers all of it.
+#
+# A second lint run rather than run.build-tags in .golangci.yml, because
+# internal/config/registry_default_test.go is //go:build !remote — setting the
+# tag globally would stop the default-build-only assertions from being linted at
+# all.
+validate-remote: ## Verify gate for the //go:build remote build
+	$(GO) build -tags remote ./...
+	$(GO) vet -tags remote ./...
+	$(LINT) run --build-tags remote
+	$(GO) test -tags remote ./...
+
 # The verify gate. AGENTS.md points at this target, and CI runs the same steps —
 # one door in, so a green local run means a green CI run.
-validate: fmt-check vet lint test ## The verify gate; must pass before a PR
+validate: fmt-check vet lint test validate-remote ## The verify gate; must pass before a PR
 
 tidy: ## Tidy the main module
 	$(GO) mod tidy

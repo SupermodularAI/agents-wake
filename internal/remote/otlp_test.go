@@ -8,7 +8,6 @@ import (
 	"flag"
 	"go/parser"
 	"go/token"
-	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -22,18 +21,63 @@ import (
 	"github.com/SupermodularAI/agents-wake/internal/version"
 )
 
-// frozenEncoderImports is the union of every non-test file's imports in this
-// package, declared here and nowhere else. Asserting the package against a list
-// it exports itself would be vacuous, so the literal lives in the test
-// (ADR-0012: the wire is governed by the same allowlist discipline as the disk).
-var frozenEncoderImports = []string{
-	"encoding/json",
-	"errors",
-	"github.com/SupermodularAI/agents-wake/internal/record",
-	"github.com/SupermodularAI/agents-wake/internal/version",
-	"math",
-	"strconv",
+// frozenPackageImports is every non-test file in this package and the exact
+// import set that file may have, declared here and nowhere else. Asserting the
+// package against a list it exports itself would be vacuous, so the literal
+// lives in the test (ADR-0012: the wire is governed by the same allowlist
+// discipline as the disk).
+//
+// Per file rather than per package, since DG-65 added the delivery loop beside
+// the encoder. That is stricter, not looser: previously one union covered every
+// file, so any file could hold any allowlisted import; now each file's set is
+// exact, and a file absent from this map fails outright. What the split makes
+// possible is the honest statement that deliver.go performs I/O and otlp.go
+// still does not — see encoderFiles.
+var frozenPackageImports = map[string][]string{
+	"otlp.go": {
+		"encoding/json",
+		"errors",
+		"github.com/SupermodularAI/agents-wake/internal/record",
+		"github.com/SupermodularAI/agents-wake/internal/version",
+		"math",
+		"strconv",
+	},
+	"deliver.go": {
+		"bytes",
+		"compress/gzip",
+		"encoding/base64",
+		"errors",
+		"fmt",
+		"github.com/SupermodularAI/agents-wake/internal/config",
+		"github.com/SupermodularAI/agents-wake/internal/lockfile",
+		"github.com/SupermodularAI/agents-wake/internal/record",
+		"github.com/SupermodularAI/agents-wake/internal/store",
+		"io",
+		"net/http",
+		"path/filepath",
+		"time",
+	},
+	"state.go": {
+		"github.com/SupermodularAI/agents-wake/internal/config",
+		"github.com/SupermodularAI/agents-wake/internal/store",
+		"time",
+	},
+	"watermark.go": {
+		"encoding/json",
+		"github.com/SupermodularAI/agents-wake/internal/atomicfile",
+		"github.com/SupermodularAI/agents-wake/internal/config",
+		"io/fs",
+		"os",
+		"path/filepath",
+		"time",
+	},
 }
+
+// encoderFiles names the files the package doc's no-I/O claim is made about.
+// Delivery is I/O by definition — a socket and a state file are the whole point
+// of it — so the delivery files are excluded here and only here. The encoder's
+// purity is what the forbidden set below protects, and it is unchanged.
+var encoderFiles = []string{"otlp.go"}
 
 // forbiddenEncoderImports names the capabilities the encoder must not have. The
 // set-equality assertion above already excludes them; naming them again makes a
@@ -190,27 +234,26 @@ func TestFixturesAreValidRecords(t *testing.T) {
 	}
 }
 
-// TestEncoderImportsAreFrozen asserts the purity claim in the package doc, which
-// is made about the PACKAGE and so must be checked across the package.
+// TestPackageImportsAreFrozen asserts the capability claim in the package doc,
+// which is made about the PACKAGE and so must be checked across the package.
 //
-// It scans every non-test .go file in this directory rather than otlp.go by
-// name. Today that is one file, but the transport lands behind this same remote
-// build tag; if it arrives here as client.go, net/http enters the package while
-// a by-name assertion stays green and the doc's "no network" becomes false
-// silently. Build constraints are deliberately not honoured — go/parser ignores
-// them — because a file excluded from this build is still a file in this
-// package for some other build.
+// It scans every non-test .go file in this directory rather than naming files.
+// The transport landed behind this same remote build tag, and a by-name
+// assertion would have stayed green while net/http entered the package: a file
+// this map does not declare is a failure, so a new file cannot arrive with
+// capabilities nobody reviewed. Build constraints are deliberately not honoured
+// — go/parser ignores them — because a file excluded from this build is still a
+// file in this package for some other build.
 //
 // Reading the package's own source is test scaffolding, not encoder I/O: the
-// assertion is that the non-test files perform none.
-func TestEncoderImportsAreFrozen(t *testing.T) {
+// assertion is about what the non-test files themselves import.
+func TestPackageImportsAreFrozen(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatalf("reading package directory: %v", err)
 	}
 
 	fileSet := token.NewFileSet()
-	seen := make(map[string]struct{})
 	scanned := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		name := entry.Name()
@@ -223,12 +266,34 @@ func TestEncoderImportsAreFrozen(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parsing %s: %v", name, err)
 		}
+		imports := make([]string, 0, len(parsed.Imports))
 		for _, spec := range parsed.Imports {
 			path, err := strconv.Unquote(spec.Path.Value)
 			if err != nil {
 				t.Fatalf("unquoting import path %s in %s: %v", spec.Path.Value, name, err)
 			}
-			seen[path] = struct{}{}
+			imports = append(imports, path)
+		}
+		slices.Sort(imports)
+
+		frozen, declared := frozenPackageImports[name]
+		if !declared {
+			// The tripwire. A new file in this package is a new set of
+			// capabilities on the wire path, and it has to be declared here
+			// before it can be compiled past this test.
+			t.Errorf("%s has no entry in frozenPackageImports: declare its exact import set", name)
+			continue
+		}
+		if !slices.Equal(imports, frozen) {
+			t.Errorf("imports of %s = %v, frozen allowlist = %v", name, imports, frozen)
+		}
+		if !slices.Contains(encoderFiles, name) {
+			continue
+		}
+		for _, forbidden := range forbiddenEncoderImports {
+			if slices.Contains(imports, forbidden) {
+				t.Errorf("%s imports %q: the encoder must perform no I/O", name, forbidden)
+			}
 		}
 	}
 	if len(scanned) == 0 {
@@ -237,13 +302,17 @@ func TestEncoderImportsAreFrozen(t *testing.T) {
 		t.Fatal("found no non-test .go files to scan: the import assertion would be vacuous")
 	}
 
-	imports := slices.Sorted(maps.Keys(seen))
-	if !slices.Equal(imports, frozenEncoderImports) {
-		t.Fatalf("imports of %v = %v, frozen allowlist = %v", scanned, imports, frozenEncoderImports)
+	// The twin guard: a stale entry would leave a deleted file's allowlist
+	// lingering, and an encoderFiles entry naming nothing would make the no-I/O
+	// half of this test vacuous rather than false.
+	for name := range frozenPackageImports {
+		if !slices.Contains(scanned, name) {
+			t.Errorf("frozenPackageImports declares %s, which this package does not contain", name)
+		}
 	}
-	for _, forbidden := range forbiddenEncoderImports {
-		if slices.Contains(imports, forbidden) {
-			t.Fatalf("package %v imports %q: this package must perform no I/O", scanned, forbidden)
+	for _, name := range encoderFiles {
+		if !slices.Contains(scanned, name) {
+			t.Errorf("encoderFiles names %s, which this package does not contain", name)
 		}
 	}
 }

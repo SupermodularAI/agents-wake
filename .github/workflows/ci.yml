@@ -73,6 +73,16 @@ jobs:
         if: matrix.go == 'stable'
         run: make test-race
 
+      # The remote build tag compiles a surface the steps above cannot see:
+      # `go vet`, `go test` and golangci-lint all honour build constraints, so
+      # without this the delivery path is built and tested by nothing (ADR-0012).
+      # In the test job rather than lint because it needs the Go matrix's
+      # toolchain, and gated to stable for the reason test-race is — the floor is
+      # what the matrix proves.
+      - name: remote build tag
+        if: matrix.go == 'stable'
+        run: make validate-remote
+
   build:
     name: build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest

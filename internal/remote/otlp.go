@@ -1,6 +1,7 @@
 //go:build remote
 
-// Package remote projects stored records onto the OTLP/HTTP JSON wire format.
+// Package remote projects stored records onto the OTLP/HTTP JSON wire format
+// and delivers them.
 //
 // The payload is a projection computed at flush time, never the spool's bytes.
 // ADR-0017 once required the wire to be byte-identical to the spool; ADR-0027
@@ -10,10 +11,17 @@
 // asserted by test, so the privacy allowlist governs the wire exactly as it
 // governs the disk (ADR-0007, ADR-0012, plan §9).
 //
-// This package is pure. It performs no I/O — no network, no filesystem, no
-// clock — and makes no model call (ADR-0008). Encode takes records and returns
-// bytes; sending them is a caller's concern. A test asserts the import set to
-// keep it that way.
+// The encoder is pure. This file and its helpers perform no I/O — no network,
+// no filesystem, no clock — and make no model call (ADR-0008). Encode takes
+// records and returns bytes.
+//
+// Sending them is deliver.go's business, and watermark.go and state.go are the
+// state it keeps: those three are this package's I/O surface, under this same
+// build tag, and they are the only outbound connection in the whole binary
+// (ADR-0012, ADR-0026). The import assertion in the test is therefore per file
+// rather than per package — each file declares its exact import set, and the
+// no-I/O forbidden set is asserted against the encoder's files, which is what
+// the purity claim above is actually about.
 package remote
 
 import (
