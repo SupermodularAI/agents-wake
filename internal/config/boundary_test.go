@@ -39,14 +39,24 @@ func moduleRoot(t *testing.T) string {
 	}
 }
 
+// confinedFileNames is every filename only this package may spell. The remote
+// credential store is a literal rather than remoteAuthFileName because that
+// constant lives in a //go:build remote file and this test is untagged; the
+// tagged TestRemoteAuthFileNameIsConfined asserts the two spellings agree, so
+// they cannot drift (ADR-0028).
+var confinedFileNames = []string{projectsFileName, saltFileName, "remote-auth.json"}
+
 // Acceptance item 12, mechanically. The privacy guarantee — the repository label
 // and path never leave the local store, only the hashed id — is checkable by
 // reading one directory precisely because no other package can name either file.
 // A hand review of call sites would hold until the next ticket; this holds after
 // it.
-func TestProjectsJsonAndSaltAreNamedOnlyInThisPackage(t *testing.T) {
+//
+// ADR-0028 extends the same guarantee to the remote credential store, because a
+// new secret this test cannot see is a secret whose confinement nothing
+// verifies.
+func TestSecretFilenamesAreNamedOnlyInThisPackage(t *testing.T) {
 	root := moduleRoot(t)
-	confined := []string{projectsFileName, saltFileName}
 	scanned := 0
 
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -78,7 +88,7 @@ func TestProjectsJsonAndSaltAreNamedOnlyInThisPackage(t *testing.T) {
 		if readErr != nil {
 			return readErr
 		}
-		for _, name := range confined {
+		for _, name := range confinedFileNames {
 			if strings.Contains(string(raw), name) {
 				t.Errorf("%s names %q; both files are read and written only inside %s", relative, name, packageDir)
 			}
