@@ -8,6 +8,7 @@ import (
 	"flag"
 	"go/parser"
 	"go/token"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -21,10 +22,10 @@ import (
 	"github.com/SupermodularAI/agents-wake/internal/version"
 )
 
-// frozenEncoderImports is the encoder's entire import set, declared here and
-// nowhere else. Asserting the encoder against a list it exports itself would be
-// vacuous, so the literal lives in the test (ADR-0012: the wire is governed by
-// the same allowlist discipline as the disk).
+// frozenEncoderImports is the union of every non-test file's imports in this
+// package, declared here and nowhere else. Asserting the package against a list
+// it exports itself would be vacuous, so the literal lives in the test
+// (ADR-0012: the wire is governed by the same allowlist discipline as the disk).
 var frozenEncoderImports = []string{
 	"encoding/json",
 	"errors",
@@ -189,31 +190,60 @@ func TestFixturesAreValidRecords(t *testing.T) {
 	}
 }
 
+// TestEncoderImportsAreFrozen asserts the purity claim in the package doc, which
+// is made about the PACKAGE and so must be checked across the package.
+//
+// It scans every non-test .go file in this directory rather than otlp.go by
+// name. Today that is one file, but the transport lands behind this same remote
+// build tag; if it arrives here as client.go, net/http enters the package while
+// a by-name assertion stays green and the doc's "no network" becomes false
+// silently. Build constraints are deliberately not honoured — go/parser ignores
+// them — because a file excluded from this build is still a file in this
+// package for some other build.
+//
+// Reading the package's own source is test scaffolding, not encoder I/O: the
+// assertion is that the non-test files perform none.
 func TestEncoderImportsAreFrozen(t *testing.T) {
-	// Reading the encoder's own source is test scaffolding, not encoder I/O:
-	// the assertion is that otlp.go itself performs none.
-	fileSet := token.NewFileSet()
-	parsed, err := parser.ParseFile(fileSet, "otlp.go", nil, parser.ImportsOnly)
+	entries, err := os.ReadDir(".")
 	if err != nil {
-		t.Fatalf("parsing otlp.go: %v", err)
+		t.Fatalf("reading package directory: %v", err)
 	}
 
-	imports := make([]string, 0, len(parsed.Imports))
-	for _, spec := range parsed.Imports {
-		path, err := strconv.Unquote(spec.Path.Value)
-		if err != nil {
-			t.Fatalf("unquoting import path %s: %v", spec.Path.Value, err)
+	fileSet := token.NewFileSet()
+	seen := make(map[string]struct{})
+	scanned := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || filepath.Ext(name) != ".go" || strings.HasSuffix(name, "_test.go") {
+			continue
 		}
-		imports = append(imports, path)
-	}
-	slices.Sort(imports)
+		scanned = append(scanned, name)
 
+		parsed, err := parser.ParseFile(fileSet, name, nil, parser.ImportsOnly)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", name, err)
+		}
+		for _, spec := range parsed.Imports {
+			path, err := strconv.Unquote(spec.Path.Value)
+			if err != nil {
+				t.Fatalf("unquoting import path %s in %s: %v", spec.Path.Value, name, err)
+			}
+			seen[path] = struct{}{}
+		}
+	}
+	if len(scanned) == 0 {
+		// Without this the whole assertion passes vacuously against an empty
+		// set if the scan ever stops finding files.
+		t.Fatal("found no non-test .go files to scan: the import assertion would be vacuous")
+	}
+
+	imports := slices.Sorted(maps.Keys(seen))
 	if !slices.Equal(imports, frozenEncoderImports) {
-		t.Fatalf("encoder imports = %v, frozen allowlist = %v", imports, frozenEncoderImports)
+		t.Fatalf("imports of %v = %v, frozen allowlist = %v", scanned, imports, frozenEncoderImports)
 	}
 	for _, forbidden := range forbiddenEncoderImports {
 		if slices.Contains(imports, forbidden) {
-			t.Fatalf("encoder imports %q: the encoder must perform no I/O", forbidden)
+			t.Fatalf("package %v imports %q: this package must perform no I/O", scanned, forbidden)
 		}
 	}
 }
