@@ -308,7 +308,7 @@ func TestSetNeverEchoesTheCredential(t *testing.T) {
 			t.Errorf("remote set echoed %q:\nstdout: %s\nstderr: %s", secret, stdout, stderr)
 		}
 	}
-	if !strings.Contains(stdout, "remote endpoint set to") {
+	if !strings.Contains(stdout, "remote endpoint configured") {
 		t.Errorf("remote set did not confirm what it did:\n%s", stdout)
 	}
 }
@@ -603,8 +603,11 @@ func TestSetWithoutACredentialConfiguresTheEndpointOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("remote set error = %v", err)
 	}
-	if !strings.Contains(stdout, "remote endpoint set to api.example.com") {
-		t.Errorf("remote set did not confirm the destination:\n%s", stdout)
+	if !strings.Contains(stdout, "remote endpoint configured") {
+		t.Errorf("remote set did not confirm what it did:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "api.example.com") {
+		t.Errorf("remote set named the endpoint host, which ADR-0029 carves out for `remote status` only:\n%s", stdout)
 	}
 	if !strings.Contains(stderr, "no credential is configured") {
 		t.Errorf("stderr does not say the endpoint has no credential:\n%s", stderr)
@@ -800,5 +803,62 @@ func TestFlushSaysNothingWasSentWhenDeliveryIsOff(t *testing.T) {
 	}
 	if stdout != "remote delivery is off; nothing was sent.\n" {
 		t.Errorf("stdout = %q, want the off message", stdout)
+	}
+}
+
+// DG-72, Issue 1. A flush the minimum interval held back never read the spool,
+// so "sent 0 records in 0 batches." reports a run that did not happen — the same
+// sentence a flush that ran and found nothing prints. The two must read
+// differently, and the throttled one names the key that changes it.
+func TestFlushSaysTheMinimumIntervalHeldItBack(t *testing.T) {
+	paths := isolateRemote(t)
+	receiver, endpoint := serveRemote(t)
+	configureRemote(t, endpoint)
+	if _, err := config.Set(paths, "remote.min_interval", "15m"); err != nil {
+		t.Fatalf("Set(remote.min_interval) error = %v", err)
+	}
+	seedSpool(t, paths, 0, 3)
+
+	if _, _, err := runRemote(t, "", "remote", "flush"); err != nil {
+		t.Fatalf("first remote flush error = %v", err)
+	}
+
+	seedSpool(t, paths, 3, 3)
+	stdout, stderr, err := runRemote(t, "", "remote", "flush")
+	if err != nil {
+		t.Fatalf("second remote flush error = %v", err)
+	}
+	if stdout != "a flush ran less than remote.min_interval ago; nothing was sent.\n" {
+		t.Errorf("stdout = %q, want the throttled message", stdout)
+	}
+	if strings.Contains(stdout+stderr, endpoint) {
+		t.Errorf("the throttled message echoed the endpoint:\nstdout: %s\nstderr: %s", stdout, stderr)
+	}
+	if got := receiver.count(); got != 1 {
+		t.Errorf("requests = %d, want 1 — the second flush must post nothing", got)
+	}
+}
+
+// DG-72, Issue 2. ADR-0029's carve-out is exactly one command — a bare host, on
+// stdout, from `remote status`, typed by the person who configured it. `set`
+// confirms what it did and points at that command instead of answering with the
+// destination, so the carve-out cannot widen by accident.
+func TestSetDoesNotEchoTheEndpoint(t *testing.T) {
+	isolateRemote(t)
+
+	stdout, stderr, err := runRemote(t, remoteTestSecret, "remote", "set", "https://user:pw@api.example.com:4318/v1/traces")
+	if err != nil {
+		t.Fatalf("remote set error = %v", err)
+	}
+	for _, forbidden := range []string{"api.example.com", "4318", "user", "pw", "v1"} {
+		if strings.Contains(stdout+stderr, forbidden) {
+			t.Errorf("remote set echoed %q from the endpoint:\nstdout: %s\nstderr: %s", forbidden, stdout, stderr)
+		}
+	}
+	if !strings.Contains(stdout, "remote endpoint configured") {
+		t.Errorf("remote set did not confirm what it did:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "wake remote status") {
+		t.Errorf("remote set does not point at the one command that shows the endpoint:\n%s", stdout)
 	}
 }

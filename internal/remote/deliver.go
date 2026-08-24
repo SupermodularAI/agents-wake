@@ -91,9 +91,9 @@ var (
 // "reports what it sent" is data internal/cli cannot invent and must not derive
 // by differencing Describe across the call (ADR-0001).
 //
-// Every field is a count. There is no free-text field and no field that could
-// hold one, for the reason Status has none; TestReportFieldsAreExactly asserts
-// the field list and the types.
+// Every field is a count or a bool, and no field can hold text — there is no
+// free-text field and no field that could hold one, for the reason Status has
+// none; TestReportFieldsAreExactly asserts the field list and the types.
 type Report struct {
 	// Batches is how many batches the receiver accepted.
 	Batches int
@@ -103,6 +103,18 @@ type Report struct {
 	// Reported rather than discarded so a deliberate flush can say it was partly
 	// blind (plan §12).
 	Dropped int
+	// Suppressed is true when remote.min_interval held this run back before it
+	// read the spool, and false in every other case — including a run that read
+	// the spool and found nothing to send. The counts cannot tell those two
+	// apart: both are three zeroes and a nil error, and `remote flush` must not
+	// print the same sentence for a flush that ran and one that never did.
+	//
+	// A bool, and derived from the throttle rather than from anything read out
+	// of the credential store, so it names which local gate held the run and
+	// never where the run would have gone (ADR-0028). Nothing else sets it: a
+	// run that found the single-flight lock held stays the zero report, where
+	// "this run sent nothing" is still the honest answer.
+	Suppressed bool
 }
 
 // deliveryClient is the only outbound HTTP client in the binary, and it is a
@@ -184,7 +196,11 @@ func flushLocked(p config.Paths, auth config.RemoteAuth, minInterval time.Durati
 	startedAt := time.Now().UTC()
 
 	if suppressed(state.LastFlush, startedAt, minInterval) {
-		return Report{}, nil
+		// Reported on the Report rather than returned as an error: the
+		// hook-invoked path calls Flush and discards what it gets, and a
+		// throttled run there is a correct outcome rather than a failure
+		// (ADR-0016, ADR-0018). The counts stay zero because nothing was read.
+		return Report{Suppressed: true}, nil
 	}
 
 	events := store.New(eventsPath(p))
