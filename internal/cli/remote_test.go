@@ -802,3 +802,36 @@ func TestFlushSaysNothingWasSentWhenDeliveryIsOff(t *testing.T) {
 		t.Errorf("stdout = %q, want the off message", stdout)
 	}
 }
+
+// DG-72, Issue 1. A flush the minimum interval held back never read the spool,
+// so "sent 0 records in 0 batches." reports a run that did not happen — the same
+// sentence a flush that ran and found nothing prints. The two must read
+// differently, and the throttled one names the key that changes it.
+func TestFlushSaysTheMinimumIntervalHeldItBack(t *testing.T) {
+	paths := isolateRemote(t)
+	receiver, endpoint := serveRemote(t)
+	configureRemote(t, endpoint)
+	if _, err := config.Set(paths, "remote.min_interval", "15m"); err != nil {
+		t.Fatalf("Set(remote.min_interval) error = %v", err)
+	}
+	seedSpool(t, paths, 0, 3)
+
+	if _, _, err := runRemote(t, "", "remote", "flush"); err != nil {
+		t.Fatalf("first remote flush error = %v", err)
+	}
+
+	seedSpool(t, paths, 3, 3)
+	stdout, stderr, err := runRemote(t, "", "remote", "flush")
+	if err != nil {
+		t.Fatalf("second remote flush error = %v", err)
+	}
+	if stdout != "a flush ran less than remote.min_interval ago; nothing was sent.\n" {
+		t.Errorf("stdout = %q, want the throttled message", stdout)
+	}
+	if strings.Contains(stdout+stderr, endpoint) {
+		t.Errorf("the throttled message echoed the endpoint:\nstdout: %s\nstderr: %s", stdout, stderr)
+	}
+	if got := receiver.count(); got != 1 {
+		t.Errorf("requests = %d, want 1 — the second flush must post nothing", got)
+	}
+}

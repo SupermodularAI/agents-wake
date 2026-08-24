@@ -358,7 +358,19 @@ func newRemoteFlushCmd() *cobra.Command {
 // reads as a second, contradictory answer. A run that failed after sending
 // something prints both, because that is the case where what was sent is not
 // obvious from anywhere else.
+//
+// A run the minimum interval held back prints neither: it never read the spool,
+// so it has no counts to report and the throttle is the whole of what happened.
 func writeFlushReport(cmd *cobra.Command, report remote.Report, failed bool) error {
+	if report.Suppressed {
+		// Printed instead of the counts rather than beside them: "sent 0 records
+		// in 0 batches." describes a run that read the spool, and this run never
+		// did. The minimum interval is named because it is configuration the
+		// reader can change, and it is the only thing said — nothing here
+		// reports the far end's state (ADR-0018, ADR-0028).
+		_, err := fmt.Fprintln(cmd.OutOrStdout(), "a flush ran less than remote.min_interval ago; nothing was sent.")
+		return err
+	}
 	if failed && report == (remote.Report{}) {
 		return nil
 	}
