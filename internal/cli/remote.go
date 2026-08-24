@@ -20,7 +20,10 @@
 //
 // The credential is read from standard input and never reflected (ADR-0028).
 // Terminal scrollback outlives the command, and a credential echoed once is a
-// credential in a screenshot.
+// credential in a screenshot. The endpoint's bare host is the one value read
+// from the store that this file may print, and only in `status` and `set` —
+// ADR-0029 carves it out of ADR-0028's never-echo rule for the person who typed
+// the command, and for nobody else.
 package cli
 
 import (
@@ -44,9 +47,20 @@ func init() { commands = append(commands, newRemoteCmd) }
 // reason.
 const maxCredentialBytes = 4 << 10
 
-// errCredentialMissing is phrased to carry the rule it enforces, and carries
-// nothing that was read (ADR-0028).
-var errCredentialMissing = errors.New("a credential must be supplied on standard input, not as an argument")
+// The two ways `set` refuses what it was given, both carrying the rule and
+// never the value (ADR-0028).
+//
+// errCredentialTooLarge exists because the alternative is silent corruption:
+// reading up to the limit and stopping would store the first 4 KiB of whatever
+// was redirected as if it were the whole secret, at mode 0600, with the far end
+// then rejecting every batch and nothing pointing at the truncation. The message
+// names the limit because that is the one number the user needs and the one
+// value here that is not a secret.
+var (
+	errCredentialInput    = errors.New("the credential could not be read from standard input")
+	errCredentialTooLarge = fmt.Errorf("the credential on standard input is longer than %d bytes, which is a redirected file rather than a credential", maxCredentialBytes)
+	errCredentialInArgv   = errors.New("a credential must be supplied on standard input, not as an argument")
+)
 
 func newRemoteCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -88,13 +102,20 @@ func newRemoteStatusCmd() *cobra.Command {
 // here.
 //
 // The endpoint line carries the host and port and nothing else — no scheme, no
-// path, no query, no userinfo, never the credential (ADR-0028). Together with the
-// state line it is what makes "configured but paused" legible: an endpoint
-// present with `state: off`.
+// path, no query, no userinfo (ADR-0029). The credential line carries presence
+// and nothing else at all: every byte of a credential is the secret, so it has
+// no bare-host analogue. Together with the state line they are the three
+// conditions a flush gates on, so a configuration that delivers nothing cannot
+// read here as a healthy one — and "configured but paused" stays legible as an
+// endpoint present with `state: off`.
 func writeRemoteStatus(w io.Writer, status remote.Status, host string) error {
 	endpoint := host
 	if endpoint == "" {
 		endpoint = "not configured"
+	}
+	credential := "not configured"
+	if status.CredentialConfigured {
+		credential = "set"
 	}
 	state := "off"
 	if status.Enabled {
@@ -104,8 +125,8 @@ func writeRemoteStatus(w io.Writer, status remote.Status, host string) error {
 	if !status.LastFlush.IsZero() {
 		lastFlush = status.LastFlush.UTC().Format(time.RFC3339)
 	}
-	_, err := fmt.Fprintf(w, "endpoint: %s\nstate: %s\nlast flush: %s\ndelivered through: %d\npending: %d\n",
-		endpoint, state, lastFlush, status.DeliveredThrough, status.Pending)
+	_, err := fmt.Fprintf(w, "endpoint: %s\ncredential: %s\nstate: %s\nlast flush: %s\ndelivered through: %d\npending: %d\n",
+		endpoint, credential, state, lastFlush, status.DeliveredThrough, status.Pending)
 	return err
 }
 
@@ -113,7 +134,16 @@ func newRemoteSetCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "set <url>",
 		Short: "Set the delivery endpoint, reading its credential from standard input",
-		Args:  cobra.ExactArgs(1),
+		// A second positional argument is refused with the rule rather than
+		// with cobra's arity message, because the mistake it almost always is —
+		// the credential typed onto the command line — is the one thing this
+		// command exists to prevent.
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 1 {
+				return errCredentialInArgv
+			}
+			return cobra.ExactArgs(1)(cmd, args)
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			paths, err := config.ResolvePaths()
 			if err != nil {
@@ -135,16 +165,20 @@ func newRemoteSetCmd() *cobra.Command {
 				return err
 			}
 
+			status, err := remote.Describe(paths)
+			if err != nil {
+				return err
+			}
+			if err = writeMissingCredential(cmd, status); err != nil {
+				return err
+			}
+
 			// Naming a destination is not the same act as starting to deliver to
 			// it, so `set` on a fresh machine leaves delivery off and points at
 			// the command that starts it. That is the same non-hostility argument
 			// ADR-0018 makes for `off` not clearing the endpoint, in the other
 			// direction: the moment records start leaving the machine is a moment
 			// the user chose.
-			status, err := remote.Describe(paths)
-			if err != nil {
-				return err
-			}
 			if status.Enabled {
 				return nil
 			}
@@ -158,16 +192,47 @@ func newRemoteSetCmd() *cobra.Command {
 // argv secret lands in shell history and in `ps` output for every user on the
 // machine. Nothing it returns is ever printed, and its refusals name the rule
 // rather than the value (ADR-0028).
+//
+// Empty input is a credential-less configuration rather than a refusal.
+// ADR-0028 provides for a machine that keeps no secret on disk at all, and
+// before this the only route to that state was to store a placeholder secret and
+// shadow it with the environment, which is the opposite of what the override is
+// for. The caller says so out loud; nothing about it is silent.
+//
+// One byte past the limit is refused rather than truncated. io.LimitReader stops
+// at its ceiling with a nil error, so reading exactly maxCredentialBytes could
+// not tell a whole credential from the first 4 KiB of a redirected file — and
+// the first 4 KiB of a file, written to a 0600 store as if it were the secret,
+// fails at the far end with nothing pointing back here. Reading one byte past
+// the ceiling is what makes the two distinguishable. Trailing whitespace is
+// trimmed before the length is judged, so a credential at exactly the limit
+// survives the newline a shell adds.
 func readCredential(in io.Reader) (string, error) {
-	raw, err := io.ReadAll(io.LimitReader(in, maxCredentialBytes))
+	raw, err := io.ReadAll(io.LimitReader(in, maxCredentialBytes+1))
 	if err != nil {
-		return "", errCredentialMissing
+		return "", errCredentialInput
 	}
 	credential := strings.TrimSpace(string(raw))
-	if credential == "" {
-		return "", errCredentialMissing
+	if len(credential) > maxCredentialBytes {
+		return "", errCredentialTooLarge
 	}
 	return credential, nil
+}
+
+// writeMissingCredential says, on stderr, that nothing authorises delivery yet.
+//
+// A configured endpoint that is on with no credential sends nothing, so every
+// command that leaves the machine in that state says so at the moment it does,
+// rather than leaving it to be discovered by a flush that reports a clean zero.
+// It names the environment override because that is the other way to supply one
+// and the reason this state is a configuration rather than a mistake (ADR-0028).
+func writeMissingCredential(cmd *cobra.Command, status remote.Status) error {
+	if status.CredentialConfigured {
+		return nil
+	}
+	_, err := fmt.Fprintf(cmd.ErrOrStderr(),
+		"no credential is configured; supply one on standard input or set %s.\n", config.EnvRemoteAuthorization)
+	return err
 }
 
 func newRemoteOnCmd() *cobra.Command {
@@ -183,8 +248,15 @@ func newRemoteOnCmd() *cobra.Command {
 			if err = config.SetRemoteEnabled(paths, true); err != nil {
 				return err
 			}
-			_, err = fmt.Fprintln(cmd.OutOrStdout(), "remote delivery is on.")
-			return err
+			if _, err = fmt.Fprintln(cmd.OutOrStdout(), "remote delivery is on."); err != nil {
+				return err
+			}
+
+			status, err := remote.Describe(paths)
+			if err != nil {
+				return err
+			}
+			return writeMissingCredential(cmd, status)
 		},
 	}
 }
@@ -226,10 +298,12 @@ func newRemoteFlushCmd() *cobra.Command {
 				return writeDryRun(cmd, paths)
 			}
 
-			// The three states, read rather than derived: Describe already
-			// computes them, and telling a user who ran `flush` deliberately that
-			// delivery is off is the difference between a quiet success and a
-			// silent one.
+			// All three conditions a flush gates on, read rather than derived:
+			// Describe already computes them, and telling a user who ran `flush`
+			// deliberately why nothing left is the difference between a quiet
+			// success and a silent one. Checking two of the three would let the
+			// third fall through into FlushReport's silent zero return and print
+			// a flush that never happened.
 			status, err := remote.Describe(paths)
 			if err != nil {
 				return err
@@ -242,9 +316,23 @@ func newRemoteFlushCmd() *cobra.Command {
 				_, err = fmt.Fprintln(cmd.OutOrStdout(), "remote delivery is off; nothing was sent.")
 				return err
 			}
+			if !status.CredentialConfigured {
+				_, err = fmt.Fprintln(cmd.OutOrStdout(), "no credential is configured; nothing was sent.")
+				return err
+			}
 
 			report, flushErr := remote.FlushReport(paths)
-			if errors.Is(flushErr, remote.ErrDeliveryFailed) || errors.Is(flushErr, remote.ErrDeliveryRejected) {
+
+			// What it sent is printed before why it stopped, and on the failure
+			// path too. A flush whose second batch was refused still put the
+			// first one on the wire, and "the endpoint could not be reached"
+			// with no mention of the 500 records that did leave is the one case
+			// where "reports what it sent" would stop being true.
+			if err = writeFlushReport(cmd, report, flushErr != nil); err != nil {
+				return err
+			}
+
+			if isDeliveryFailure(flushErr) {
 				// Exit 0 with a plain message. ADR-0018 requires a dead endpoint
 				// to be indistinguishable from an absent one from the user's
 				// point of view, and a non-zero exit from a command that did
@@ -255,21 +343,59 @@ func newRemoteFlushCmd() *cobra.Command {
 				_, err = fmt.Fprintln(cmd.ErrOrStderr(), flushErr)
 				return err
 			}
-			if flushErr != nil {
-				return flushErr
-			}
-
-			if report.Dropped > 0 {
-				if _, err = fmt.Fprintf(cmd.ErrOrStderr(), "%s could not be encoded and were not sent.\n", quantity(report.Dropped, "record")); err != nil {
-					return err
-				}
-			}
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "sent %s in %s.\n", quantity(report.Records, "record"), quantity(report.Batches, "batch"))
-			return err
+			return flushErr
 		},
 	}
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the exact payload the next flush would send and send nothing")
 	return cmd
+}
+
+// writeFlushReport prints what the flush put on the wire, and on stderr what the
+// encoder refused.
+//
+// A run that failed before sending anything prints no count: the failure below
+// it is the whole of what happened, and "sent 0 records in 0 batches." beside it
+// reads as a second, contradictory answer. A run that failed after sending
+// something prints both, because that is the case where what was sent is not
+// obvious from anywhere else.
+func writeFlushReport(cmd *cobra.Command, report remote.Report, failed bool) error {
+	if failed && report == (remote.Report{}) {
+		return nil
+	}
+	if report.Dropped > 0 {
+		if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "%s could not be encoded and were not sent.\n", quantity(report.Dropped, "record")); err != nil {
+			return err
+		}
+	}
+	_, err := fmt.Fprintf(cmd.OutOrStdout(), "sent %s in %s.\n", quantity(report.Records, "record"), quantity(report.Batches, "batch"))
+	return err
+}
+
+// isDeliveryFailure reports whether err is the far end's failure and nothing
+// else — the one condition under which `flush` exits 0.
+//
+// flushLocked joins the delivery error with the delivery-state write's, and
+// errors.Is is satisfied by any member of a join. Asking it directly would
+// therefore report a watermark that never persisted — a local failure, and one
+// that makes the next flush re-send — as a benign far-end problem, and exit 0 on
+// it. So every member of a join has to answer, not just one.
+func isDeliveryFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		members := joined.Unwrap()
+		if len(members) == 0 {
+			return false
+		}
+		for _, member := range members {
+			if !isDeliveryFailure(member) {
+				return false
+			}
+		}
+		return true
+	}
+	return errors.Is(err, remote.ErrDeliveryFailed) || errors.Is(err, remote.ErrDeliveryRejected)
 }
 
 // writeDryRun prints the payloads a flush would send, one per line, and sends

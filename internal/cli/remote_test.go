@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -86,20 +88,32 @@ func seedSpool(t *testing.T, p config.Paths, from, n int) {
 	}
 }
 
-// remoteSpy records every request it receives. Mirrored from internal/remote's
-// own spy rather than shared, because a test helper in that package is not
-// importable from this one.
+// remoteSpy records every request it receives and answers with the status its
+// statuses slice names for that request's index, repeating the last one once the
+// slice runs out — which is what lets a test say "batch 1 is accepted, batch 2
+// is rejected" without knowing when the batches arrive. Mirrored from
+// internal/remote's own spy rather than shared, because a test helper in that
+// package is not importable from this one.
 type remoteSpy struct {
-	mu     sync.Mutex
-	bodies [][]byte
+	mu       sync.Mutex
+	statuses []int
+	bodies   [][]byte
 }
 
 func (s *remoteSpy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	s.mu.Lock()
+	index := len(s.bodies)
 	s.bodies = append(s.bodies, body)
+	status := http.StatusOK
+	switch {
+	case index < len(s.statuses):
+		status = s.statuses[index]
+	case len(s.statuses) > 0:
+		status = s.statuses[len(s.statuses)-1]
+	}
 	s.mu.Unlock()
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(status)
 }
 
 func (s *remoteSpy) count() int {
@@ -118,9 +132,9 @@ func (s *remoteSpy) body(t *testing.T, index int) []byte {
 	return s.bodies[index]
 }
 
-func serveRemote(t *testing.T) (*remoteSpy, string) {
+func serveRemote(t *testing.T, statuses ...int) (*remoteSpy, string) {
 	t.Helper()
-	receiver := &remoteSpy{}
+	receiver := &remoteSpy{statuses: statuses}
 	server := httptest.NewServer(receiver)
 	t.Cleanup(server.Close)
 	return receiver, server.URL
@@ -520,6 +534,253 @@ func TestFlushReportsWhatItSent(t *testing.T) {
 	}
 	if stdout != "sent 3 records in 1 batch.\n" {
 		t.Errorf("stdout = %q, want %q", stdout, "sent 3 records in 1 batch.\n")
+	}
+}
+
+// An oversized standard input is a redirected file, not a credential, and
+// truncating it to the limit would write 4 KiB of some other file into a 0600
+// store as if it were the secret. The far end would then reject every batch with
+// nothing pointing at the truncation, so the refusal happens here, where the
+// mistake is still legible.
+//
+// The limit is a boundary, so both sides of it are asserted: exactly
+// maxCredentialBytes is a credential, one byte more is a mistake.
+func TestSetRefusesAnOversizedCredential(t *testing.T) {
+	const endpoint = "https://api.example.com/v1/traces"
+
+	t.Run("one byte over the limit", func(t *testing.T) {
+		paths := isolateRemote(t)
+		oversized := strings.Repeat("A", maxCredentialBytes+1)
+
+		stdout, stderr, err := runRemote(t, oversized, "remote", "set", endpoint)
+		if err == nil {
+			t.Fatal("remote set error = nil, want a refusal — a truncated credential is not a credential")
+		}
+		if !strings.Contains(err.Error(), strconv.Itoa(maxCredentialBytes)) {
+			t.Errorf("refusal = %v, want it to name the limit", err)
+		}
+		// The refusal names the limit and never the value: what was read is
+		// still a secret even when it is the wrong length (ADR-0028).
+		if strings.Contains(stdout+stderr+err.Error(), strings.Repeat("A", 64)) {
+			t.Errorf("the refusal echoed what was read:\nstdout: %s\nstderr: %s\nerror: %v", stdout, stderr, err)
+		}
+
+		auth, loadErr := config.LoadRemoteAuth(paths)
+		if loadErr != nil {
+			t.Fatalf("LoadRemoteAuth() error = %v", loadErr)
+		}
+		if auth.Endpoint != "" || auth.Credential != "" {
+			t.Error("a refused `remote set` wrote to the store")
+		}
+	})
+
+	t.Run("exactly the limit", func(t *testing.T) {
+		paths := isolateRemote(t)
+		atLimit := strings.Repeat("A", maxCredentialBytes)
+
+		if _, _, err := runRemote(t, atLimit, "remote", "set", endpoint); err != nil {
+			t.Fatalf("remote set error = %v, want the limit itself to be accepted", err)
+		}
+		auth, err := config.LoadRemoteAuth(paths)
+		if err != nil {
+			t.Fatalf("LoadRemoteAuth() error = %v", err)
+		}
+		if len(auth.Credential) != maxCredentialBytes {
+			t.Errorf("the stored credential is %d bytes, want %d", len(auth.Credential), maxCredentialBytes)
+		}
+	})
+}
+
+// ADR-0028 provides for a machine that keeps no secret on disk at all, so naming
+// a destination without one is a configuration rather than a mistake. It is
+// still a state that delivers nothing until the environment supplies the
+// credential, so `set` says so on stderr instead of leaving it to be discovered
+// by a flush that reports a clean zero.
+func TestSetWithoutACredentialConfiguresTheEndpointOnly(t *testing.T) {
+	paths := isolateRemote(t)
+
+	stdout, stderr, err := runRemote(t, "", "remote", "set", "https://api.example.com/v1/traces")
+	if err != nil {
+		t.Fatalf("remote set error = %v", err)
+	}
+	if !strings.Contains(stdout, "remote endpoint set to api.example.com") {
+		t.Errorf("remote set did not confirm the destination:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, "no credential is configured") {
+		t.Errorf("stderr does not say the endpoint has no credential:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, config.EnvRemoteAuthorization) {
+		t.Errorf("stderr does not name the other way to supply one:\n%s", stderr)
+	}
+
+	auth, err := config.LoadRemoteAuth(paths)
+	if err != nil {
+		t.Fatalf("LoadRemoteAuth() error = %v", err)
+	}
+	if auth.Endpoint == "" {
+		t.Error("the endpoint was not written")
+	}
+	if auth.Credential != "" {
+		t.Error("a credential was written from an empty standard input")
+	}
+}
+
+// An endpoint that is configured and on but has no credential delivers nothing.
+// Before the third condition was visible to this package it fell through the two
+// checks below into a silent zero return, and `flush` reported a delivery that
+// never happened — an unreachable configuration rendered as a healthy one.
+func TestFlushWithoutACredentialSaysNothingWasSent(t *testing.T) {
+	paths := isolateRemote(t)
+	receiver, endpoint := serveRemote(t)
+
+	if _, _, err := runRemote(t, "", "remote", "set", endpoint); err != nil {
+		t.Fatalf("remote set error = %v", err)
+	}
+	if _, _, err := runRemote(t, "", "remote", "on"); err != nil {
+		t.Fatalf("remote on error = %v", err)
+	}
+	seedSpool(t, paths, 0, 3)
+
+	stdout, _, err := runRemote(t, "", "remote", "flush")
+	if err != nil {
+		t.Fatalf("remote flush error = %v", err)
+	}
+	if stdout != "no credential is configured; nothing was sent.\n" {
+		t.Errorf("stdout = %q, want the missing-credential message", stdout)
+	}
+	if got := receiver.count(); got != 0 {
+		t.Errorf("requests = %d, want 0", got)
+	}
+}
+
+// `status` answers the same three conditions a flush gates on, so a
+// configuration that delivers nothing cannot read as a healthy one. Presence
+// only: every byte of a credential is the secret.
+func TestStatusReportsWhetherACredentialIsConfigured(t *testing.T) {
+	t.Run("configured", func(t *testing.T) {
+		isolateRemote(t)
+		configureRemote(t, "https://api.example.com/v1/traces")
+
+		stdout, _, err := runRemote(t, "", "remote", "status")
+		if err != nil {
+			t.Fatalf("remote status error = %v", err)
+		}
+		if !strings.Contains(stdout, "credential: set") {
+			t.Errorf("status does not report the credential as present:\n%s", stdout)
+		}
+		if strings.Contains(stdout, remoteTestSecretKey) || strings.Contains(stdout, remoteTestPublicKey) {
+			t.Errorf("status carries the credential itself:\n%s", stdout)
+		}
+	})
+
+	t.Run("absent", func(t *testing.T) {
+		isolateRemote(t)
+		if _, _, err := runRemote(t, "", "remote", "set", "https://api.example.com/v1/traces"); err != nil {
+			t.Fatalf("remote set error = %v", err)
+		}
+
+		stdout, _, err := runRemote(t, "", "remote", "status")
+		if err != nil {
+			t.Fatalf("remote status error = %v", err)
+		}
+		if !strings.Contains(stdout, "credential: not configured") {
+			t.Errorf("status does not report the missing credential:\n%s", stdout)
+		}
+	})
+}
+
+// The no-secret-on-disk path ADR-0028 exists for, end to end: an endpoint
+// configured with no credential, the credential supplied by the environment, and
+// a flush that actually delivers.
+func TestTheEnvironmentCredentialAloneDelivers(t *testing.T) {
+	paths := isolateRemote(t)
+	receiver, endpoint := serveRemote(t)
+
+	if _, _, err := runRemote(t, "", "remote", "set", endpoint); err != nil {
+		t.Fatalf("remote set error = %v", err)
+	}
+	if _, _, err := runRemote(t, "", "remote", "on"); err != nil {
+		t.Fatalf("remote on error = %v", err)
+	}
+	seedSpool(t, paths, 0, 3)
+	t.Setenv(config.EnvRemoteAuthorization, remoteTestSecret)
+
+	stdout, _, err := runRemote(t, "", "remote", "flush")
+	if err != nil {
+		t.Fatalf("remote flush error = %v", err)
+	}
+	if stdout != "sent 3 records in 1 batch.\n" {
+		t.Errorf("stdout = %q, want the sent line", stdout)
+	}
+	if got := receiver.count(); got != 1 {
+		t.Fatalf("requests = %d, want 1", got)
+	}
+
+	// The whole point of the override: nothing was written to the store on the
+	// way through. Read back with the variable cleared, so what is asserted is
+	// what the file holds.
+	t.Setenv(config.EnvRemoteAuthorization, "")
+	auth, err := config.LoadRemoteAuth(paths)
+	if err != nil {
+		t.Fatalf("LoadRemoteAuth() error = %v", err)
+	}
+	if auth.Credential != "" {
+		t.Error("the environment's credential was persisted to disk")
+	}
+}
+
+// When batch 1 is accepted and batch 2 is rejected, 500 records did leave the
+// machine. Reporting only the failure would tell the user the endpoint could not
+// be reached while saying nothing about what it already holds — and `flush`'s
+// whole job is to report what it sent.
+//
+// 501 is one more than internal/remote's unexported maxBatchRecords = 500, for
+// the reason TestDryRunPrintsOnePayloadPerBatch gives.
+func TestPartialFlushReportsWhatItSentAndThatItFailed(t *testing.T) {
+	paths := isolateRemote(t)
+	receiver, endpoint := serveRemote(t, http.StatusOK, http.StatusInternalServerError)
+	configureRemote(t, endpoint)
+	seedSpool(t, paths, 0, 501)
+
+	stdout, stderr, err := runRemote(t, "", "remote", "flush")
+	if err != nil {
+		t.Fatalf("remote flush error = %v, want nil — the far end's refusal is not this machine's failure", err)
+	}
+	if got := receiver.count(); got != 2 {
+		t.Fatalf("requests = %d, want 2", got)
+	}
+	if stdout != "sent 500 records in 1 batch.\n" {
+		t.Errorf("stdout = %q, want what the accepted batch carried", stdout)
+	}
+	if !strings.Contains(stderr, "the remote endpoint rejected a batch") {
+		t.Errorf("stderr does not carry the failure:\n%s", stderr)
+	}
+}
+
+// A dead endpoint exits 0; a local failure must not. flushLocked joins the
+// delivery error with the delivery-state write's, and errors.Is is satisfied by
+// either member of a join — so classifying on the sentinel alone would report a
+// watermark that never persisted as a benign far-end problem and exit 0.
+func TestOnlyAPureDeliveryFailureExitsZero(t *testing.T) {
+	writeFailed := errors.New("writing the delivery state failed")
+	cases := map[string]struct {
+		err  error
+		want bool
+	}{
+		"no failure":                   {nil, false},
+		"unreachable":                  {remote.ErrDeliveryFailed, true},
+		"rejected, wrapped by status":  {fmt.Errorf("status %d: %w", 500, remote.ErrDeliveryRejected), true},
+		"joined with nothing else":     {errors.Join(remote.ErrDeliveryFailed, nil), true},
+		"joined with a local failure":  {errors.Join(remote.ErrDeliveryFailed, writeFailed), false},
+		"a local failure on its own":   {writeFailed, false},
+		"two delivery failures joined": {errors.Join(remote.ErrDeliveryFailed, remote.ErrDeliveryRejected), true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := isDeliveryFailure(tc.err); got != tc.want {
+				t.Errorf("isDeliveryFailure(%v) = %t, want %t", tc.err, got, tc.want)
+			}
+		})
 	}
 }
 
