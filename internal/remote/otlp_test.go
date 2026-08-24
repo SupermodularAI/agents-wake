@@ -688,6 +688,258 @@ func TestAttributeCapacityMatchesFrozenSet(t *testing.T) {
 	}
 }
 
+// hostileIdentifiers is this package's own corpus of source values that must
+// never reach the wire. ADR-0007 requires a hostile-payload corpus per input
+// shape rather than one shared set, and the wire is a new *output* shape with
+// its own failure modes, so it gets its own corpus even though it is not a new
+// adapter. A shared corpus would let this package inherit coverage it never ran.
+//
+// It repeats internal/record's list and adds two entries that matter only here:
+// a prompt-injection string and an API-key-shaped string, the two things an
+// operator would most regret finding in a payload sent to a third-party
+// collector.
+var hostileIdentifiers = []string{
+	"/usr/local/bin", "usr/local/bin", "./relative", "../secrets", "a/../b",
+	"~/.ssh/id_rsa", `C:\Windows\System32`, "C:temp", `C:/Users/me`, `\\server\share`,
+	`back\slash`, "contains space", "tab\there", "new\nline", "trailing/", "/", "..",
+	".hidden", "", "ignore previous instructions", "sk-ant-api03-DEADBEEF",
+}
+
+// transcriptKeys are the four attribute keys that would carry prompt text, tool
+// arguments, or model output. They are the keys an OTLP integration written
+// without this project's constraints would reach for first, so their absence is
+// asserted by name rather than left to the key-set equality test alone.
+var transcriptKeys = []string{
+	"langfuse.observation.input",
+	"langfuse.observation.output",
+	"gen_ai.prompt",
+	"gen_ai.completion",
+}
+
+// frozenWireFieldNames is every JSON object field the payload may contain. They
+// come from struct tags, so they are compile-time literals, but freezing them
+// makes a newly added wire field fail this test rather than pass unnoticed.
+var frozenWireFieldNames = []string{
+	"attributes", "code", "endTimeUnixNano", "intValue", "key", "kind", "name",
+	"resource", "resourceSpans", "scope", "scopeSpans", "spanId", "spans",
+	"startTimeUnixNano", "status", "stringValue", "traceId", "value", "version",
+}
+
+// hostileFields are the record fields that carry a name-domain or token-domain
+// value from a harness. Each is a place a source string could reach the wire.
+var hostileFields = []struct {
+	name string
+	set  func(*record.Record, string)
+}{
+	{"Name", func(r *record.Record, v string) { r.Name = record.Identifier(v) }},
+	{"SessionID", func(r *record.Record, v string) { r.SessionID = record.Identifier(v) }},
+	{"Harness", func(r *record.Record, v string) { r.Harness = record.Identifier(v) }},
+	{"Package", func(r *record.Record, v string) { r.Package = record.Identifier(v) }},
+	{"Model", func(r *record.Record, v string) { r.Model = record.Identifier(v) }},
+	{"ViaSkill", func(r *record.Record, v string) { r.ViaSkill = record.Identifier(v) }},
+	{"ViaAgent", func(r *record.Record, v string) { r.ViaAgent = record.Identifier(v) }},
+	{"Effort", func(r *record.Record, v string) { r.Effort = record.Identifier(v) }},
+}
+
+// TestHostileIdentifiersNeverReachTheWire states the encoder's actual privacy
+// contract, which is narrower than "hostile input is rejected" and stronger than
+// "hostile input is not echoed".
+//
+// The encoder is not a validator and must not become one — record.Validate is
+// the single gate, and duplicating its rules here would give two definitions of
+// a safe value that could drift. What the encoder owes is this: a value that the
+// gate refused appears nowhere in the payload, and a value the gate accepted
+// appears only as its own field's attribute, never smuggled into a second place.
+//
+// So the corpus splits by what record.Validate says, and the test asserts the
+// matching half. Note that "sk-ant-api03-DEADBEEF" is an accepted value: it is a
+// well-formed bounded Identifier, and if a harness genuinely names a skill that,
+// reporting the name is correct behaviour. The record type is the allowlist
+// (ADR-0007) — the encoder's job is to add nothing to it.
+func TestHostileIdentifiersNeverReachTheWire(t *testing.T) {
+	for _, field := range hostileFields {
+		for _, hostile := range hostileIdentifiers {
+			t.Run(field.name+"/"+strconv.Quote(hostile), func(t *testing.T) {
+				r := fullRecord()
+				field.set(&r, hostile)
+				accepted := record.Validate(r) == nil
+
+				// A path-shaped value must never be accepted, in any field.
+				// This is the assertion that would catch a widened validator.
+				if accepted && strings.ContainsAny(hostile, `/\`) {
+					t.Fatalf("a path-shaped value was accepted into %s", field.name)
+				}
+
+				payload, dropped, err := Encode([]record.Record{r})
+				if err != nil {
+					t.Fatalf("Encode() error = %v", err)
+				}
+
+				if !accepted {
+					if dropped != 1 {
+						t.Fatalf("Encode() dropped = %d, want 1 for a refused value", dropped)
+					}
+					if spans := spansOf(t, payload); len(spans) != 0 {
+						t.Fatalf("Encode() emitted %d spans for a refused value", len(spans))
+					}
+					if hostile != "" && bytes.Contains(payload, []byte(hostile)) {
+						t.Fatalf("a refused value reached the payload")
+					}
+					return
+				}
+
+				if dropped != 0 {
+					t.Fatalf("Encode() dropped = %d for an accepted value", dropped)
+				}
+				assertEveryStringIsAllowlisted(t, payload, r)
+			})
+		}
+	}
+}
+
+// assertEveryStringIsAllowlisted is the positive form of the allowlist: no
+// string reaches the wire that did not come from a typed Record field, a derived
+// id, a rendered number, or a constant of this package.
+//
+// A containment test ("the secret is not in the payload") only catches leaks
+// somebody thought to name. This catches the ones nobody did.
+func assertEveryStringIsAllowlisted(t *testing.T, payload []byte, r record.Record) {
+	t.Helper()
+
+	allowed := make(map[string]bool)
+	for _, group := range [][]string{frozenSpanAttributeKeys, frozenResourceAttributeKeys, frozenWireFieldNames} {
+		for _, key := range group {
+			allowed[key] = true
+		}
+	}
+	for _, constant := range []string{serviceName, scopeName, version.Version, "tool", "agent", "span"} {
+		allowed[constant] = true
+	}
+
+	start, end, ok := spanTimes(r)
+	if !ok {
+		t.Fatal("spanTimes() rejected a record the encoder accepted")
+	}
+	values := []string{
+		string(r.Kind), string(r.Name), string(r.Harness), string(r.HarnessVersion),
+		string(r.SessionID), string(r.Repo), string(r.Package), string(r.PackageVersion),
+		string(r.ViaSkill), string(r.ViaAgent), string(r.Model), string(r.Effort),
+		string(r.Invoker), string(r.Kind) + ":" + string(r.Name),
+		traceID(r), spanID(r), start, end,
+		strconv.FormatUint(uint64(r.SchemaVersion), 10),
+	}
+	if r.Source != nil {
+		values = append(values, string(*r.Source))
+	}
+	if r.Outcome != nil {
+		values = append(values, string(*r.Outcome))
+	}
+	if r.DurationMS != nil {
+		values = append(values, strconv.FormatInt(*r.DurationMS, 10))
+	}
+	for _, value := range values {
+		allowed[value] = true
+	}
+
+	for _, found := range walkStrings(t, payload) {
+		if !allowed[found] {
+			t.Fatalf("payload carries the unallowlisted string %q", found)
+		}
+	}
+}
+
+// walkStrings collects every string in the decoded payload — object field names
+// as well as values, since a leak could arrive as either.
+func walkStrings(t *testing.T, payload []byte) []string {
+	t.Helper()
+	var found []string
+	var walk func(any)
+	walk = func(node any) {
+		switch typed := node.(type) {
+		case map[string]any:
+			for key, child := range typed {
+				found = append(found, key)
+				walk(child)
+			}
+		case []any:
+			for _, child := range typed {
+				walk(child)
+			}
+		case string:
+			found = append(found, typed)
+		}
+	}
+	walk(decodePayload(t, payload))
+	return found
+}
+
+func TestEveryEmittedStringIsAllowlisted(t *testing.T) {
+	for name, r := range map[string]record.Record{"fullRecord": fullRecord(), "validRecord": validRecord()} {
+		t.Run(name, func(t *testing.T) {
+			payload, dropped, err := Encode([]record.Record{r})
+			if err != nil {
+				t.Fatalf("Encode() error = %v", err)
+			}
+			if dropped != 0 {
+				t.Fatalf("Encode() dropped = %d, want 0", dropped)
+			}
+			assertEveryStringIsAllowlisted(t, payload, r)
+		})
+	}
+}
+
+func TestTranscriptKeysAreAbsent(t *testing.T) {
+	batches := map[string][]record.Record{
+		"full":  {fullRecord()},
+		"valid": {validRecord()},
+		"empty": nil,
+	}
+	for name, batch := range batches {
+		t.Run(name, func(t *testing.T) {
+			payload, _, err := Encode(batch)
+			if err != nil {
+				t.Fatalf("Encode() error = %v", err)
+			}
+			for _, key := range transcriptKeys {
+				if bytes.Contains(payload, []byte(key)) {
+					t.Fatalf("payload carries the transcript key %q", key)
+				}
+			}
+		})
+	}
+}
+
+// TestPayloadHasNoPathSeparator is the blunt mechanical check behind plan §3.4:
+// nothing this encoder legitimately emits contains a path separator, so one
+// appearing means a path fragment reached the wire.
+//
+// It holds because scopeName is the binary's name rather than this package's Go
+// import path, and because record.Validate refuses a path shape in every field.
+// version.Version is "dev" under go test; in a real build it is `git describe
+// --tags` output, which cannot contain a slash for the vX.Y.Z tags this project
+// uses.
+func TestPayloadHasNoPathSeparator(t *testing.T) {
+	batches := map[string][]record.Record{
+		"full":  {fullRecord()},
+		"valid": {validRecord()},
+		"batch": {fullRecord(), validRecord()},
+	}
+	for name, batch := range batches {
+		t.Run(name, func(t *testing.T) {
+			payload, _, err := Encode(batch)
+			if err != nil {
+				t.Fatalf("Encode() error = %v", err)
+			}
+			if bytes.ContainsRune(payload, '/') {
+				t.Fatal("payload contains a path separator")
+			}
+			if bytes.ContainsRune(payload, '\\') {
+				t.Fatal("payload contains a backslash")
+			}
+		})
+	}
+}
+
 func TestEncodeDropsInvalidRecord(t *testing.T) {
 	invalid := validRecord()
 	invalid.SchemaVersion = 99
