@@ -21,9 +21,9 @@
 // The credential is read from standard input and never reflected (ADR-0028).
 // Terminal scrollback outlives the command, and a credential echoed once is a
 // credential in a screenshot. The endpoint's bare host is the one value read
-// from the store that this file may print, and only in `status` and `set` —
+// from the store that this file may print, and only in `status` —
 // ADR-0029 carves it out of ADR-0028's never-echo rule for the person who typed
-// the command, and for nobody else.
+// that command, and for nobody else. `set` confirms without naming it.
 package cli
 
 import (
@@ -157,11 +157,11 @@ func newRemoteSetCmd() *cobra.Command {
 				return err
 			}
 
-			host, err := config.RemoteEndpointHost(paths)
-			if err != nil {
-				return err
-			}
-			if _, err = fmt.Fprintf(cmd.OutOrStdout(), "remote endpoint set to %s.\n", host); err != nil {
+			// The destination is not named back. ADR-0029 carves the bare host
+			// out of ADR-0028's never-echo rule for `remote status` and for
+			// nothing else, so this confirms the write and points at the one
+			// command allowed to answer "where".
+			if _, err = fmt.Fprintln(cmd.OutOrStdout(), `remote endpoint configured; run "wake remote status" to see it.`); err != nil {
 				return err
 			}
 
