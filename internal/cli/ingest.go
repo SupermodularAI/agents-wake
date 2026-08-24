@@ -65,6 +65,7 @@ func newIngestCmd() *cobra.Command {
 			} else {
 				written, scanErr = activation.Ingest(paths, claudeDir)
 			}
+			runAfterScan(paths)
 			return scanErr
 		})
 		if spinErr != nil {
@@ -111,4 +112,5 @@ func runHookScan() {
 	}
 	_, err = activation.Trigger(paths, claudeDir)
 	discard(err)
+	runAfterScan(paths)
 }
