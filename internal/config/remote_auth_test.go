@@ -660,3 +660,161 @@ func TestRemoteAuthNeverReachesConfigToml(t *testing.T) {
 		}
 	}
 }
+
+// ADR-0018: turning delivery off must not discard where it was going. Asserted
+// at the store rather than only at the rendering, because a `remote off` that
+// silently cleared the endpoint would still print the same line.
+func TestSetRemoteEnabledPreservesTheEndpointAndCredential(t *testing.T) {
+	p := remoteTestPaths(t)
+	setRemoteAuthOrFail(t, p)
+
+	if err := SetRemoteEnabled(p, false); err != nil {
+		t.Fatalf("SetRemoteEnabled(false) = %v", err)
+	}
+
+	got, err := LoadRemoteAuth(p)
+	if err != nil {
+		t.Fatalf("LoadRemoteAuth() = %v", err)
+	}
+	if got.Endpoint != testEndpoint {
+		t.Errorf("Endpoint = %q, want it unchanged", presence(got.Endpoint))
+	}
+	if got.Credential != testCredential {
+		t.Errorf("Credential = %s, want it unchanged", presence(got.Credential))
+	}
+	if got.Enabled {
+		t.Error("Enabled = true, want false")
+	}
+}
+
+// The regression this entry point exists to make impossible. A write path that
+// read through LoadRemoteAuth would persist the environment's credential to
+// disk — the one thing ADR-0028 says that override must never do — and the
+// resulting store would look entirely ordinary.
+func TestSetRemoteEnabledNeverPersistsTheEnvironmentCredential(t *testing.T) {
+	p := remoteTestPaths(t)
+	setRemoteAuthOrFail(t, p)
+	t.Setenv(EnvRemoteAuthorization, envCredential)
+
+	if err := SetRemoteEnabled(p, false); err != nil {
+		t.Fatalf("SetRemoteEnabled(false) = %v", err)
+	}
+
+	written := readFileOrFail(t, remoteAuthPath(p))
+	if !strings.Contains(written, testCredential) {
+		t.Error("the store no longer holds the credential it was written with")
+	}
+	if strings.Contains(written, envCredential) {
+		t.Error("the store holds the environment's credential: an override was written to disk")
+	}
+}
+
+// Enabled without an endpoint can only fail later, in a background flush nobody
+// is watching, so validateRemoteAuth refuses it — and a refusal writes nothing.
+func TestSetRemoteEnabledOnIsRefusedWithoutAnEndpoint(t *testing.T) {
+	p := remoteTestPaths(t)
+
+	if err := SetRemoteEnabled(p, true); err == nil {
+		t.Fatal("SetRemoteEnabled(true) on a fresh store = nil, want a refusal")
+	}
+	assertNoStore(t, remoteAuthPath(p))
+}
+
+// `remote off` on a machine with nothing configured must not create a credential
+// store. Writing one would put a file holding a secret's shape where there is no
+// secret, which is the sort of thing a later reader treats as evidence.
+func TestSetRemoteEnabledIsANoOpWhenAlreadyInThatState(t *testing.T) {
+	p := remoteTestPaths(t)
+
+	if err := SetRemoteEnabled(p, false); err != nil {
+		t.Fatalf("SetRemoteEnabled(false) on a fresh store = %v, want nil", err)
+	}
+	assertNoStore(t, remoteAuthPath(p))
+}
+
+// Rotating a credential on a paused endpoint must not silently resume delivery,
+// for the same reason `remote off` must not clear the endpoint (ADR-0018).
+func TestSetRemoteEndpointPreservesTheStoredEnabledState(t *testing.T) {
+	const rotatedEndpoint = "https://remote-auth-rotated-host.example/v1/traces"
+	const rotatedCredential = "pk-lf-rotated-public:sk-lf-rotated-secret"
+
+	p := remoteTestPaths(t)
+	setRemoteAuthOrFail(t, p)
+
+	if err := SetRemoteEndpoint(p, rotatedEndpoint, rotatedCredential); err != nil {
+		t.Fatalf("SetRemoteEndpoint() = %v", err)
+	}
+
+	got, err := LoadRemoteAuth(p)
+	if err != nil {
+		t.Fatalf("LoadRemoteAuth() = %v", err)
+	}
+	if !got.Enabled {
+		t.Error("Enabled = false, want the stored state preserved")
+	}
+	if got.Endpoint != rotatedEndpoint {
+		t.Error("Endpoint was not replaced by the one supplied")
+	}
+	if got.Credential != rotatedCredential {
+		t.Error("Credential was not replaced by the one supplied")
+	}
+}
+
+// The write path's half of ADR-0028: what lands on disk is the argument's
+// credential, never whatever the environment happened to carry.
+func TestSetRemoteEndpointNeverPersistsTheEnvironmentCredential(t *testing.T) {
+	p := remoteTestPaths(t)
+	t.Setenv(EnvRemoteAuthorization, envCredential)
+
+	if err := SetRemoteEndpoint(p, testEndpoint, testCredential); err != nil {
+		t.Fatalf("SetRemoteEndpoint() = %v", err)
+	}
+
+	written := readFileOrFail(t, remoteAuthPath(p))
+	if !strings.Contains(written, testCredential) {
+		t.Error("the store does not hold the credential that was supplied")
+	}
+	if strings.Contains(written, envCredential) {
+		t.Error("the store holds the environment's credential: an override was written to disk")
+	}
+}
+
+// What `remote status` may print about a destination: enough to recognise it,
+// nothing that could carry a secret. A path can hold a token, userinfo is a
+// credential outright, and a query string is where an API key usually hides.
+func TestRemoteEndpointHostReportsHostAndPortOnly(t *testing.T) {
+	cases := map[string]struct {
+		endpoint string
+		want     string
+	}{
+		"userinfo, port and path": {"https://user:pw@api.example.com:4318/v1/traces", "api.example.com:4318"},
+		"loopback with a port":    {"http://127.0.0.1:4318/v1/traces", "127.0.0.1:4318"},
+		"no store at all":         {"", ""},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			p := remoteTestPaths(t)
+			if tc.endpoint != "" {
+				if err := SetRemoteEndpoint(p, tc.endpoint, testCredential); err != nil {
+					t.Fatalf("SetRemoteEndpoint() = %v", err)
+				}
+			}
+
+			got, err := RemoteEndpointHost(p)
+			if err != nil {
+				t.Fatalf("RemoteEndpointHost() = %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("RemoteEndpointHost() = %q, want %q", got, tc.want)
+			}
+			if strings.Contains(got, "/") {
+				t.Errorf("RemoteEndpointHost() = %q, which carries a path separator", got)
+			}
+			for _, forbidden := range []string{"v1", "pw", "user"} {
+				if strings.Contains(got, forbidden) {
+					t.Errorf("RemoteEndpointHost() = %q, which carries %q", got, forbidden)
+				}
+			}
+		})
+	}
+}
