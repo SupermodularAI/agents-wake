@@ -77,10 +77,33 @@ const (
 // isHTTPEndpoint discards url.Parse's error, and it is the single easiest
 // privacy regression on this path: wrapping reads as diligence and leaks the
 // endpoint into every log line a caller writes.
+//
+// Exported because `remote flush` is the one caller allowed to report a failure,
+// and it must classify one without re-deriving it (ADR-0001: the CLI parses and
+// prints). Their messages stay valueless for that reason too: they are printed
+// verbatim.
 var (
-	errDeliveryFailed   = errors.New("the remote endpoint could not be reached")
-	errDeliveryRejected = errors.New("the remote endpoint rejected a batch")
+	ErrDeliveryFailed   = errors.New("the remote endpoint could not be reached")
+	ErrDeliveryRejected = errors.New("the remote endpoint rejected a batch")
 )
+
+// Report is what one flush did, in counts and nothing else. It exists because
+// "reports what it sent" is data internal/cli cannot invent and must not derive
+// by differencing Describe across the call (ADR-0001).
+//
+// Every field is a count. There is no free-text field and no field that could
+// hold one, for the reason Status has none; TestReportFieldsAreExactly asserts
+// the field list and the types.
+type Report struct {
+	// Batches is how many batches the receiver accepted.
+	Batches int
+	// Records is how many records those batches carried.
+	Records int
+	// Dropped is how many records the encoder refused, within accepted batches.
+	// Reported rather than discarded so a deliberate flush can say it was partly
+	// blind (plan §12).
+	Dropped int
+}
 
 // deliveryClient is the only outbound HTTP client in the binary, and it is a
 // variable so a test can give it a sub-second timeout — the idiom
@@ -100,56 +123,74 @@ var deliveryClient = &http.Client{Timeout: requestTimeout}
 // a failure (ADR-0016) and hands the returned error to internal/cli's discard;
 // the error exists for `remote flush`, which a user ran deliberately.
 //
+// FlushReport is the same run with counts; this is the silent entry point the
+// hook-invoked path uses, which is forbidden to report anything (ADR-0016).
+func Flush(p config.Paths) error {
+	_, err := FlushReport(p)
+	return err
+}
+
+// FlushReport is Flush with the counts a deliberate `remote flush` prints.
+//
+// It is the only place in this codebase that opens an outbound connection, and
+// it is compiled only under the remote build tag: the default binary links no
+// network client at all (ADR-0012, ADR-0026).
+//
 // The order of the first two steps is the acceptance criterion "assert no
 // request is ever constructed when the endpoint is unset or state is off": the
 // credential store is consulted before anything else happens, and a build that
 // is off returns before a lock file, a state file, or a request exists.
-func Flush(p config.Paths) error {
+func FlushReport(p config.Paths) (Report, error) {
 	auth, err := config.LoadRemoteAuth(p)
 	if err != nil {
 		// Returned as-is. ADR-0028 already guarantees this package's errors name
 		// neither the endpoint nor the credential, so wrapping would only add a
 		// sentence this package cannot check.
-		return err
+		return Report{}, err
 	}
 	if !auth.Enabled || auth.Endpoint == "" || auth.Credential == "" {
-		return nil
+		return Report{}, nil
 	}
 
 	cfg, err := config.Load(p)
 	if err != nil {
-		return err
+		return Report{}, err
 	}
 	// The sentinel bool is discarded because remote.min_interval registers no
 	// sentinel words: there is no "never" for it, so every value is a duration.
 	minInterval, _, err := cfg.Duration(minIntervalKey)
 	if err != nil {
-		return err
+		return Report{}, err
 	}
 
 	// Single-flight, not a queue. TryWithLock reports a skipped run as
 	// (false, nil), and a skipped run is a correct outcome rather than a
-	// failure: whatever this flush would have sent, the holder is sending.
+	// failure: whatever this flush would have sent, the holder is sending. The
+	// report stays the zero value in that case, which is the honest answer: this
+	// run sent nothing.
+	var report Report
 	_, err = lockfile.TryWithLock(filepath.Join(p.DataDir, deliveryLockName), func() error {
-		return flushLocked(p, auth, minInterval)
+		var flushErr error
+		report, flushErr = flushLocked(p, auth, minInterval)
+		return flushErr
 	})
-	return err
+	return report, err
 }
 
 // flushLocked is the run itself, with the single-flight lock held.
-func flushLocked(p config.Paths, auth config.RemoteAuth, minInterval time.Duration) error {
+func flushLocked(p config.Paths, auth config.RemoteAuth, minInterval time.Duration) (Report, error) {
 	statePath := deliveryStatePath(p)
 	state := readDeliveryState(statePath)
 	startedAt := time.Now().UTC()
 
 	if suppressed(state.LastFlush, startedAt, minInterval) {
-		return nil
+		return Report{}, nil
 	}
 
 	events := store.New(eventsPath(p))
 	head, err := events.Head()
 	if err != nil {
-		return err
+		return Report{}, err
 	}
 	// Self-heal after a rebuild. `ingest --rebuild` calls store.Discard and
 	// re-derives the spool, so positions shift; a watermark past head means the
@@ -168,19 +209,20 @@ func flushLocked(p config.Paths, auth config.RemoteAuth, minInterval time.Durati
 	// what ADR-0018 rejected.
 	entries, err := events.Entries(state.Position)
 	if err != nil {
-		return err
+		return Report{}, err
 	}
 
+	var report Report
 	var deliveryErr error
 	for _, batch := range batches(entries) {
-		// Encode's dropped count is deliberately discarded. A record the encoder
-		// refuses is one it will refuse on every future run, so holding the
-		// watermark behind it would stall delivery permanently — and this
-		// package has nowhere to report it: the hook-invoked path may not print
-		// (ADR-0016) and Status' field list is fixed by ADR-0018's visibility
-		// model. Surfacing it belongs in a health.Report counter, which is a
-		// schema bump on a shared untagged file and therefore its own ticket.
-		payload, _, encodeErr := Encode(recordsOf(batch))
+		// Encode's dropped count is kept and reported. A record the encoder
+		// refuses is one it will refuse on every future run, so the watermark
+		// still advances past it — holding it back would stall delivery
+		// permanently — but a user who ran `remote flush` deliberately is
+		// someone this can be told, which is what Report exists for. The
+		// hook-invoked path still discards it, because it may not print at all
+		// (ADR-0016).
+		payload, dropped, encodeErr := Encode(recordsOf(batch))
 		if encodeErr != nil {
 			deliveryErr = encodeErr
 			break
@@ -199,6 +241,9 @@ func flushLocked(p config.Paths, auth config.RemoteAuth, minInterval time.Durati
 			break
 		}
 		state.Position = batch[len(batch)-1].Position
+		report.Batches++
+		report.Records += len(batch) - dropped
+		report.Dropped += dropped
 	}
 
 	// Written on the failure path too, and deliberately. The partial position
@@ -207,7 +252,7 @@ func flushLocked(p config.Paths, auth config.RemoteAuth, minInterval time.Durati
 	// every single trigger — which is what the minimum interval exists to
 	// prevent.
 	state.LastFlush = startedAt
-	return errors.Join(deliveryErr, writeDeliveryState(statePath, state))
+	return report, errors.Join(deliveryErr, writeDeliveryState(statePath, state))
 }
 
 // suppressed reports whether the minimum interval has not elapsed yet.
@@ -313,7 +358,7 @@ func post(endpoint, credential string, body []byte) error {
 		// Replaced, not wrapped: NewRequest's error embeds the URL it could not
 		// parse. Unreachable in practice — config validated the endpoint as an
 		// absolute http:// or https:// URL on the way in.
-		return errDeliveryFailed
+		return ErrDeliveryFailed
 	}
 	req.Header.Set(contentTypeHeader, contentTypeJSON)
 	req.Header.Set(contentEncodingHeader, encodingGzip)
@@ -322,7 +367,7 @@ func post(endpoint, credential string, body []byte) error {
 
 	resp, err := deliveryClient.Do(req)
 	if err != nil {
-		return errDeliveryFailed
+		return ErrDeliveryFailed
 	}
 	// Drained before the status is judged, so the connection is reusable for the
 	// next batch of the same run.
@@ -332,14 +377,14 @@ func post(endpoint, credential string, body []byte) error {
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		// The status code is a number this package produced no part of, so it is
 		// safe to name and is the one thing worth naming.
-		return fmt.Errorf("status %d: %w", resp.StatusCode, errDeliveryRejected)
+		return fmt.Errorf("status %d: %w", resp.StatusCode, ErrDeliveryRejected)
 	}
 	if copyErr != nil || closeErr != nil {
 		// The batch was accepted but the exchange did not complete cleanly, so
 		// the run stops here without advancing. That costs a re-send, which the
 		// receiver collapses. Valueless for the same reason Do's error is: a
 		// transport error on this side can carry the connection's address too.
-		return errDeliveryFailed
+		return ErrDeliveryFailed
 	}
 	return nil
 }

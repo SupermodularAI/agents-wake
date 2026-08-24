@@ -57,6 +57,10 @@ var frozenPackageImports = map[string][]string{
 		"path/filepath",
 		"time",
 	},
+	"preview.go": {
+		"github.com/SupermodularAI/agents-wake/internal/config",
+		"github.com/SupermodularAI/agents-wake/internal/store",
+	},
 	"state.go": {
 		"github.com/SupermodularAI/agents-wake/internal/config",
 		"github.com/SupermodularAI/agents-wake/internal/store",
