@@ -24,6 +24,10 @@ import (
 // another one — see the comment on deliveryClient itself.
 func testPaths(t *testing.T) config.Paths {
 	t.Helper()
+	// Cleared rather than left alone: a developer with the override exported in
+	// their shell would otherwise run a suite in which every "no credential"
+	// case silently has one.
+	t.Setenv(config.EnvRemoteAuthorization, "")
 	paths := config.Paths{ConfigDir: filepath.Join(t.TempDir(), "config"), DataDir: filepath.Join(t.TempDir(), "data")}
 	paths.ConfigFile = filepath.Join(paths.ConfigDir, "config.toml")
 	paths.SaltFile = filepath.Join(paths.ConfigDir, "salt.bin")

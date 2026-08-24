@@ -23,7 +23,7 @@ const (
 	// this one would report a position that means something else, and a position
 	// that means something else is either a re-send of everything or a permanent
 	// skip. An unrecognised version is refused instead — the rule health.json
-	// and remote-auth.json both follow.
+	// and internal/config's own versioned stores both follow.
 	deliveryStateVersion = 1
 
 	// deliveryStateFileMode is the mode the file is written with. It holds no
