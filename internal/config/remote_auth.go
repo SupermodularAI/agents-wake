@@ -162,6 +162,24 @@ type remoteAuthFile struct {
 
 // LoadRemoteAuth reads the store and applies the environment override.
 //
+// It is what every consumer of the credential calls. The write paths in this
+// file deliberately do not: see storedRemoteAuth.
+func LoadRemoteAuth(p Paths) (RemoteAuth, error) {
+	auth, err := storedRemoteAuth(p)
+	if err != nil {
+		return RemoteAuth{}, err
+	}
+	return withEnvCredential(auth), nil
+}
+
+// storedRemoteAuth is what the file holds, before EnvRemoteAuthorization is
+// applied.
+//
+// Every write path reads through it rather than through LoadRemoteAuth, because
+// writing back a value LoadRemoteAuth produced would persist the environment's
+// credential to disk — the one thing ADR-0028 says that override must never do,
+// and a leak that would leave a store looking entirely ordinary.
+//
 // A missing store is not an error: a fresh install has none, and asking whether
 // delivery is on must not write one — the rule a missing config.toml and a
 // missing project table already follow. The answer is the zero value, which
@@ -192,7 +210,7 @@ type remoteAuthFile struct {
 // literal here, the fault is a sentinel carrying no value, and a decode failure
 // goes through parseFailure — the decoder's own message embeds the offending
 // bytes, and the bytes here are the credential (plan §4.2).
-func LoadRemoteAuth(p Paths) (RemoteAuth, error) {
+func storedRemoteAuth(p Paths) (RemoteAuth, error) {
 	path := remoteAuthPath(p)
 
 	if err := checkStateDir(p.ConfigDir); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -203,14 +221,14 @@ func LoadRemoteAuth(p Paths) (RemoteAuth, error) {
 		if !errors.Is(err, fs.ErrNotExist) {
 			return RemoteAuth{}, fmt.Errorf("the remote credential store %w", err)
 		}
-		return withEnvCredential(RemoteAuth{}), nil
+		return RemoteAuth{}, nil
 	}
 
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		// The race between the check and the read: the store was removed in
 		// between, which is the same answer as never having had one.
-		return withEnvCredential(RemoteAuth{}), nil
+		return RemoteAuth{}, nil
 	}
 	if err != nil {
 		// Not wrapped with a message: fs.ErrNotExist is the control-flow signal
@@ -233,14 +251,14 @@ func LoadRemoteAuth(p Paths) (RemoteAuth, error) {
 		Enabled:    stored.Enabled,
 		Credential: stored.Credential,
 	}
-	// Validated before the override is applied, because the override carries no
-	// endpoint: what is checked here is what the file says, which is the whole of
-	// what decides where a credential goes.
+	// Validated here rather than at the caller, because the override carries no
+	// endpoint: what is checked is what the file says, which is the whole of what
+	// decides where a credential goes.
 	if err := validateRemoteAuth(auth); err != nil {
 		return RemoteAuth{}, fmt.Errorf("the remote endpoint in the credential store %w", err)
 	}
 
-	return withEnvCredential(auth), nil
+	return auth, nil
 }
 
 // withEnvCredential applies EnvRemoteAuthorization to a value read from disk.
@@ -300,6 +318,76 @@ func SetRemoteAuth(p Paths, a RemoteAuth) error {
 	data = append(data, '\n')
 
 	return atomicfile.Publish(remoteAuthPath(p), data, remoteAuthFileMode)
+}
+
+// RemoteEndpointHost reports the host and port of the configured endpoint and
+// nothing else about it — no scheme, no path, no query, no userinfo, and never
+// the credential. An empty result means no endpoint is configured.
+//
+// It is what `remote status` prints, and ADR-0029 is the decision that lets it:
+// ADR-0028's "never echo what was read" is narrowed by exactly one carve-out —
+// a bare host, on stdout, in answer to a command a human just typed. The host is
+// the part of a URL that is not a secret; the path, the query and the userinfo
+// are where one hides, which is why url.Host is the whole of what this returns.
+//
+// It is a function here rather than a field on remote.Status deliberately. That
+// struct is what `doctor` renders and people paste into issues, so it carries
+// presence only — and keeping the value on a separate entry point is what stops
+// the pasteable surface from growing it by accident (ADR-0029, ADR-0007).
+func RemoteEndpointHost(p Paths) (string, error) {
+	auth, err := storedRemoteAuth(p)
+	if err != nil {
+		return "", err
+	}
+	return endpointHost(auth.Endpoint), nil
+}
+
+// endpointHost is url.Host — host and port, with userinfo, the path and the
+// query deliberately dropped. url.Parse's error is discarded for the reason
+// isHTTPEndpoint discards it: it embeds the URL it failed on.
+func endpointHost(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return u.Host
+}
+
+// SetRemoteEndpoint writes a destination and its credential as one unit,
+// preserving whatever on/off state the store already held.
+//
+// Rotating a credential on a paused endpoint must not silently resume delivery,
+// for the same reason `remote off` must not clear the endpoint: the state the
+// user put the machine in is theirs, and a command that quietly undoes it is the
+// hostility ADR-0018 rejects (ADR-0028).
+func SetRemoteEndpoint(p Paths, endpoint, credential string) error {
+	stored, err := storedRemoteAuth(p)
+	if err != nil {
+		return err
+	}
+	return SetRemoteAuth(p, RemoteAuth{Endpoint: endpoint, Enabled: stored.Enabled, Credential: credential})
+}
+
+// SetRemoteEnabled turns delivery on or off without touching the endpoint or the
+// credential.
+//
+// Already-in-that-state is a no-op that writes nothing, so `remote off` on a
+// machine with nothing configured creates no file: a store holding a secret's
+// shape where there is no secret is the sort of thing a later reader treats as
+// evidence.
+func SetRemoteEnabled(p Paths, enabled bool) error {
+	stored, err := storedRemoteAuth(p)
+	if err != nil {
+		return err
+	}
+	if stored.Enabled == enabled {
+		return nil
+	}
+	stored.Enabled = enabled
+	return SetRemoteAuth(p, stored)
 }
 
 // validateRemoteAuth reports whether a value is one this build will store and

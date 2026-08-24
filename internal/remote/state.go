@@ -13,13 +13,15 @@ import (
 // not a renderer: one aggregation, several renderers over the same value, and no
 // formatting decision in this package (ADR-0011).
 //
-// It carries endpoint *presence* and never the endpoint itself, and no
-// credential, path, or label. ADR-0018 § Command surface listed "endpoint" among
-// what `remote status` reports; ADR-0028 is later and narrower — "never echo
-// what was read" — and the narrower constraint governs. Presence still answers
-// ADR-0012's requirement that `doctor` state whether an endpoint is configured,
-// which is the question a bug report needs answered, and `doctor` output is what
-// people paste into issues.
+// It carries endpoint and credential *presence* and never either value, and no
+// path or label. ADR-0018 § Command surface listed "endpoint" among what
+// `remote status` reports and ADR-0028 said never to echo what was read;
+// ADR-0029 settled the two by consumer rather than by seniority. This struct is
+// the one `doctor` renders, and `doctor` output is what people paste into
+// issues, so it answers presence — which is also exactly what ADR-0012 asks
+// `doctor` for. The host that the person who configured it asked to see is
+// rendered by internal/cli from config.RemoteEndpointHost, which is a separate
+// entry point precisely so this struct cannot grow the value by accident.
 //
 // Every field is a bool, a count, or a time. There is no free-text field and no
 // field that could hold one, which is health.Report's rule for the same reason:
@@ -29,6 +31,16 @@ type Status struct {
 	// EndpointConfigured is whether a destination is set, and nothing about
 	// what it is.
 	EndpointConfigured bool
+	// CredentialConfigured is whether anything authorises the delivery —
+	// either the store or EnvRemoteAuthorization — and nothing about what.
+	//
+	// It is here because it is the third of the three conditions Flush gates
+	// on, and a caller that can see only the other two renders an endpoint
+	// that is on with no credential as a healthy configuration while every
+	// flush delivers nothing (plan §12: "collects nothing" is not "collects
+	// zero"). Presence and never more: a credential has no bare-host
+	// analogue, because every byte of it is the secret (ADR-0029).
+	CredentialConfigured bool
 	// Enabled is whether delivery happens at all. False with an endpoint
 	// configured is a legitimate state — it is how delivery is turned off
 	// without discarding where it was going.
@@ -68,13 +80,17 @@ func Describe(p config.Paths) (Status, error) {
 		delivered = 0
 	}
 
-	// The endpoint is mapped to a bool here and the value is discarded in the
-	// same expression. Nothing below this line holds it.
+	// Both secrets are mapped to a bool here and the values are discarded in
+	// the same expression. Nothing below this line holds either. The credential
+	// is read through LoadRemoteAuth, so the environment override counts as
+	// configured: what is reported is what would authorise a delivery, not what
+	// a file happens to hold (ADR-0028).
 	return Status{
-		EndpointConfigured: auth.Endpoint != "",
-		Enabled:            auth.Enabled,
-		LastFlush:          state.LastFlush,
-		DeliveredThrough:   delivered,
-		Pending:            head - delivered,
+		EndpointConfigured:   auth.Endpoint != "",
+		CredentialConfigured: auth.Credential != "",
+		Enabled:              auth.Enabled,
+		LastFlush:            state.LastFlush,
+		DeliveredThrough:     delivered,
+		Pending:              head - delivered,
 	}, nil
 }

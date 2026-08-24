@@ -13,6 +13,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -221,8 +223,8 @@ func TestServerErrorLeavesWatermarkUntouched(t *testing.T) {
 	if err == nil {
 		t.Fatal("Flush() error = nil, want a delivery failure")
 	}
-	if !errors.Is(err, errDeliveryRejected) {
-		t.Errorf("Flush() error = %v, want errDeliveryRejected", err)
+	if !errors.Is(err, ErrDeliveryRejected) {
+		t.Errorf("Flush() error = %v, want ErrDeliveryRejected", err)
 	}
 	if got := storedPosition(t, paths); got != 0 {
 		t.Errorf("position = %d, want 0 — a rejected batch must not advance the watermark", got)
@@ -351,8 +353,8 @@ func assertPromptFailure(t *testing.T, paths config.Paths) {
 	if err == nil {
 		t.Fatal("Flush() error = nil, want a transport failure")
 	}
-	if !errors.Is(err, errDeliveryFailed) {
-		t.Errorf("Flush() error = %v, want errDeliveryFailed", err)
+	if !errors.Is(err, ErrDeliveryFailed) {
+		t.Errorf("Flush() error = %v, want ErrDeliveryFailed", err)
 	}
 	if elapsed > 2*time.Second {
 		t.Errorf("Flush() took %v, want under 2s — no command may wait on the network", elapsed)
@@ -710,5 +712,88 @@ func TestStoreIsNotMutated(t *testing.T) {
 	}
 	if !bytes.Equal(before, after) {
 		t.Error("delivery rewrote the spool: the store is append-only and carries no delivered flag")
+	}
+}
+
+// TestFlushReportCountsWhatItSent is the data `remote flush` prints. It is
+// counted here rather than derived in internal/cli by differencing Describe
+// across the call, which would be a second, subtly different answer to a
+// question this package already knows (ADR-0001).
+func TestFlushReportCountsWhatItSent(t *testing.T) {
+	paths := testPaths(t)
+	_, endpoint := serve(t, http.StatusOK)
+	enable(t, paths, endpoint)
+	seed(t, paths, 3)
+
+	report, err := FlushReport(paths)
+	if err != nil {
+		t.Fatalf("FlushReport() error = %v", err)
+	}
+	if report.Batches != 1 {
+		t.Errorf("Batches = %d, want 1", report.Batches)
+	}
+	if report.Records != 3 {
+		t.Errorf("Records = %d, want 3", report.Records)
+	}
+	if report.Dropped != 0 {
+		t.Errorf("Dropped = %d, want 0", report.Dropped)
+	}
+}
+
+// A run that sent nothing reports nothing. The zero value is what lets
+// `remote flush` distinguish "delivery is off" from "delivered zero records"
+// without a second flag saying which (plan §12).
+func TestFlushReportIsZeroWhenDeliveryIsOff(t *testing.T) {
+	paths := testPaths(t)
+	seed(t, paths, 3)
+
+	report, err := FlushReport(paths)
+	if err != nil {
+		t.Fatalf("FlushReport() error = %v", err)
+	}
+	if report != (Report{}) {
+		t.Errorf("Report = %+v, want the zero value", report)
+	}
+}
+
+// The counts must describe what the receiver accepted, not what the run
+// attempted. A report that counted the refused batch would tell a user 501
+// records left the machine when 500 did.
+func TestFlushReportCountsOnlyAcceptedBatches(t *testing.T) {
+	paths := testPaths(t)
+	_, endpoint := serve(t, http.StatusOK, http.StatusInternalServerError)
+	enable(t, paths, endpoint)
+	seed(t, paths, maxBatchRecords+1)
+
+	report, err := FlushReport(paths)
+	if err == nil {
+		t.Fatal("FlushReport() error = nil, want the second batch's failure")
+	}
+	if report.Batches != 1 {
+		t.Errorf("Batches = %d, want 1 — only the accepted batch counts", report.Batches)
+	}
+	if report.Records != maxBatchRecords {
+		t.Errorf("Records = %d, want %d", report.Records, maxBatchRecords)
+	}
+}
+
+// TestReportFieldsAreExactly mirrors TestStatusFieldsAreExactly for the struct
+// DG-66 adds. Equality rather than containment: `remote flush` prints this, and
+// the temptation a later change will feel is to add "and here is why" as a
+// string (ADR-0007).
+func TestReportFieldsAreExactly(t *testing.T) {
+	want := []string{"Batches", "Records", "Dropped"}
+
+	reportType := reflect.TypeOf(Report{})
+	got := make([]string, 0, reportType.NumField())
+	for i := range reportType.NumField() {
+		field := reportType.Field(i)
+		got = append(got, field.Name)
+		if field.Type.Kind() != reflect.Int {
+			t.Errorf("Report.%s is %s, want an int — every field is a count", field.Name, field.Type)
+		}
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("Report fields = %v, want exactly %v", got, want)
 	}
 }
