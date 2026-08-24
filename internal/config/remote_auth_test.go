@@ -760,6 +760,39 @@ func TestSetRemoteEndpointPreservesTheStoredEnabledState(t *testing.T) {
 	}
 }
 
+// An empty credential is a destination configured with no secret on disk, which
+// ADR-0028 explicitly provides for: the environment supplies it, or nothing
+// does and delivery reports that rather than attempting it.
+//
+// It clears whatever the store held, and that is the point rather than a cost: a
+// destination and its credential are one unit, and carrying the previous
+// endpoint's credential over to a new one would post a secret issued by one
+// service to a different service entirely.
+func TestSetRemoteEndpointAcceptsNoCredential(t *testing.T) {
+	const replacementEndpoint = "https://remote-auth-replacement-host.example/v1/traces"
+
+	p := remoteTestPaths(t)
+	setRemoteAuthOrFail(t, p)
+
+	if err := SetRemoteEndpoint(p, replacementEndpoint, ""); err != nil {
+		t.Fatalf("SetRemoteEndpoint() = %v", err)
+	}
+
+	got, err := LoadRemoteAuth(p)
+	if err != nil {
+		t.Fatalf("LoadRemoteAuth() = %v", err)
+	}
+	if got.Endpoint != replacementEndpoint {
+		t.Error("Endpoint was not replaced by the one supplied")
+	}
+	if got.Credential != "" {
+		t.Error("Credential survived: the previous endpoint's secret would be posted to a new destination")
+	}
+	if strings.Contains(readFileOrFail(t, remoteAuthPath(p)), testCredential) {
+		t.Error("the store still holds the previous credential")
+	}
+}
+
 // The write path's half of ADR-0028: what lands on disk is the argument's
 // credential, never whatever the environment happened to carry.
 func TestSetRemoteEndpointNeverPersistsTheEnvironmentCredential(t *testing.T) {

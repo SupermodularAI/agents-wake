@@ -324,10 +324,16 @@ func SetRemoteAuth(p Paths, a RemoteAuth) error {
 // nothing else about it — no scheme, no path, no query, no userinfo, and never
 // the credential. An empty result means no endpoint is configured.
 //
-// It is what `remote status` prints, and it is a function here rather than a
-// field on remote.Status because ADR-0018's visibility model fixes that struct's
-// field list: presence is what a pasted diagnostic may carry, while a host is
-// what the person who configured it asked to see (ADR-0028, ADR-0007).
+// It is what `remote status` prints, and ADR-0029 is the decision that lets it:
+// ADR-0028's "never echo what was read" is narrowed by exactly one carve-out —
+// a bare host, on stdout, in answer to a command a human just typed. The host is
+// the part of a URL that is not a secret; the path, the query and the userinfo
+// are where one hides, which is why url.Host is the whole of what this returns.
+//
+// It is a function here rather than a field on remote.Status deliberately. That
+// struct is what `doctor` renders and people paste into issues, so it carries
+// presence only — and keeping the value on a separate entry point is what stops
+// the pasteable surface from growing it by accident (ADR-0029, ADR-0007).
 func RemoteEndpointHost(p Paths) (string, error) {
 	auth, err := storedRemoteAuth(p)
 	if err != nil {
