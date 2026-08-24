@@ -5,9 +5,12 @@ package remote
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"go/parser"
 	"go/token"
 	"math"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -937,6 +940,88 @@ func TestPayloadHasNoPathSeparator(t *testing.T) {
 				t.Fatal("payload contains a backslash")
 			}
 		})
+	}
+}
+
+// update rewrites the golden fixture instead of comparing against it. The
+// fixture is generated, never hand-written — a hand-edited golden is a golden
+// that agrees with whatever the code did.
+var update = flag.Bool("update", false, "rewrite testdata/golden.json")
+
+// goldenBatch is the fixed input behind testdata/golden.json: a fully populated
+// record, a minimal one, and a denied one with no reported duration. The third
+// exists because it is the combination most likely to regress — UNSET status
+// that must not become OK, and an omitted duration attribute that must not
+// become zero.
+func goldenBatch() []record.Record {
+	denied := fullRecord()
+	denied.EventID = record.DeriveEventID("claude-code", "source-event-3")
+	denied.Outcome = ptr(record.OutcomeDeniedUser)
+	denied.DurationMS = nil
+	return []record.Record{fullRecord(), validRecord(), denied}
+}
+
+// TestEncodeIsDeterministic pins the property the spool's replay safety rests
+// on: the same records always produce the same bytes, so a re-send is a
+// duplicate a receiver can drop rather than a second, differently-shaped event.
+//
+// It holds because attributes are built as a slice in fixed source order. Ranging
+// a map anywhere in the encoder would break it, and would break it
+// intermittently, which is the worst way for it to break.
+func TestEncodeIsDeterministic(t *testing.T) {
+	records := goldenBatch()
+	first, _, err := Encode(records)
+	if err != nil {
+		t.Fatalf("Encode() first error = %v", err)
+	}
+	for i := range 32 {
+		next, _, err := Encode(records)
+		if err != nil {
+			t.Fatalf("Encode() run %d error = %v", i, err)
+		}
+		if !bytes.Equal(first, next) {
+			t.Fatalf("Encode() run %d differs:\n%s\n%s", i, first, next)
+		}
+	}
+}
+
+// TestGoldenPayload is the human-review surface: the one place a reviewer can
+// read exactly what leaves the machine, rather than infer it from assertions.
+//
+// The fixture is stored indented for that reason, and it lives in this package's
+// own testdata/ — not the repo-root testdata/, which AGENTS.md reserves for
+// harness fixtures captured through the redaction tooling.
+func TestGoldenPayload(t *testing.T) {
+	payload, dropped, err := Encode(goldenBatch())
+	if err != nil {
+		t.Fatalf("Encode() error = %v", err)
+	}
+	if dropped != 0 {
+		t.Fatalf("Encode() dropped = %d, want 0", dropped)
+	}
+
+	var indented bytes.Buffer
+	if err = json.Indent(&indented, payload, "", "  "); err != nil {
+		t.Fatalf("json.Indent() error = %v", err)
+	}
+	indented.WriteByte('\n')
+
+	goldenPath := filepath.Join("testdata", "golden.json")
+	if *update {
+		if err = os.WriteFile(goldenPath, indented.Bytes(), 0o644); err != nil {
+			t.Fatalf("writing %s: %v", goldenPath, err)
+		}
+		t.Logf("wrote %s", goldenPath)
+		return
+	}
+
+	want, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatalf("reading %s (regenerate with -update): %v", goldenPath, err)
+	}
+	if !bytes.Equal(indented.Bytes(), want) {
+		t.Fatalf("payload differs from %s (regenerate with -update after reviewing the change):\ngot:\n%s\nwant:\n%s",
+			goldenPath, indented.Bytes(), want)
 	}
 }
 
