@@ -42,6 +42,15 @@ var frozenPackageImports = map[string][]string{
 		"math",
 		"strconv",
 	},
+	"watermark.go": {
+		"encoding/json",
+		"github.com/SupermodularAI/agents-wake/internal/atomicfile",
+		"github.com/SupermodularAI/agents-wake/internal/config",
+		"io/fs",
+		"os",
+		"path/filepath",
+		"time",
+	},
 }
 
 // encoderFiles names the files the package doc's no-I/O claim is made about.
