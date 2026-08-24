@@ -782,18 +782,82 @@ func TestFlushReportCountsOnlyAcceptedBatches(t *testing.T) {
 // the temptation a later change will feel is to add "and here is why" as a
 // string (ADR-0007).
 func TestReportFieldsAreExactly(t *testing.T) {
-	want := []string{"Batches", "Records", "Dropped"}
+	want := []string{"Batches", "Records", "Dropped", "Suppressed"}
+	counts := []string{"Batches", "Records", "Dropped"}
 
 	reportType := reflect.TypeOf(Report{})
 	got := make([]string, 0, reportType.NumField())
 	for i := range reportType.NumField() {
 		field := reportType.Field(i)
 		got = append(got, field.Name)
-		if field.Type.Kind() != reflect.Int {
-			t.Errorf("Report.%s is %s, want an int — every field is a count", field.Name, field.Type)
+
+		// A count is an int and everything else is a bool. Stated as an
+		// exhaustive pair rather than as "not a string", because the field this
+		// admits is the first non-count one and the next change will feel the
+		// same temptation the int-only rule was written against: "and here is
+		// why", as a string (ADR-0007).
+		wantKind := reflect.Bool
+		if slices.Contains(counts, field.Name) {
+			wantKind = reflect.Int
+		}
+		if field.Type.Kind() != wantKind {
+			t.Errorf("Report.%s is %s, want %s", field.Name, field.Type, wantKind)
 		}
 	}
 	if !slices.Equal(got, want) {
 		t.Errorf("Report fields = %v, want exactly %v", got, want)
+	}
+}
+
+// A run the minimum interval held back is not a run that read the spool and
+// found nothing: both are three zero counts and a nil error, so the report has
+// to say which happened or `remote flush` cannot (DG-72, Issue 1).
+func TestFlushReportSaysWhenTheMinimumIntervalSuppressedIt(t *testing.T) {
+	paths := testPaths(t)
+	receiver, endpoint := serve(t, http.StatusOK)
+	enable(t, paths, endpoint)
+	setMinInterval(t, paths, "15m")
+	seed(t, paths, 3)
+
+	first, err := FlushReport(paths)
+	if err != nil {
+		t.Fatalf("first FlushReport() error = %v", err)
+	}
+	if first.Suppressed {
+		t.Error("Suppressed = true on the first flush, which nothing held back")
+	}
+
+	seedFrom(t, paths, 3, 3)
+	second, err := FlushReport(paths)
+	if err != nil {
+		t.Fatalf("second FlushReport() error = %v", err)
+	}
+	if !second.Suppressed {
+		t.Error("Suppressed = false, want true — the minimum interval held this run back")
+	}
+	if second.Batches != 0 || second.Records != 0 || second.Dropped != 0 {
+		t.Errorf("counts = %+v, want zeroes — a suppressed run reads nothing", second)
+	}
+	if got := receiver.count(); got != 1 {
+		t.Errorf("requests = %d, want 1", got)
+	}
+}
+
+// The other half of the same distinction: a run that did happen and had nothing
+// to send is not suppressed, and stays the zero value.
+func TestFlushReportIsNotSuppressedWhenThereIsNothingToSend(t *testing.T) {
+	paths := testPaths(t)
+	_, endpoint := serve(t, http.StatusOK)
+	enable(t, paths, endpoint)
+
+	report, err := FlushReport(paths)
+	if err != nil {
+		t.Fatalf("FlushReport() error = %v", err)
+	}
+	if report.Suppressed {
+		t.Error("Suppressed = true for a flush that ran and found nothing pending")
+	}
+	if report != (Report{}) {
+		t.Errorf("Report = %+v, want the zero value", report)
 	}
 }
