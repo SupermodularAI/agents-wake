@@ -337,11 +337,34 @@ func TestEncodeDropsUnrepresentableTimestamps(t *testing.T) {
 	preEpoch := fullRecord()
 	preEpoch.Timestamp = time.Unix(-1, 0).UTC()
 
+	// time.Unix(-1, 0) above is *inside* UnixNano's defined range, so it only
+	// exercises the sign check. These two are outside it, where UnixNano wraps
+	// rather than saturating — and the pre-1678 case wraps to a large POSITIVE
+	// value, which is why a sign check alone let a fabricated year-2184
+	// timestamp onto the wire uncounted.
+	preRepresentable := fullRecord()
+	preRepresentable.Timestamp = time.Date(1600, time.January, 1, 0, 0, 0, 0, time.UTC)
+
+	postRepresentable := fullRecord()
+	postRepresentable.Timestamp = time.Date(3000, time.January, 1, 0, 0, 0, 0, time.UTC)
+
 	overflow := fullRecord()
 	overflow.DurationMS = ptr(int64(math.MaxInt64))
 
-	for name, r := range map[string]record.Record{"pre-epoch": preEpoch, "duration overflow": overflow} {
+	for name, r := range map[string]record.Record{
+		"pre-epoch":         preEpoch,
+		"pre-1678 wrap":     preRepresentable,
+		"post-2262 wrap":    postRepresentable,
+		"duration overflow": overflow,
+	} {
 		t.Run(name, func(t *testing.T) {
+			// record.Validate imposes no range on Timestamp, so every row here
+			// is a *valid* record the encoder must still refuse. Asserting that
+			// first keeps the test honest: without it a row could pass because
+			// encodeSpan's Validate gate dropped it, never reaching spanTimes.
+			if err := record.Validate(r); err != nil {
+				t.Fatalf("fixture is not a valid record, so the drop would prove nothing: %v", err)
+			}
 			payload, dropped, err := Encode([]record.Record{r})
 			if err != nil {
 				t.Fatalf("Encode() error = %v", err)

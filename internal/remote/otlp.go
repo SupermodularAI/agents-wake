@@ -90,7 +90,17 @@ const (
 	codeOK    = 1
 	codeError = 2
 
-	nanosPerMilli = int64(1_000_000)
+	nanosPerMilli  = int64(1_000_000)
+	nanosPerSecond = int64(1_000_000_000)
+
+	// maxUnixSecond bounds spanTimes' input. time.Time.UnixNano() is documented
+	// as undefined outside roughly 1678-2262, and it wraps there rather than
+	// saturating, so it cannot be used to detect its own overflow. Unix() is
+	// exact at every time a time.Time can hold, so the whole seconds are what
+	// gets range-checked. The -1 gives the sub-second remainder room: at exactly
+	// MaxInt64/nanosPerSecond the nanoseconds within that final second could
+	// still carry the product past MaxInt64.
+	maxUnixSecond = math.MaxInt64/nanosPerSecond - 1
 
 	zeroTraceID = "00000000000000000000000000000000"
 	zeroSpanID  = "0000000000000000"
@@ -310,12 +320,26 @@ func spanID(r record.Record) string { return string(r.EventID)[:16] }
 // guessed duration would state a number nobody measured (ADR-0005's rule applied
 // to time — unknown is never filled in).
 func spanTimes(r record.Record) (start, end string, ok bool) {
-	startNano := r.Timestamp.UTC().UnixNano()
-	// OTLP's nano fields are unsigned; a pre-epoch timestamp has no
-	// representation, so the record is dropped rather than wrapped.
-	if startNano < 0 {
+	// Range-check the seconds BEFORE converting to nanoseconds. Two distinct
+	// classes are rejected here and both must be, because both are silent:
+	//
+	//   - Pre-epoch. OTLP's nano fields are unsigned, so a timestamp before
+	//     1970 has no representation on the wire at all.
+	//   - Outside UnixNano's defined range (~1678-2262). UnixNano wraps there
+	//     instead of saturating, and a pre-1678 timestamp wraps to a large
+	//     POSITIVE value — year 1600 comes out as year 2184. A sign check on
+	//     the converted value cannot see that, which is why the check happens
+	//     on Unix() seconds instead.
+	//
+	// Either way the record is dropped and counted, never wrapped: a fabricated
+	// timestamp would land in a receiver store that can never be rebuilt from
+	// our side (ADR-0027), so a definite-looking wrong number is worse than a
+	// reported blind spot (plan §12).
+	sec := r.Timestamp.UTC().Unix()
+	if sec < 0 || sec > maxUnixSecond {
 		return "", "", false
 	}
+	startNano := r.Timestamp.UTC().UnixNano()
 	endNano := startNano
 	if r.DurationMS != nil {
 		// Checked before the multiply, not after: signed overflow would
