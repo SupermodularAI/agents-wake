@@ -208,8 +208,10 @@ func spanAttributes(r record.Record) []keyValue {
 	// groups traces by. It is the same already-bounded token, not a second value.
 	attrs = appendString(attrs, "langfuse.session.id", string(r.SessionID))
 	// wake.repo is the hashed id and only the hashed id. The repository label
-	// and path never leave the local store, and this package never reads
-	// projects.json — it has no filesystem access at all (plan §3.4, §9).
+	// and path never leave the local store; this package could not read them if
+	// it wanted to, because it has no filesystem access at all. The local
+	// hash-to-label map is internal/config's business and is named nowhere else
+	// in the module, by test (plan §3.4, §9).
 	attrs = appendString(attrs, "wake.repo", string(r.Repo))
 	attrs = appendString(attrs, "wake.package", string(r.Package))
 	attrs = appendString(attrs, "wake.package_version", string(r.PackageVersion))
