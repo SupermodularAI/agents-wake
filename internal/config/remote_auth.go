@@ -107,7 +107,9 @@ var (
 // so a field added later has to be justified there (ADR-0007).
 type RemoteAuth struct {
 	// Endpoint is the OTLP/HTTP JSON traces endpoint records are posted to
-	// (ADR-0027). Absolute, http:// or https://, validated on the way in.
+	// (ADR-0027). Absolute, http:// or https://, validated on the way in and
+	// again on the way out — validateRemoteAuth is the one spelling of that rule,
+	// so a value this build never wrote cannot arrive through the file.
 	Endpoint string
 	// Enabled is whether delivery happens at all. False with an endpoint set is
 	// a legitimate state — it is how delivery is turned off without discarding
@@ -174,12 +176,28 @@ type remoteAuthFile struct {
 // never rewritten from a failed parse: those bytes are the only copy of the
 // credential there is.
 //
+// The config root is checked before the file is touched, for the reason
+// OpenRepos gives: the mode of a file is only as strong as the directory holding
+// it. checkSensitiveFile tests type and mode and never ownership, so in a
+// directory anyone else can write, another local user can rename their own 0600
+// file over this one — their credential, their endpoint — and every file-level
+// check would still pass. A directory that does not exist yet is not a fault.
+//
+// The endpoint is validated here as well as in SetRemoteAuth. The write path
+// only governs stores this build wrote; a store it did not write is the one worth
+// checking, and ADR-0027 makes OTLP/HTTP the only surface a credential may be
+// posted to.
+//
 // No refusal names the file, the endpoint or the credential. The role is a fixed
 // literal here, the fault is a sentinel carrying no value, and a decode failure
 // goes through parseFailure — the decoder's own message embeds the offending
 // bytes, and the bytes here are the credential (plan §4.2).
 func LoadRemoteAuth(p Paths) (RemoteAuth, error) {
 	path := remoteAuthPath(p)
+
+	if err := checkStateDir(p.ConfigDir); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return RemoteAuth{}, fmt.Errorf("the configuration directory %w", err)
+	}
 
 	if err := checkSensitiveFile(path); err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
@@ -210,11 +228,19 @@ func LoadRemoteAuth(p Paths) (RemoteAuth, error) {
 			stored.Version, remoteAuthVersion, errRemoteAuthWrongVersion)
 	}
 
-	return withEnvCredential(RemoteAuth{
+	auth := RemoteAuth{
 		Endpoint:   stored.Endpoint,
 		Enabled:    stored.Enabled,
 		Credential: stored.Credential,
-	}), nil
+	}
+	// Validated before the override is applied, because the override carries no
+	// endpoint: what is checked here is what the file says, which is the whole of
+	// what decides where a credential goes.
+	if err := validateRemoteAuth(auth); err != nil {
+		return RemoteAuth{}, fmt.Errorf("the remote endpoint in the credential store %w", err)
+	}
+
+	return withEnvCredential(auth), nil
 }
 
 // withEnvCredential applies EnvRemoteAuthorization to a value read from disk.
@@ -233,16 +259,18 @@ func withEnvCredential(a RemoteAuth) RemoteAuth {
 
 // SetRemoteAuth validates and publishes the store.
 //
-// Validation happens before anything touches disk, so a rejected endpoint leaves
-// no file behind and no half-configured state to explain. ADR-0027 makes
+// Validation happens before anything is written, so a rejected endpoint leaves
+// no file behind and no half-configured state to explain. The rule itself lives
+// in validateRemoteAuth, which the read path applies too. ADR-0027 makes
 // OTLP/HTTP JSON the only integration surface, so an endpoint that is not
 // absolute http:// or https:// is a credential posted somewhere no decision
 // permits. The check is deliberately scheme and host only: no reachability
 // probe, no assertion about the OTLP path, nothing that reads the network.
 //
-// The zero value is accepted and is a legitimate store — it is how delivery is
-// turned off — but Enabled without an endpoint is not, because that state can
-// only fail later, in a background flush nobody is watching.
+// The config root is checked too, for the reason OpenRepos gives: publishing a
+// credential at 0600 into a directory anyone else can write into is publishing a
+// file they can replace, and the mode says nothing about that. A directory that
+// does not exist yet is not a fault — atomicfile creates it at 0700.
 //
 // One publication for all three fields, through atomicfile: a reader sees the
 // old store or the complete new one, the file is chmodded before the rename so
@@ -250,11 +278,11 @@ func withEnvCredential(a RemoteAuth) RemoteAuth {
 // bytes are durable. No second permission check is written here —
 // checkSensitiveFile owns that on the way back in.
 func SetRemoteAuth(p Paths, a RemoteAuth) error {
-	if a.Enabled && a.Endpoint == "" {
-		return fmt.Errorf("the remote endpoint %w", errEndpointRequiredWhenOn)
+	if err := validateRemoteAuth(a); err != nil {
+		return fmt.Errorf("the remote endpoint %w", err)
 	}
-	if a.Endpoint != "" && !isHTTPEndpoint(a.Endpoint) {
-		return fmt.Errorf("the remote endpoint %w", errEndpointNotHTTP)
+	if err := checkStateDir(p.ConfigDir); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("the configuration directory %w", err)
 	}
 
 	data, err := json.MarshalIndent(remoteAuthFile{
@@ -272,6 +300,25 @@ func SetRemoteAuth(p Paths, a RemoteAuth) error {
 	data = append(data, '\n')
 
 	return atomicfile.Publish(remoteAuthPath(p), data, remoteAuthFileMode)
+}
+
+// validateRemoteAuth reports whether a value is one this build will store and
+// act on. One function for both directions: the read path and the write path
+// enforce the same invariant, and two spellings of it would drift into a store
+// that can be read back but never written, or written but never read.
+//
+// The zero value is valid and is a legitimate store — it is how delivery is
+// turned off — but Enabled without an endpoint is not, because that state can
+// only fail later, in a background flush nobody is watching. The returned
+// sentinel names the fault and never the value; the caller names the role.
+func validateRemoteAuth(a RemoteAuth) error {
+	if a.Enabled && a.Endpoint == "" {
+		return errEndpointRequiredWhenOn
+	}
+	if a.Endpoint != "" && !isHTTPEndpoint(a.Endpoint) {
+		return errEndpointNotHTTP
+	}
+	return nil
 }
 
 // isHTTPEndpoint reports whether raw is an absolute http:// or https:// URL with

@@ -183,6 +183,107 @@ func TestLoadRemoteAuthRejectsAStoreMorePermissiveThan0600(t *testing.T) {
 	}
 }
 
+// The fourth leg of the boundary repo-salt and projects.json already stand
+// behind (OpenRepos, identity.go): the mode of a file is only as strong as the
+// directory holding it. In a config root anyone else can write, another local
+// user can rename their own 0600 file over the store between one read and the
+// next — a credential of their choosing posted to a collector of their choosing —
+// and checkSensitiveFile would pass it, because it tests type and mode and never
+// ownership.
+func TestRemoteAuthRefusesAGroupWritableConfigDirectory(t *testing.T) {
+	for _, op := range []struct {
+		name string
+		run  func(p Paths) error
+	}{
+		{"LoadRemoteAuth", func(p Paths) error { _, err := LoadRemoteAuth(p); return err }},
+		{"SetRemoteAuth", func(p Paths) error {
+			return SetRemoteAuth(p, RemoteAuth{Endpoint: testEndpoint, Enabled: true, Credential: testCredential})
+		}},
+	} {
+		for _, mode := range []os.FileMode{0o770, 0o707} {
+			t.Run(op.name+"/"+mode.String(), func(t *testing.T) {
+				p := remoteTestPaths(t)
+				storePath := filepath.Join(p.ConfigDir, remoteAuthFileName)
+				setRemoteAuthOrFail(t, p)
+				before := readFileOrFail(t, storePath)
+				if err := os.Chmod(p.ConfigDir, mode); err != nil {
+					t.Fatalf("Chmod() error = %v", err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(p.ConfigDir, 0o700) })
+
+				err := op.run(p)
+
+				assertDisclosesNothing(t, err, storePath, p.ConfigDir, testEndpoint, testCredential)
+				if after := readFileOrFail(t, storePath); after != before {
+					t.Error("the store was republished into a directory this build refuses to write into")
+				}
+			})
+		}
+	}
+}
+
+// The endpoint is validated on the way in, so it is validated on the way out
+// too: a store this build never wrote is exactly the one worth checking. ADR-0027
+// makes OTLP/HTTP the only integration surface, and a scheme outside it is a
+// credential posted somewhere no decision permits.
+func TestLoadRemoteAuthRejectsAStoredEndpointThatIsNotHTTP(t *testing.T) {
+	for _, endpoint := range []string{
+		"ftp://" + testEndpoint,
+		"file:///" + testCredential,
+		"//" + testEndpoint,
+		"https:///v1/traces",
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			p := remoteTestPaths(t)
+			storePath := filepath.Join(p.ConfigDir, remoteAuthFileName)
+			writeRemoteAuthRaw(t, storePath, fmt.Sprintf(
+				`{"version":1,"endpoint":%q,"enabled":true,"credential":%q}`+"\n", endpoint, testCredential))
+
+			_, err := LoadRemoteAuth(p)
+
+			if !errors.Is(err, errEndpointNotHTTP) {
+				t.Fatalf("LoadRemoteAuth() = %v, want errEndpointNotHTTP", err)
+			}
+			assertDisclosesNothing(t, err, storePath, endpoint, testCredential)
+		})
+	}
+}
+
+// Enabled without a destination can only fail later, in a background flush
+// nobody is watching. SetRemoteAuth refuses to write that state; reading it back
+// from a hand-edited store is the same state and gets the same answer.
+func TestLoadRemoteAuthRejectsAStoreEnabledWithoutAnEndpoint(t *testing.T) {
+	p := remoteTestPaths(t)
+	storePath := filepath.Join(p.ConfigDir, remoteAuthFileName)
+	writeRemoteAuthRaw(t, storePath, fmt.Sprintf(
+		`{"version":1,"endpoint":"","enabled":true,"credential":%q}`+"\n", testCredential))
+
+	_, err := LoadRemoteAuth(p)
+
+	if !errors.Is(err, errEndpointRequiredWhenOn) {
+		t.Fatalf("LoadRemoteAuth() = %v, want errEndpointRequiredWhenOn", err)
+	}
+	assertDisclosesNothing(t, err, storePath, testCredential)
+}
+
+// The mirror of the two cases above: a store with delivery off and no endpoint
+// is the state `remote off` on a fresh install produces, and refusing it would
+// close the check on the correct case.
+func TestLoadRemoteAuthAcceptsADisabledStoreWithNoEndpoint(t *testing.T) {
+	p := remoteTestPaths(t)
+	storePath := filepath.Join(p.ConfigDir, remoteAuthFileName)
+	writeRemoteAuthRaw(t, storePath, fmt.Sprintf(
+		`{"version":1,"endpoint":"","enabled":false,"credential":%q}`+"\n", testCredential))
+
+	got, err := LoadRemoteAuth(p)
+	if err != nil {
+		t.Fatalf("LoadRemoteAuth() = %v, want a disabled store with no endpoint to load", err)
+	}
+	if want := (RemoteAuth{Credential: testCredential}); got != want {
+		t.Errorf("LoadRemoteAuth() = %+v, want %+v", got, want)
+	}
+}
+
 // A store that does not parse is an error, not an empty store: treating it as
 // empty would silently stop delivering. And it is never rewritten from a failed
 // parse — the bytes that failed are the only copy of the credential there is.
@@ -425,6 +526,36 @@ func TestNoRemoteAuthErrorLeaksTheEndpointOrTheCredential(t *testing.T) {
 			name: "a store of an unknown version",
 			run: func(t *testing.T, p Paths, storePath string) error {
 				writeRemoteAuthRaw(t, storePath, storeJSON(remoteAuthVersion+1))
+				_, err := LoadRemoteAuth(p)
+				return err
+			},
+		},
+		{
+			name: "a stored endpoint that is not http",
+			run: func(t *testing.T, p Paths, storePath string) error {
+				writeRemoteAuthRaw(t, storePath, fmt.Sprintf(
+					`{"version":1,"endpoint":%q,"enabled":true,"credential":%q}`, "ftp://"+testEndpoint, testCredential))
+				_, err := LoadRemoteAuth(p)
+				return err
+			},
+		},
+		{
+			name: "a stored enabled flag with no endpoint",
+			run: func(t *testing.T, p Paths, storePath string) error {
+				writeRemoteAuthRaw(t, storePath, fmt.Sprintf(
+					`{"version":1,"endpoint":"","enabled":true,"credential":%q}`, testCredential))
+				_, err := LoadRemoteAuth(p)
+				return err
+			},
+		},
+		{
+			name: "a config root anyone can write into",
+			run: func(t *testing.T, p Paths, _ string) error {
+				setRemoteAuthOrFail(t, p)
+				if err := os.Chmod(p.ConfigDir, 0o777); err != nil {
+					t.Fatalf("Chmod() error = %v", err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(p.ConfigDir, 0o700) })
 				_, err := LoadRemoteAuth(p)
 				return err
 			},
