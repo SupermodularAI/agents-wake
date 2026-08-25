@@ -1389,10 +1389,43 @@ func TestReadDropsAnAttributedRunWithAnUnknownEntrypoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
-	// No candidate is built, so there is no ambiguity to report either — the same
-	// shape the path-shaped attribution refusal already has.
-	if len(result.Records) != 0 || result.AmbiguousSkillRuns != 0 {
-		t.Errorf("Read() = %+v, want no records and no ambiguity", result)
+	// No candidate is built, so there is no ambiguity to report either. The drop is
+	// still lost collection and carries a count: a session whose only trace is an
+	// attributed run would otherwise leave none at all.
+	if len(result.Records) != 0 || result.AmbiguousSkillRuns != 0 || result.Refused != 1 {
+		t.Errorf("Read() = %+v, want no records, no ambiguity and one refusal", result)
+	}
+}
+
+// TestReadCountsEveryRefusedAttributedRun pins the counter to the invocations that
+// were lost rather than to the entries that carried them: two runs of different
+// skills in one session are two records that will never exist.
+func TestReadCountsEveryRefusedAttributedRun(t *testing.T) {
+	input := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"pr-review","entrypoint":"sdk-ts","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","attributionSkill":"commit-message","entrypoint":"sdk-ts","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
+	}, "\n")
+
+	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 0 || result.Refused != 2 {
+		t.Errorf("Read() = %+v, want no records and two refusals", result)
+	}
+}
+
+// TestReadSkipsAnAttributedRunItNeverCollects keeps the refusal counter honest in
+// the other direction: an unconsented repository is outside collection, not lost
+// from it, so nothing about it may reach doctor's "collects nothing" arm.
+func TestReadSkipsAnAttributedRunItNeverCollects(t *testing.T) {
+	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/elsewhere","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"pr-review","entrypoint":"cli","message":{"model":"sonnet","stop_reason":"end_turn"}}`
+	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 0 || result.Refused != 0 {
+		t.Errorf("Read() = %+v, want no records and no refusal", result)
 	}
 }
 

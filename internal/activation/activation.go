@@ -450,8 +450,10 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 			return nil
 		}
 		scan.ParseErrors += result.Malformed
-		// A call the reader could not name is collection that was lost: the primitive
-		// was invoked, the line was perfectly readable, and no number carries it.
+		// An invocation a validated field refused — the reader could not name the
+		// primitive, or the entrypoint carried a value outside Wake's vocabulary — is
+		// collection that was lost: the primitive was invoked, the line was perfectly
+		// readable, and no number carries it.
 		// Counted here so doctor can say so — a harness renaming the field a
 		// primitive's identity lives in would otherwise stop collection in silence
 		// while doctor still reported "collecting" (plan §3.3, §12).

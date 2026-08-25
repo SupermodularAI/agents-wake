@@ -16,8 +16,9 @@ type Result struct {
 	Parsed    int
 	Malformed int
 	Pending   int
-	// Refused is the reader's count of calls a validated field refused — the
-	// primitive's own name, or an entrypoint outside Wake's vocabulary.
+	// Refused is the reader's count of invocations a validated field refused — the
+	// primitive's own name, or an entrypoint outside Wake's vocabulary — whether the
+	// invocation was a tool call or an attributed skill run.
 	// It stays separate from Dropped, which is the store's count of
 	// records refused at write time: the two are different fail-closed points and
 	// merging them would invent the reason taxonomy doctor (T029) owns.

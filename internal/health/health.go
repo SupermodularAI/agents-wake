@@ -89,7 +89,8 @@ type Scan struct {
 	// RefusedCalls counts primitive invocations a reader found but could not
 	// derive a valid record from — it could not name the primitive, or a bounded
 	// dimension such as the entrypoint carried a value outside Wake's vocabulary:
-	// the invocation happened and no number carries it. It is separate from
+	// the invocation happened and no number carries it. A tool call and an
+	// attributed skill run both reach it, because both are an invocation. It is separate from
 	// ParseErrors, which counts lines that were unusable, and from Skipped, which is
 	// an honest zero — this one is collection that was lost, and it is what a
 	// harness renaming the field a primitive's identity lives in looks like.
