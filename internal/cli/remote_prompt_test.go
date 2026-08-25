@@ -2,9 +2,11 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -116,5 +118,247 @@ func TestOsPrompterUsesTheCharacterDeviceCheck(t *testing.T) {
 
 	if osPrompter(cmd) == nil {
 		t.Error("osPrompter() = nil for a character device, want a prompter")
+	}
+}
+
+// forbid fails when text carries any of the values a prompt may never show.
+// Written over the transcript and the writer together, because a prompt is
+// output even though it is not on stdout.
+func forbid(t *testing.T, text string, values ...string) {
+	t.Helper()
+	for _, value := range values {
+		if strings.Contains(text, value) {
+			t.Errorf("what the terminal displayed carries %q", value)
+		}
+	}
+}
+
+// What ADR-0031 means by "confirm it": the destination's bare host, never the
+// URL. The path can hold a token, the query is where an API key usually hides,
+// and the userinfo is a credential outright — so the value that goes to the
+// store is the whole URL and the value shown to the person is url.Host.
+func TestConfirmingAPromptedURLShowsOnlyItsHost(t *testing.T) {
+	const url = "https://user:pw@api.example.com:4318/v1/traces"
+	fake := &fakeTerminal{answers: []string{url, "y"}}
+	var buf bytes.Buffer
+
+	endpoint, err := confirmEndpoint(fake, &buf, "")
+	if err != nil {
+		t.Fatalf("confirmEndpoint() = %v", err)
+	}
+	if endpoint != url {
+		t.Errorf("confirmEndpoint() = %q, want the URL byte-for-byte", endpoint)
+	}
+
+	// Byte-for-byte rather than a "contains the host" check: the confirmation is
+	// a fixed literal with url.Host interpolated into it, and pinning the whole
+	// string is what proves nothing else from the URL reached it. A "contains no
+	// /" assertion could not say this — the prompt's own [y/N] carries one.
+	const want = "Deliver records to api.example.com:4318? [y/N]: "
+	if len(fake.shown) != 2 || fake.shown[1] != want {
+		t.Errorf("the confirmation = %q, want exactly [%q]", fake.shown, want)
+	}
+	forbid(t, fake.transcript()+buf.String(), "user", "pw", "v1", "traces", "https://", "4318/")
+}
+
+// A URL passed as an argument was typed by the same person at the same terminal,
+// and a mistyped host is as easy to introduce that way, so it is confirmed too —
+// but not re-asked for.
+func TestAnArgumentURLIsConfirmedToo(t *testing.T) {
+	const given = "https://api.example.com/v1/traces"
+	fake := &fakeTerminal{answers: []string{"y"}}
+	var buf bytes.Buffer
+
+	endpoint, err := confirmEndpoint(fake, &buf, given)
+	if err != nil {
+		t.Fatalf("confirmEndpoint() = %v", err)
+	}
+	if endpoint != given {
+		t.Errorf("confirmEndpoint() = %q, want %q", endpoint, given)
+	}
+	if len(fake.shown) != 1 {
+		t.Fatalf("prompts shown = %q, want only the confirmation", fake.shown)
+	}
+	if !strings.Contains(fake.shown[0], "api.example.com") {
+		t.Errorf("the confirmation = %q, which does not name the host", fake.shown[0])
+	}
+}
+
+// Declining re-prompts rather than aborting. The whole point of the confirmation
+// is catching a mistyped host, and re-prompting is the repair — aborting would
+// make the user re-run the command and re-type a secret they had already given.
+func TestDecliningTheHostRePromptsForTheURL(t *testing.T) {
+	for name, decline := range map[string]string{
+		"an explicit no": "n",
+		"a bare Return":  "",
+		"anything else":  "nope",
+	} {
+		t.Run(name, func(t *testing.T) {
+			const right = "https://right.example.com/v1/traces"
+			fake := &fakeTerminal{answers: []string{"https://wrong.example.com/v1/traces", decline, right, "y"}}
+			var buf bytes.Buffer
+
+			endpoint, err := confirmEndpoint(fake, &buf, "")
+			if err != nil {
+				t.Fatalf("confirmEndpoint() = %v", err)
+			}
+			if endpoint != right {
+				t.Errorf("confirmEndpoint() = %q, want the second URL", endpoint)
+			}
+			displayed := fake.transcript()
+			for _, host := range []string{"wrong.example.com", "right.example.com"} {
+				if !strings.Contains(displayed, host) {
+					t.Errorf("the transcript never named %q: %q", host, displayed)
+				}
+			}
+		})
+	}
+}
+
+// Declining an argument URL asks for a new one rather than re-offering the
+// argument, which would be an unbreakable loop.
+func TestDecliningAnArgumentURLRePromptsForOne(t *testing.T) {
+	const right = "https://right.example.com/v1/traces"
+	fake := &fakeTerminal{answers: []string{"n", right, "y"}}
+	var buf bytes.Buffer
+
+	endpoint, err := confirmEndpoint(fake, &buf, "https://wrong.example.com/otel")
+	if err != nil {
+		t.Fatalf("confirmEndpoint() = %v", err)
+	}
+	if endpoint != right {
+		t.Errorf("confirmEndpoint() = %q, want the prompted URL", endpoint)
+	}
+}
+
+// A URL the store would reject is refused here, before anything is written, and
+// the refusal names the rule rather than the value: a URL is exactly where a
+// credential hides, so a rejected one is not quoted back either.
+func TestANonHTTPURLIsRefusedAndRePrompted(t *testing.T) {
+	const ok = "https://ok.example.com/v1/traces"
+	fake := &fakeTerminal{answers: []string{"ftp://api.example.com/v1/traces", ok, "y"}}
+	var buf bytes.Buffer
+
+	endpoint, err := confirmEndpoint(fake, &buf, "")
+	if err != nil {
+		t.Fatalf("confirmEndpoint() = %v", err)
+	}
+	if endpoint != ok {
+		t.Errorf("confirmEndpoint() = %q, want %q", endpoint, ok)
+	}
+	if !strings.Contains(buf.String(), "not an absolute http:// or https:// URL") {
+		t.Errorf("the refusal never named the rule: %q", buf.String())
+	}
+	forbid(t, fake.transcript()+buf.String(), "ftp://api.example.com")
+}
+
+// A Ctrl-D ends the wizard with nothing written. This is also what bounds the
+// re-prompt loop.
+func TestConfirmationAtEOFReturnsAnError(t *testing.T) {
+	fake := &fakeTerminal{}
+	var buf bytes.Buffer
+
+	endpoint, err := confirmEndpoint(fake, &buf, "")
+	if !errors.Is(err, io.EOF) {
+		t.Errorf("confirmEndpoint() error = %v, want io.EOF", err)
+	}
+	if endpoint != "" {
+		t.Errorf("confirmEndpoint() = %q, want no endpoint", endpoint)
+	}
+}
+
+// ADR-0028 §Context names only the secret half as the credential, so the public
+// key is echoed like any other input and the secret key is not echoed at all.
+// Neither the secret nor the joined string is ever written back.
+func TestTheSecretKeyIsAskedForWithEchoOff(t *testing.T) {
+	fake := &fakeTerminal{answers: []string{"pk-lf-dg74", "sk-lf-dg74"}}
+
+	credential, err := promptCredential(fake)
+	if err != nil {
+		t.Fatalf("promptCredential() = %v", err)
+	}
+	if credential != "pk-lf-dg74:sk-lf-dg74" {
+		t.Errorf("promptCredential() = %q, want the joined pair", credential)
+	}
+	if !slices.Contains(fake.echoed, "pk-lf-dg74") {
+		t.Errorf("the public key was not asked for with echo on: echoed %q", fake.echoed)
+	}
+	if !slices.Contains(fake.masked, "sk-lf-dg74") {
+		t.Errorf("the secret key was not asked for with echo off: masked %q", fake.masked)
+	}
+	if slices.Contains(fake.masked, "pk-lf-dg74") || slices.Contains(fake.echoed, "sk-lf-dg74") {
+		t.Errorf("the two halves were asked for the wrong way round: echoed %q, masked %q", fake.echoed, fake.masked)
+	}
+	forbid(t, fake.transcript(), "sk-lf-dg74", "pk-lf-dg74:sk-lf-dg74")
+}
+
+// Two empty answers are a credential-less configuration, not a credential of
+// ":" — the same rule readCredential applies to empty standard input.
+func TestBothKeysEmptyIsACredentiallessConfiguration(t *testing.T) {
+	fake := &fakeTerminal{answers: []string{"", ""}}
+
+	credential, err := promptCredential(fake)
+	if err != nil {
+		t.Fatalf("promptCredential() = %v", err)
+	}
+	if credential != "" {
+		t.Errorf("promptCredential() = %q, want no credential", credential)
+	}
+}
+
+// Judging the shape of what was typed is explicitly out of scope: the join is
+// mechanical, and a half-filled pair is the far end's business to reject.
+func TestOnlyOneKeyGivenIsStillJoined(t *testing.T) {
+	cases := map[string]struct {
+		answers []string
+		want    string
+	}{
+		"public only": {[]string{"pk-lf-dg74", ""}, "pk-lf-dg74:"},
+		"secret only": {[]string{"", "sk-lf-dg74"}, ":sk-lf-dg74"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			fake := &fakeTerminal{answers: tc.answers}
+
+			credential, err := promptCredential(fake)
+			if err != nil {
+				t.Fatalf("promptCredential() = %v", err)
+			}
+			if credential != tc.want {
+				t.Errorf("promptCredential() = %q, want %q", credential, tc.want)
+			}
+		})
+	}
+}
+
+// A typed credential is held to the ceiling a piped one is, so a paste that is
+// really a redirected file cannot reach a 0600 store truncated. The refusal
+// names the limit and never the value.
+func TestAnOversizedTypedCredentialIsRefused(t *testing.T) {
+	fake := &fakeTerminal{answers: []string{strings.Repeat("A", maxCredentialBytes), "B"}}
+
+	credential, err := promptCredential(fake)
+	if !errors.Is(err, errCredentialTooLarge) {
+		t.Fatalf("promptCredential() error = %v, want errCredentialTooLarge", err)
+	}
+	if credential != "" {
+		t.Errorf("promptCredential() = %q, want no credential", credential)
+	}
+	if strings.Contains(err.Error(), strings.Repeat("A", 64)) {
+		t.Error("the refusal quotes back what was typed")
+	}
+}
+
+// A failed read is returned bare. io.EOF carries no value, and wrapping it with
+// anything typed here would be the one place a prompt could carry input back out.
+func TestSecretPromptFailureIsNotWrapped(t *testing.T) {
+	fake := &fakeTerminal{answers: []string{"pk-lf-dg74"}}
+
+	credential, err := promptCredential(fake)
+	if !errors.Is(err, io.EOF) {
+		t.Errorf("promptCredential() error = %v, want io.EOF", err)
+	}
+	if credential != "" {
+		t.Errorf("promptCredential() = %q, want no credential", credential)
 	}
 }
