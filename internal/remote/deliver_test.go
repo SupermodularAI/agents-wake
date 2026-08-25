@@ -738,6 +738,33 @@ func TestFlushReportCountsWhatItSent(t *testing.T) {
 	}
 }
 
+func TestFlushOmitsBuiltinToolsWithoutPostingAnEmptyBatch(t *testing.T) {
+	paths := testPaths(t)
+	receiver, endpoint := serve(t, http.StatusOK)
+	enable(t, paths, endpoint)
+
+	builtin := validRecord()
+	builtin.Kind = record.KindBuiltinTool
+	builtin.Name = "Bash"
+	if _, err := store.New(eventsPath(paths)).Append([]record.Record{builtin}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+
+	report, err := FlushReport(paths)
+	if err != nil {
+		t.Fatalf("FlushReport() error = %v", err)
+	}
+	if report.Batches != 0 || report.Records != 0 || report.Dropped != 1 {
+		t.Errorf("Report = %+v, want no sent batches or records and one omitted record", report)
+	}
+	if got := receiver.count(); got != 0 {
+		t.Errorf("requests = %d, want 0 for an empty OTLP batch", got)
+	}
+	if got := storedPosition(t, paths); got != 1 {
+		t.Errorf("watermark = %d, want 1", got)
+	}
+}
+
 // A run that sent nothing reports nothing. The zero value is what lets
 // `remote flush` distinguish "delivery is off" from "delivered zero records"
 // without a second flag saying which (plan §12).

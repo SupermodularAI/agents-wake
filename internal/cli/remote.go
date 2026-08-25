@@ -410,7 +410,7 @@ func writeFlushReport(cmd *cobra.Command, report remote.Report, failed bool) err
 		return nil
 	}
 	if report.Dropped > 0 {
-		if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "%s could not be encoded and were not sent.\n", quantity(report.Dropped, "record")); err != nil {
+		if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "%s were not sent.\n", quantity(report.Dropped, "record")); err != nil {
 			return err
 		}
 	}
@@ -469,7 +469,7 @@ func writeDryRun(cmd *cobra.Command, paths config.Paths) error {
 		}
 	}
 	if preview.Dropped > 0 {
-		if _, err = fmt.Fprintf(cmd.ErrOrStderr(), "%s could not be encoded and would not be sent.\n", quantity(preview.Dropped, "record")); err != nil {
+		if _, err = fmt.Fprintf(cmd.ErrOrStderr(), "%s would not be sent.\n", quantity(preview.Dropped, "record")); err != nil {
 			return err
 		}
 	}
