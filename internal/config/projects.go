@@ -17,6 +17,13 @@ import (
 // read as this one would silently produce different identities, with no error and
 // nothing to migrate back from — the one failure the resolution table cannot
 // recover from — so an unrecognised version stops the read instead.
+//
+// It stayed 1 when the collection boundary was added (ADR-0032). The rationale above
+// is about a format that would *reinterpret* existing bytes, and this one does not: a
+// version-1 file with no global_root reads as "no boundary", which is the fail-closed
+// reading, and an older build that ignores the field collects less rather than more. A
+// bump would instead have refused every table already written, re-identifying nothing
+// and consenting nothing, in exchange for no safety.
 const projectsVersion = 1
 
 // idHexLen is the width of a repository id: 128 bits of HMAC-SHA256 as 32
@@ -41,6 +48,18 @@ const (
 type projectsFile struct {
 	Version  int            `json:"version"`
 	Projects []projectEntry `json:"projects"`
+	// GlobalRoot is the machine-wide collection boundary, or nil when none is
+	// recorded (ADR-0032 §7).
+	//
+	// A top-level field and deliberately not a projectEntry: a boundary is a consent
+	// boundary and never an identity, so nestedWith (ADR-0019 §5) must not see it —
+	// a boundary enclosing many consented roots is what it is for, and the
+	// nested-root refusal needs no change to allow that. Nothing resolves to it
+	// either: match walks Projects, so no working directory can ever be attributed
+	// to the boundary itself.
+	//
+	// Like everything else in this file it never leaves the package.
+	GlobalRoot *globalRootEntry `json:"global_root,omitempty"`
 }
 
 // projectEntry is one consented repository.

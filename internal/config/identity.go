@@ -65,6 +65,12 @@ type Repos struct {
 	salt    []byte
 	table   projectsFile
 	dropped int
+	// boundaryRefused reports that a collection boundary is recorded and this build
+	// will not honour it. It is separate from dropped because it is a different fact
+	// with a different remedy, and because a refused boundary is not a refused entry:
+	// nothing was re-attributed, but nothing new is being registered either, and
+	// `doctor` is the only surface that can say so (ADR-0032 §7).
+	boundaryRefused bool
 }
 
 // OpenRepos loads the salt and the resolution table.
@@ -95,11 +101,11 @@ func OpenRepos(p Paths) (*Repos, error) {
 	// entry's id means deriving it, and that cannot happen before the salt is
 	// known.
 	r := &Repos{paths: p, salt: salt}
-	table, dropped, err := r.readTable()
+	table, dropped, boundaryRefused, err := r.readTable()
 	if err != nil {
 		return nil, err
 	}
-	r.table, r.dropped = table, dropped
+	r.table, r.dropped, r.boundaryRefused = table, dropped, boundaryRefused
 	return r, nil
 }
 
@@ -107,14 +113,24 @@ func OpenRepos(p Paths) (*Repos, error) {
 // willing to resolve against. It returns the count it refused, which is the sum of
 // the entries readProjects dropped on shape and the entries this verified against
 // the salt and rejected (ADR-0019 §7).
-func (r *Repos) readTable() (projectsFile, int, error) {
+//
+// A collection boundary this build derives the digest of is kept in the returned
+// table, so Register's republication carries it forward. One it refuses is nilled and
+// reported, which matches the posture Register already takes for an entry: a boundary
+// this build will not honour is one it will not carry back into the file either, since
+// a table that kept asserting it after it had been rejected is a consent claim nothing
+// stands behind.
+func (r *Repos) readTable() (projectsFile, int, bool, error) {
 	table, dropped, err := readProjects(r.paths.ProjectsFile)
 	if err != nil {
-		return projectsFile{}, 0, err
+		return projectsFile{}, 0, false, err
 	}
 	kept, refused := r.trustworthy(table.Projects)
 	table.Projects = kept
-	return table, dropped + refused, nil
+	boundary, trusted := r.trustedGlobalRoot(table.GlobalRoot)
+	boundaryRefused := table.GlobalRoot != nil && !trusted
+	table.GlobalRoot = boundary
+	return table, dropped + refused, boundaryRefused, nil
 }
 
 // trustworthy keeps the entries this build derives both keyed values of, with every
@@ -402,7 +418,7 @@ func (r *Repos) Register(root, label string, from time.Time) (string, error) {
 		// to resolve against is also one it refuses to carry back into the file. A
 		// hand-written entry that survived a write would be an attribution the table
 		// keeps asserting after it has been rejected.
-		table, dropped, readErr := r.readTable()
+		table, dropped, boundaryRefused, readErr := r.readTable()
 		if readErr != nil {
 			return readErr
 		}
@@ -417,8 +433,11 @@ func (r *Repos) Register(root, label string, from time.Time) (string, error) {
 		}
 		// The dropped count never goes down within a session: this write leaves out
 		// the entries the re-read refused, and making that shrinkage visible is the
-		// count's whole job (ADR-0019 §7).
+		// count's whole job (ADR-0019 §7). The boundary refusal is ORed for the same
+		// reason — the write above dropped the boundary the re-read refused, and a
+		// later registration finding nothing there must not report the shrinkage away.
 		r.table, r.dropped, id = updated, max(r.dropped, dropped), entryID
+		r.boundaryRefused = r.boundaryRefused || boundaryRefused
 		return nil
 	})
 	if lockErr != nil {
