@@ -1,5 +1,3 @@
-//go:build remote
-
 package cli
 
 import (
@@ -9,7 +7,7 @@ import (
 	"testing"
 )
 
-// The default for the whole tagged test build: never actually detach.
+// The default for the whole cli test build: never actually detach.
 //
 // afterScan fires from every scan in this package, so tests that predate this
 // seam reach spawnFlush without knowing it exists — the three ingest tests that
@@ -40,7 +38,7 @@ func recordFlushChild(t *testing.T, err error) *[][]string {
 }
 
 // wantFlushArgv is the argv a spawned flush must carry: this same executable,
-// re-execed into the tagged build by construction.
+// which carries the same delivery code by construction.
 func wantFlushArgv(t *testing.T) []string {
 	t.Helper()
 	self, err := os.Executable()

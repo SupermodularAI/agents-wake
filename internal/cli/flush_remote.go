@@ -1,5 +1,3 @@
-//go:build remote
-
 package cli
 
 import (
@@ -22,7 +20,7 @@ var flushChild = detach.Start
 // requires a dead endpoint to be indistinguishable from an absent one from the
 // user's point of view, and a scan that blocked on a far end would be the one
 // observable difference. The child re-execs this same binary, so it is the
-// tagged build by construction.
+// same delivery code by construction.
 //
 // Nothing is gated here. Single-flight is remote-flush.lock inside
 // remote.FlushReport, and remote.min_interval is enforced beside it

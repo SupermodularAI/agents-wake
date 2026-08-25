@@ -1,12 +1,10 @@
-//go:build remote
-
 // The `remote` command surface, and the four rules it is bound by.
 //
-// It is absent from the default build. ADR-0012 compiles remote delivery out
-// rather than configuring it off, and a `remote` line in `wake --help` — even one
-// that only reported being unsupported — would turn "this binary contains no
-// network code" from something a reader can see into something they have to
-// verify. remote_absent_test.go asserts that mechanically.
+// It ships in every binary and is off until a user runs `remote set` and
+// `remote on`. Until both have happened there is no endpoint, no credential and
+// no enabled flag, and nothing is sent — the claim ADR-0030 makes in place of
+// ADR-0012's compiled-out one, which this command's own output is how a user
+// checks.
 //
 // It parses and prints only (ADR-0001). No batching, no HTTP client, no gzip and
 // no watermark arithmetic happens here: internal/remote owns all four, and this
@@ -96,10 +94,8 @@ func newRemoteStatusCmd() *cobra.Command {
 	}
 }
 
-// writeRemoteStatus prints the three states ADR-0018 names, in `key: value`
-// lines like doctor's. "Not compiled in" is the third state and is expressed by
-// this command not existing at all, which is why only two state words appear
-// here.
+// writeRemoteStatus prints the two states ADR-0018 names as corrected by
+// ADR-0030 — off and on — in `key: value` lines like doctor's.
 //
 // The endpoint line carries the host and port and nothing else — no scheme, no
 // path, no query, no userinfo (ADR-0029). The credential line carries presence

@@ -86,8 +86,9 @@ func TestInstallScriptAndAssetNameAgreeOnTheArchiveTemplate(t *testing.T) {
 // ADR-0026's own guard is a human reading the diff, and this is as much of it as
 // a test can carry: no file in this package that ships may name an in-process
 // network client. It is scoped to this package deliberately — internal/ui
-// legitimately imports net/http for the loopback dashboard, so a repo-wide ban
-// would fail against code ADR-0012 was never about.
+// legitimately imports net/http for the loopback dashboard, and internal/remote
+// for a flush the user configured and turned on (ADR-0030), so a repo-wide ban
+// would fail against code ADR-0026 was never about.
 func TestSelfupdateNamesNoInProcessNetworkClient(t *testing.T) {
 	forbidden := []string{"net/http", "net.Dial", "http.Get", "http.Client"}
 	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
