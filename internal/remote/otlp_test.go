@@ -68,6 +68,7 @@ var frozenPackageImports = map[string][]string{
 		"encoding/json",
 		"github.com/SupermodularAI/agents-wake/internal/atomicfile",
 		"github.com/SupermodularAI/agents-wake/internal/config",
+		"github.com/SupermodularAI/agents-wake/internal/record",
 		"io/fs",
 		"os",
 		"path/filepath",
