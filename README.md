@@ -130,12 +130,14 @@ review. Its default design keeps the sensitive path local:
   and counters. Invalid or path-shaped values are dropped rather than stored.
 - Repository identity is a salted, per-machine HMAC. The readable project map
   stays local with restrictive permissions.
-- The official binaries contain no remote-delivery code. Wake sends no
-  transcript data or telemetry, and the dashboard is bound to loopback only.
+- Every binary ships the remote-delivery capability and it is off until you run
+  `wake remote set <url>` and `wake remote on`. Until you do, no endpoint is
+  configured, nothing is sent, and `wake remote status` and `wake doctor` both
+  say so. The dashboard is bound to loopback only.
 - `wake update` and `wake update --check` are the only commands that reach the
-  network, and only when you run them: nothing checks for updates in the
-  background, and both shell out to `curl` rather than linking a network client,
-  so the binary itself still carries no network code.
+  network without being asked to deliver, and only when you run them: nothing
+  checks for updates in the background, and both shell out to `curl` rather than
+  linking a network client.
 - `wake doctor` reports safe counters, never transcript content or repository
   paths, so its output is suitable for sharing in support requests.
 

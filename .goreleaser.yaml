@@ -3,8 +3,9 @@
 # builds. internal/platform/matrix_test.go asserts this file against that set, so
 # a platform CI never tested cannot appear here quietly.
 #
-# No build tags: release artefacts ship without `remote`, because the promise is
-# that the binary you installed contains no network code (ADR-0012).
+# No build tags, because there are none: remote delivery is compiled into every
+# artefact and is off until a user configures an endpoint and turns it on
+# (ADR-0030). CI asserts that on the artefact this file produces.
 version: 2
 
 project_name: wake
