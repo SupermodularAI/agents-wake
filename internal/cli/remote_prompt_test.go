@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+
+	"github.com/SupermodularAI/agents-wake/internal/config"
 )
 
 // fakeTerminal is the injected terminal every interactive test runs against, so
@@ -361,4 +363,194 @@ func TestSecretPromptFailureIsNotWrapped(t *testing.T) {
 	if credential != "" {
 		t.Errorf("promptCredential() = %q, want no credential", credential)
 	}
+}
+
+// runRemoteSet drives `remote set` with a fake terminal in place of the real
+// one, through the same command RunE the tree builds — the interactive path's
+// end-to-end test, run headless.
+func runRemoteSet(t *testing.T, fake *fakeTerminal, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	cmd := newRemoteSetCmd(fake.factory())
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetIn(strings.NewReader(""))
+	cmd.SetArgs(args)
+	cmd.SilenceUsage = true
+	err = cmd.Execute()
+	return out.String(), errOut.String(), err
+}
+
+// The whole interactive path, end to end: what the person typed is what the
+// 0600 store holds.
+func TestInteractiveSetWritesTheEndpointAndCredential(t *testing.T) {
+	paths := isolateRemote(t)
+	const url = "https://user:pw@api.example.com:4318/v1/traces"
+	fake := &fakeTerminal{answers: []string{url, "y", remoteTestPublicKey, remoteTestSecretKey}}
+
+	stdout, _, err := runRemoteSet(t, fake)
+	if err != nil {
+		t.Fatalf("remote set = %v", err)
+	}
+
+	auth, err := config.LoadRemoteAuth(paths)
+	if err != nil {
+		t.Fatalf("LoadRemoteAuth() = %v", err)
+	}
+	if auth.Endpoint != url {
+		t.Errorf("stored endpoint = %q, want the URL byte-for-byte", auth.Endpoint)
+	}
+	if auth.Credential != remoteTestSecret {
+		t.Error("the store does not hold the credential that was typed")
+	}
+	// Naming a destination is not the same act as starting to deliver to it, so
+	// the wizard enables nothing — the same argument ADR-0018 makes for `off` not
+	// clearing the endpoint, in the other direction.
+	if auth.Enabled {
+		t.Error("the wizard turned delivery on; naming a destination is not choosing to send to it")
+	}
+	for _, want := range []string{"remote endpoint configured", "wake remote on"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout = %q, which never says %q", stdout, want)
+		}
+	}
+}
+
+// The privacy rule over the whole interactive path at once: the host may be
+// shown, and nothing else a URL or a credential carries may be — on stdout, on
+// stderr, or in a prompt.
+func TestInteractiveSetNeverPrintsTheURLTheSecretOrTheCredential(t *testing.T) {
+	isolateRemote(t)
+	fake := &fakeTerminal{answers: []string{
+		"https://user:pw@api.example.com:4318/v1/traces", "y", remoteTestPublicKey, remoteTestSecretKey,
+	}}
+
+	stdout, stderr, err := runRemoteSet(t, fake)
+	if err != nil {
+		t.Fatalf("remote set = %v", err)
+	}
+
+	displayed := fake.transcript() + stdout + stderr
+	if !strings.Contains(displayed, "api.example.com:4318") {
+		t.Errorf("the confirmation never named the host: %q", displayed)
+	}
+	forbid(t, displayed, remoteTestSecret, remoteTestSecretKey, "pw", "user", "v1", "traces", "https://")
+	// The public key is echoed at the prompt by design (ADR-0031), but it is
+	// still not part of any answer this command prints.
+	forbid(t, stdout, remoteTestPublicKey)
+}
+
+// A URL from argv is confirmed before it is written, because it was typed by the
+// same person at the same terminal.
+func TestInteractiveSetConfirmsAnArgumentURLBeforeWriting(t *testing.T) {
+	paths := isolateRemote(t)
+	const url = "https://api.example.com/v1/traces"
+	fake := &fakeTerminal{answers: []string{"y", remoteTestPublicKey, remoteTestSecretKey}}
+
+	if _, _, err := runRemoteSet(t, fake, url); err != nil {
+		t.Fatalf("remote set = %v", err)
+	}
+
+	auth, err := config.LoadRemoteAuth(paths)
+	if err != nil {
+		t.Fatalf("LoadRemoteAuth() = %v", err)
+	}
+	if auth.Endpoint != url {
+		t.Errorf("stored endpoint = %q, want %q", auth.Endpoint, url)
+	}
+	if len(fake.shown) == 0 || !strings.Contains(fake.shown[0], "api.example.com") {
+		t.Errorf("prompts shown = %q, want a confirmation naming the host first", fake.shown)
+	}
+}
+
+// A wizard that did not finish leaves no half-configured store.
+func TestDecliningTheConfirmationWritesNothing(t *testing.T) {
+	paths := isolateRemote(t)
+	fake := &fakeTerminal{answers: []string{"n"}}
+
+	_, _, err := runRemoteSet(t, fake, "https://api.example.com/v1/traces")
+	if err == nil {
+		t.Fatal("remote set = nil, want the error a Ctrl-D ends the wizard with")
+	}
+
+	auth, loadErr := config.LoadRemoteAuth(paths)
+	if loadErr != nil {
+		t.Fatalf("LoadRemoteAuth() = %v", loadErr)
+	}
+	if auth.Endpoint != "" {
+		t.Errorf("stored endpoint = %q, want nothing written", auth.Endpoint)
+	}
+}
+
+// Empty answers to both key prompts reach the same credential-less
+// configuration the piped path reaches from empty standard input, caveat and all.
+func TestInteractiveSetWithNoKeysConfiguresTheEndpointOnly(t *testing.T) {
+	paths := isolateRemote(t)
+	fake := &fakeTerminal{answers: []string{"https://api.example.com/v1/traces", "y", "", ""}}
+
+	_, stderr, err := runRemoteSet(t, fake)
+	if err != nil {
+		t.Fatalf("remote set = %v", err)
+	}
+
+	auth, err := config.LoadRemoteAuth(paths)
+	if err != nil {
+		t.Fatalf("LoadRemoteAuth() = %v", err)
+	}
+	if auth.Credential != "" {
+		t.Error("a credential was stored for two empty answers")
+	}
+	if auth.Endpoint == "" {
+		t.Error("the endpoint was not stored")
+	}
+	for _, want := range []string{"no credential is configured", config.EnvRemoteAuthorization} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, which never says %q", stderr, want)
+		}
+	}
+}
+
+// The one invocation the interactive path could have quietly changed the meaning
+// of: a zero-argument `set` with nothing but a pipe on standard input. It stays
+// a refusal, and it writes nothing.
+func TestScriptedSetWithNoURLIsRefusedAndWritesNothing(t *testing.T) {
+	paths := isolateRemote(t)
+
+	stdout, stderr, err := runRemote(t, remoteTestSecret, "remote", "set")
+	if err == nil {
+		t.Fatal("remote set = nil, want a refusal")
+	}
+	if !strings.Contains(err.Error(), "a URL is required") {
+		t.Errorf("error = %v, which does not name the missing URL", err)
+	}
+	if strings.Contains(stdout+stderr+err.Error(), remoteTestSecretKey) {
+		t.Error("the refusal carries the credential that was on standard input")
+	}
+
+	auth, loadErr := config.LoadRemoteAuth(paths)
+	if loadErr != nil {
+		t.Fatalf("LoadRemoteAuth() = %v", loadErr)
+	}
+	if auth.Endpoint != "" {
+		t.Errorf("stored endpoint = %q, want nothing written", auth.Endpoint)
+	}
+}
+
+// The scripted path is byte-for-byte what it was before this ticket. A prompt
+// reaching a pipe would block a CI run forever, so this asserts not one of them
+// was written.
+func TestScriptedSetNeverPrompts(t *testing.T) {
+	isolateRemote(t)
+
+	stdout, stderr, err := runRemote(t, remoteTestSecret, "remote", "set", "https://api.example.com/v1/traces")
+	if err != nil {
+		t.Fatalf("remote set = %v", err)
+	}
+
+	const want = "remote endpoint configured; run \"wake remote status\" to see it.\n" +
+		"remote delivery is off; run \"wake remote on\" to start delivering.\n"
+	if stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
+	}
+	forbid(t, stdout+stderr, "Endpoint URL", "Public key", "Secret key", "Deliver records to")
 }
