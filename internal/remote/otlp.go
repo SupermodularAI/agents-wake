@@ -116,7 +116,7 @@ const (
 	// maxSpanAttributes is the size of the frozen span attribute key set. It
 	// only sizes an allocation, but keeping it beside the constants makes a
 	// change to the key set visible in the same review.
-	maxSpanAttributes = 20
+	maxSpanAttributes = 21
 )
 
 // errEncode is deliberately valueless. A diagnostic that quoted the record it
@@ -253,6 +253,12 @@ func spanAttributes(r record.Record) []keyValue {
 	attrs = appendString(attrs, "gen_ai.request.model", string(r.Model))
 	attrs = appendString(attrs, "wake.effort", string(r.Effort))
 	attrs = appendString(attrs, "wake.invoker", string(r.Invoker))
+	// wake.entrypoint separates a person at a terminal from an SDK driving the
+	// harness. It is a closed enum on the record, so this can only be one of three
+	// constants, and it goes through appendString rather than around it: an
+	// unreported entrypoint is omitted, because an empty stringValue is
+	// indistinguishable at the receiver from a real value (ADR-0005, ADR-0027).
+	attrs = appendString(attrs, "wake.entrypoint", string(r.Entrypoint))
 	if r.Outcome != nil {
 		// The exact enum string, not a re-derived label: a denial must stay
 		// distinguishable from an unreported outcome, which status alone cannot

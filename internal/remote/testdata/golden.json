@@ -35,7 +35,7 @@
                 {
                   "key": "wake.schema_version",
                   "value": {
-                    "intValue": "1"
+                    "intValue": "2"
                   }
                 },
                 {
@@ -135,6 +135,12 @@
                   }
                 },
                 {
+                  "key": "wake.entrypoint",
+                  "value": {
+                    "stringValue": "sdk_python"
+                  }
+                },
+                {
                   "key": "wake.outcome",
                   "value": {
                     "stringValue": "ok"
@@ -168,7 +174,7 @@
                 {
                   "key": "wake.schema_version",
                   "value": {
-                    "intValue": "1"
+                    "intValue": "2"
                   }
                 },
                 {
@@ -235,7 +241,7 @@
                 {
                   "key": "wake.schema_version",
                   "value": {
-                    "intValue": "1"
+                    "intValue": "2"
                   }
                 },
                 {
@@ -332,6 +338,12 @@
                   "key": "wake.invoker",
                   "value": {
                     "stringValue": "model"
+                  }
+                },
+                {
+                  "key": "wake.entrypoint",
+                  "value": {
+                    "stringValue": "sdk_python"
                   }
                 },
                 {

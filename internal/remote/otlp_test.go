@@ -220,6 +220,9 @@ func fullRecord() record.Record {
 	r.ViaAgent = "sdlc-plan"
 	r.Model = "claude-opus-5"
 	r.Effort = "high"
+	// Deliberately not the cli member: a defaulted or hard-coded "cli" anywhere in
+	// the encoder would pass an assertion built on the commonest value.
+	r.Entrypoint = record.EntrypointSDKPython
 	r.Outcome = ptr(record.OutcomeOK)
 	r.DurationMS = ptr(int64(1500))
 	return r
@@ -561,6 +564,7 @@ var frozenSpanAttributeKeys = []string{
 	"langfuse.session.id",
 	"wake.duration_ms",
 	"wake.effort",
+	"wake.entrypoint",
 	"wake.harness",
 	"wake.harness_version",
 	"wake.invoker",
@@ -679,6 +683,7 @@ func TestOptionalAttributesAreOmittedNotBlank(t *testing.T) {
 		{"ViaAgent", func(r *record.Record) { r.ViaAgent = "" }, []string{"wake.via_agent"}},
 		{"Model", func(r *record.Record) { r.Model = "" }, []string{"wake.model", "gen_ai.request.model"}},
 		{"Effort", func(r *record.Record) { r.Effort = "" }, []string{"wake.effort"}},
+		{"Entrypoint", func(r *record.Record) { r.Entrypoint = "" }, []string{"wake.entrypoint"}},
 		{"Outcome", func(r *record.Record) { r.Outcome = nil }, []string{"wake.outcome"}},
 	}
 	for _, testCase := range cases {
@@ -731,7 +736,7 @@ func TestUnknownDurationOmitsItsAttribute(t *testing.T) {
 
 func TestIntegerAttributesAreJSONStrings(t *testing.T) {
 	attributes := attributesOf(t, encodeOne(t, fullRecord()), "attributes")
-	for key, want := range map[string]string{"wake.schema_version": "1", "wake.duration_ms": "1500"} {
+	for key, want := range map[string]string{"wake.schema_version": "2", "wake.duration_ms": "1500"} {
 		got, ok := attributes[key]["intValue"].(string)
 		if !ok {
 			// A float64 here means a JSON number reached the wire, which
@@ -762,8 +767,26 @@ func TestSchemaVersionOnEverySpan(t *testing.T) {
 		t.Fatalf("Encode() emitted %d spans, want 3", len(spans))
 	}
 	for i, span := range spans {
-		if got := attributesOf(t, span, "attributes")["wake.schema_version"]["intValue"]; got != "1" {
-			t.Fatalf("span %d wake.schema_version = %v, want %q", i, got, "1")
+		if got := attributesOf(t, span, "attributes")["wake.schema_version"]["intValue"]; got != "2" {
+			t.Fatalf("span %d wake.schema_version = %v, want %q", i, got, "2")
+		}
+	}
+}
+
+// TestEveryEntrypointMemberReachesTheWire is the wire half of the three-value
+// acceptance criterion: each member of the closed enum arrives as itself, so a
+// receiver can separate human use from pipeline use.
+func TestEveryEntrypointMemberReachesTheWire(t *testing.T) {
+	for _, member := range []record.Entrypoint{record.EntrypointCLI, record.EntrypointSDKPython, record.EntrypointSDKCLI} {
+		r := fullRecord()
+		r.Entrypoint = member
+		attributes := attributesOf(t, encodeOne(t, r), "attributes")
+		got, ok := attributes["wake.entrypoint"]["stringValue"].(string)
+		if !ok {
+			t.Fatalf("wake.entrypoint stringValue decoded as %T, want string", attributes["wake.entrypoint"]["stringValue"])
+		}
+		if got != string(member) {
+			t.Errorf("wake.entrypoint = %q, want %q", got, member)
 		}
 	}
 }
@@ -876,8 +899,8 @@ var frozenWireFieldNames = []string{
 	"startTimeUnixNano", "status", "stringValue", "traceId", "value", "version",
 }
 
-// hostileFields are the record fields that carry a name-domain or token-domain
-// value from a harness. Each is a place a source string could reach the wire.
+// hostileFields are the record fields whose value comes from a harness string.
+// Each is a place a source string could reach the wire.
 var hostileFields = []struct {
 	name string
 	set  func(*record.Record, string)
@@ -890,6 +913,7 @@ var hostileFields = []struct {
 	{"ViaSkill", func(r *record.Record, v string) { r.ViaSkill = record.Identifier(v) }},
 	{"ViaAgent", func(r *record.Record, v string) { r.ViaAgent = record.Identifier(v) }},
 	{"Effort", func(r *record.Record, v string) { r.Effort = record.Identifier(v) }},
+	{"Entrypoint", func(r *record.Record, v string) { r.Entrypoint = record.Entrypoint(v) }},
 }
 
 // TestHostileIdentifiersNeverReachTheWire states the encoder's actual privacy
@@ -975,7 +999,7 @@ func assertEveryStringIsAllowlisted(t *testing.T, payload []byte, r record.Recor
 		string(r.Kind), string(r.Name), string(r.Harness), string(r.HarnessVersion),
 		string(r.SessionID), string(r.Repo), string(r.Package), string(r.PackageVersion),
 		string(r.ViaSkill), string(r.ViaAgent), string(r.Model), string(r.Effort),
-		string(r.Invoker), string(r.Kind) + ":" + string(r.Name),
+		string(r.Invoker), string(r.Entrypoint), string(r.Kind) + ":" + string(r.Name),
 		traceID(r), spanID(r), start, end,
 		strconv.FormatUint(uint64(r.SchemaVersion), 10),
 	}
