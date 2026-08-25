@@ -48,6 +48,55 @@ func TestOutcomeHasNoSuccessZeroValue(t *testing.T) {
 	}
 }
 
+func TestEntrypointHasNoDefaultMember(t *testing.T) {
+	for _, member := range []Entrypoint{EntrypointCLI, EntrypointSDKPython, EntrypointSDKCLI} {
+		if Entrypoint("") == member {
+			t.Fatalf("zero Entrypoint must not mean %q", member)
+		}
+	}
+}
+
+func TestValidateAcceptsEveryEntrypointMember(t *testing.T) {
+	for _, member := range []Entrypoint{EntrypointCLI, EntrypointSDKPython, EntrypointSDKCLI} {
+		candidate := validRecord()
+		candidate.Entrypoint = member
+		if err := Validate(candidate); err != nil {
+			t.Errorf("Validate() rejected Entrypoint = %q: %v", member, err)
+		}
+	}
+}
+
+func TestValidateAcceptsAnAbsentEntrypoint(t *testing.T) {
+	candidate := validRecord()
+	if candidate.Entrypoint != "" {
+		t.Fatalf("validRecord() presets Entrypoint = %q", candidate.Entrypoint)
+	}
+	encoded, err := Marshal(candidate)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if strings.Contains(string(encoded), "entrypoint") {
+		t.Fatalf("Marshal() emitted an absent entrypoint: %s", encoded)
+	}
+}
+
+func TestValidateRejectsAnUnknownEntrypoint(t *testing.T) {
+	values := []string{"sdk-py", "sdk-cli", "sdk-ts", "CLI", "cli ", "vscode", "sdk_py"}
+	for _, value := range hostileIdentifiers {
+		if value == "" {
+			continue
+		}
+		values = append(values, value)
+	}
+	for _, value := range values {
+		candidate := validRecord()
+		candidate.Entrypoint = Entrypoint(value)
+		if err := Validate(candidate); err == nil {
+			t.Errorf("Validate() accepted Entrypoint = %q", value)
+		}
+	}
+}
+
 func TestMarshalIsDeterministic(t *testing.T) {
 	record := validRecord()
 	first, err := Marshal(record)

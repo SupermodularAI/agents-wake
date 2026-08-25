@@ -15,8 +15,11 @@ import (
 	"time"
 )
 
-// SchemaVersion identifies the on-disk record contract.
-const SchemaVersion uint = 1
+// SchemaVersion identifies the on-disk record contract. Adding a dimension bumps
+// it (ADR-0007), and a bump is a rebuild rather than a migration: the store is a
+// derived index, so every record of an earlier version is dropped on read and
+// rescanned (ADR-0015). Version 2 added entrypoint.
+const SchemaVersion uint = 2
 
 var (
 	versionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+:-]{0,127}$`)
@@ -67,6 +70,19 @@ const (
 	InvokerAuto  Invoker = "auto"
 )
 
+// Entrypoint is how the harness process itself was started: a person at a
+// terminal, or an SDK driving it. It is Wake's own vocabulary, not a harness's —
+// an adapter maps its harness's spelling onto these members and is never allowed
+// to pass an unrecognised one through (ADR-0005, ADR-0007). Absent is the zero
+// value: the harness reported nothing, which is never one of the members.
+type Entrypoint string
+
+const (
+	EntrypointCLI       Entrypoint = "cli"
+	EntrypointSDKPython Entrypoint = "sdk_python"
+	EntrypointSDKCLI    Entrypoint = "sdk_cli"
+)
+
 // Outcome is nullable on Record. Nil means the harness did not report one.
 type Outcome string
 
@@ -101,6 +117,7 @@ type Record struct {
 	Model          Identifier `json:"model,omitempty"`
 	Effort         Identifier `json:"effort,omitempty"`
 	Invoker        Invoker    `json:"invoker"`
+	Entrypoint     Entrypoint `json:"entrypoint,omitempty"`
 	Outcome        *Outcome   `json:"outcome"`
 	DurationMS     *int64     `json:"duration_ms"`
 }
@@ -138,6 +155,9 @@ func Validate(r Record) error {
 	if !validOptionalName(r.Package) || !validOptionalName(r.ViaSkill) || !validOptionalName(r.ViaAgent) || !validOptionalName(r.Model) || !validOptionalName(r.Effort) || !validOptionalVersion(r.HarnessVersion) || !validOptionalVersion(r.PackageVersion) {
 		return errors.New("invalid optional record field")
 	}
+	if r.Entrypoint != "" && !validEntrypoint(r.Entrypoint) {
+		return errors.New("invalid entrypoint")
+	}
 	if r.Source != nil && !validSource(*r.Source) {
 		return errors.New("invalid source")
 	}
@@ -169,6 +189,13 @@ func validSource(v Source) bool {
 
 func validInvoker(v Invoker) bool {
 	return v == InvokerUser || v == InvokerModel || v == InvokerAuto
+}
+
+// validEntrypoint is a membership check, not a shape check. A bounded-token
+// pattern would accept a future harness value such as "sdk-ts" and let an
+// unmapped dimension through; the allowlist is the enum itself.
+func validEntrypoint(v Entrypoint) bool {
+	return v == EntrypointCLI || v == EntrypointSDKPython || v == EntrypointSDKCLI
 }
 
 func validOutcome(v Outcome) bool {
