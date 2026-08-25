@@ -2,8 +2,12 @@
 # and its version comment together, so a pinned action still receives security
 # fixes.
 #
-# github-actions only: the ask is automated *pin* updates, and go.mod's four
-# direct dependencies are few enough to review by hand.
+# github-actions only: the ask is automated *pin* updates, and go.mod's five
+# dependencies are few enough to review by hand. Reviewing them by hand is also
+# what keeps golang.org/x/term and golang.org/x/sys at the versions that hold
+# go.mod's floor at a bare `go 1.25`: both declare `go 1.25.0` from x/sys v0.42.0
+# on, which would drag the directive to a patch floor as a side effect of a
+# routine bump.
 version: 2
 updates:
   - package-ecosystem: github-actions

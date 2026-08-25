@@ -18,10 +18,14 @@
 //
 // The credential is read from standard input and never reflected (ADR-0028).
 // Terminal scrollback outlives the command, and a credential echoed once is a
-// credential in a screenshot. The endpoint's bare host is the one value read
-// from the store that this file may print, and only in `status` —
-// ADR-0029 carves it out of ADR-0028's never-echo rule for the person who typed
-// that command, and for nobody else. `set` confirms without naming it.
+// credential in a screenshot. The endpoint's bare host is the one value from a
+// URL this file may print, and exactly two commands may print it: `status`,
+// reading it back from the store, and `set`'s interactive confirmation, showing
+// a value in flight before it is written. ADR-0029 carved the first out of
+// ADR-0028's never-echo rule and ADR-0031 revises the carve-out to those two and
+// no third. Run non-interactively, `set` still confirms without naming the
+// destination at all, and neither path ever prints the secret key or the joined
+// credential.
 package cli
 
 import (
@@ -45,8 +49,8 @@ func init() { commands = append(commands, newRemoteCmd) }
 // reason.
 const maxCredentialBytes = 4 << 10
 
-// The two ways `set` refuses what it was given, both carrying the rule and
-// never the value (ADR-0028).
+// The ways `set` refuses what it was given, all carrying the rule and never the
+// value (ADR-0028).
 //
 // errCredentialTooLarge exists because the alternative is silent corruption:
 // reading up to the limit and stopping would store the first 4 KiB of whatever
@@ -58,6 +62,12 @@ var (
 	errCredentialInput    = errors.New("the credential could not be read from standard input")
 	errCredentialTooLarge = fmt.Errorf("the credential on standard input is longer than %d bytes, which is a redirected file rather than a credential", maxCredentialBytes)
 	errCredentialInArgv   = errors.New("a credential must be supplied on standard input, not as an argument")
+
+	// A zero-argument `set` with nothing but a pipe on standard input is the one
+	// invocation the interactive path could have quietly changed the meaning of.
+	// It stays a refusal, and names both ways out: pass the URL, or run it where
+	// there is somebody to ask (ADR-0031).
+	errEndpointRequired = errors.New("a URL is required: pass it as an argument, or run this at a terminal to be prompted for one")
 )
 
 func newRemoteCmd() *cobra.Command {
@@ -67,7 +77,7 @@ func newRemoteCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE:  func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
 	}
-	cmd.AddCommand(newRemoteStatusCmd(), newRemoteSetCmd(), newRemoteOnCmd(), newRemoteOffCmd(), newRemoteFlushCmd())
+	cmd.AddCommand(newRemoteStatusCmd(), newRemoteSetCmd(osPrompter), newRemoteOnCmd(), newRemoteOffCmd(), newRemoteFlushCmd())
 	return cmd
 }
 
@@ -126,37 +136,66 @@ func writeRemoteStatus(w io.Writer, status remote.Status, host string) error {
 	return err
 }
 
-func newRemoteSetCmd() *cobra.Command {
+func newRemoteSetCmd(newPrompter promptFactory) *cobra.Command {
 	return &cobra.Command{
-		Use:   "set <url>",
+		Use:   "set [url]",
 		Short: "Set the delivery endpoint, reading its credential from standard input",
 		// A second positional argument is refused with the rule rather than
 		// with cobra's arity message, because the mistake it almost always is —
 		// the credential typed onto the command line — is the one thing this
 		// command exists to prevent.
+		//
+		// Zero arguments is now admissible because a terminal can be asked for
+		// the URL. It is not admissible without one: RunE refuses a
+		// zero-argument scripted invocation, so the piped path answers exactly
+		// as it did.
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 1 {
 				return errCredentialInArgv
 			}
-			return cobra.ExactArgs(1)(cmd, args)
+			return cobra.MaximumNArgs(1)(cmd, args)
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			paths, err := config.ResolvePaths()
 			if err != nil {
 				return err
 			}
-			credential, err := readCredential(cmd.InOrStdin())
-			if err != nil {
-				return err
+
+			// Two sources for the same two values, and one write. Which branch
+			// runs is decided by standard input alone: a terminal gets prompts,
+			// and a pipe, a file or CI gets the single whole read this command
+			// has always done (ADR-0031 §1).
+			var endpoint, credential string
+			if prompt := newPrompter(cmd); prompt != nil {
+				given := ""
+				if len(args) == 1 {
+					given = args[0]
+				}
+				if endpoint, credential, err = promptEndpointAndCredential(prompt, cmd.ErrOrStderr(), given); err != nil {
+					return err
+				}
+			} else {
+				if len(args) != 1 {
+					return errEndpointRequired
+				}
+				endpoint = args[0]
+				if credential, err = readCredential(cmd.InOrStdin()); err != nil {
+					return err
+				}
 			}
-			if err = config.SetRemoteEndpoint(paths, args[0], credential); err != nil {
+
+			if err = config.SetRemoteEndpoint(paths, endpoint, credential); err != nil {
 				return err
 			}
 
-			// The destination is not named back. ADR-0029 carves the bare host
-			// out of ADR-0028's never-echo rule for `remote status` and for
-			// nothing else, so this confirms the write and points at the one
-			// command allowed to answer "where".
+			// The destination is not named back, on either path. ADR-0031
+			// widens ADR-0029's carve-out to let the interactive confirmation
+			// show a bare host *before* the write, which is where it changes an
+			// outcome; it does not license naming the destination after the
+			// fact, where the only thing left to do about it is read `status`.
+			// So this line confirms the write and points at the command allowed
+			// to answer "where", and it is identical whether a person was
+			// prompted or a script piped.
 			if _, err = fmt.Fprintln(cmd.OutOrStdout(), `remote endpoint configured; run "wake remote status" to see it.`); err != nil {
 				return err
 			}
