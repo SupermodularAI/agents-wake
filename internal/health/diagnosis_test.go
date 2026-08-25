@@ -98,6 +98,63 @@ func TestDiagnoseDoesNotCallPendingOrInterruptedCallsLostCollection(t *testing.T
 	}
 }
 
+// Records the spool holds and no surface can read are lost collection until something
+// re-derives them — the same shape as a source nobody could read, and the reason the
+// "collects nothing" arm exists. A rebuild that has already happened is the opposite:
+// the scan reporting it is the scan that fixed it, and calling that "collects nothing"
+// would contradict the events the same scan wrote.
+func TestDiagnoseSeparatesARebuildThatHappenedFromOneStillOwed(t *testing.T) {
+	for _, c := range []struct {
+		name        string
+		scan        Scan
+		want        State
+		wantRebuild StoreRebuild
+	}{
+		{
+			name:        "a spool this build cannot read, left for the user to rebuild",
+			scan:        Scan{Transcripts: 1, StaleRecords: 3},
+			want:        StateCollectsNothing,
+			wantRebuild: StoreRebuildNeeded,
+		},
+		{
+			name:        "the same records, alongside forward collection that worked",
+			scan:        Scan{Transcripts: 1, EventsWritten: 2, StaleRecords: 3},
+			want:        StateCollectsNothing,
+			wantRebuild: StoreRebuildNeeded,
+		},
+		{
+			name:        "a rebuild the same scan performed",
+			scan:        Scan{Transcripts: 1, EventsWritten: 2, StaleRecords: 3, StaleRebuilt: true},
+			want:        StateCollecting,
+			wantRebuild: StoreRebuildDone,
+		},
+		{
+			name:        "a rebuild that re-derived nothing, because the harness had pruned it",
+			scan:        Scan{Transcripts: 1, Skipped: 1, StaleRecords: 3, StaleRebuilt: true},
+			want:        StateCollectsZero,
+			wantRebuild: StoreRebuildDone,
+		},
+		{
+			name:        "a spool this build reads",
+			scan:        Scan{Transcripts: 1, EventsWritten: 2},
+			want:        StateCollecting,
+			wantRebuild: StoreRebuildNotNeeded,
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			c.scan.At = scannedAt
+
+			got := Diagnose(Report{Scan: c.scan}, nil, nil)
+			if got.State != c.want {
+				t.Errorf("State = %q, want %q", got.State, c.want)
+			}
+			if got.StoreRebuild != c.wantRebuild {
+				t.Errorf("StoreRebuild = %q, want %q", got.StoreRebuild, c.wantRebuild)
+			}
+		})
+	}
+}
+
 // The scan time the printer renders is a decision, not a format: a counter file this
 // build could not read has no scan time rather than a zero one, and rendering the
 // zero time as a timestamp would date the last scan to year one.

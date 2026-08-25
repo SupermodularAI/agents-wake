@@ -7,11 +7,13 @@
 // ADR-0016 requires that path to exit 0 in silence, so the signal has to be left
 // somewhere `doctor` can read it later.
 //
-// Every field is an int or a time. There is no free-text field, and there is no
-// field that could hold one: `doctor` output is what people paste into issues, so a
+// Every field is an int, a bool, or a time. There is no free-text field, and there is
+// no field that could hold one: `doctor` output is what people paste into issues, so a
 // counter carries a count and never a line, a path, or a label (ADR-0019 §7,
 // ADR-0007 applied to diagnostics). A test asserts the field types, because the
-// temptation a later change will feel is to add "and here is why" as a string. The
+// temptation a later change will feel is to add "and here is why" as a string. A bool
+// is admitted on the same terms as an int and no looser — two values, neither of them
+// text — and only for a fact that is a yes or a no rather than a count. The
 // state word `doctor` prints is Diagnose's return value derived over these counters
 // on every read, and never a field in the file.
 //
@@ -52,9 +54,10 @@ import (
 // be registered. Same failure, same remedy, and the same cost — one scan's
 // diagnostics, on a file that is derived and non-precious (ADR-0014).
 //
-// Bumped to 5 when the scan gained the stale-record counter (DG-81): a version-4 file
-// read as this format would report 0 for a counter nobody measured, and that counter is
-// the only line saying the store was rebuilt under this build's record schema. Same
+// Bumped to 5 when the scan gained the stale-record counter and the flag saying
+// whether that scan rebuilt them (DG-81): a version-4 file read as this format would
+// report 0 and false for two facts nobody measured, and together they are the only
+// lines saying whether the store still holds records this build cannot read. Same
 // failure, same remedy, same cost.
 const reportVersion = 5
 
@@ -140,19 +143,35 @@ type Scan struct {
 	// and refuses it again, so a state word driven by this counter could never change
 	// again.
 	BoundaryRefused int `json:"boundary_refused"`
-	// StaleRecords counts records the last scan discarded because they carried a
-	// record schema version this build does not read, and then re-derived from the
-	// harness's own history (record.SchemaVersion, ADR-0007's dimension addition,
-	// ADR-0015's rebuild-not-migration). It is the only line that says an upgrade
-	// rebuilt the store, and it is the honest report of what such a rebuild cannot
-	// promise: a period the harness has since pruned was in the store and nowhere
-	// else, so it does not come back (ADR-0014).
+	// StaleRecords counts records the last scan found in the spool carrying a record
+	// schema version this build does not read (record.SchemaVersion, ADR-0007's
+	// dimension addition, ADR-0015's rebuild-not-migration). Every consumer reads the
+	// spool through store.Entries, which drops them the way it drops any line that does
+	// not decode, so this is the only number that says they are there at all.
 	//
-	// It is deliberately not one of Diagnose's "collects nothing" reasons. The scan
-	// that reports it is the scan that rebuilt the spool, so the state word would
-	// contradict the events that scan wrote — and unlike a source nobody could read,
-	// this is a one-time event the next scan reports as zero.
+	// It counts what the scan found, not what it did about it — StaleRebuilt is that —
+	// because the two scopes answer differently and a single number could not say which
+	// happened.
 	StaleRecords int `json:"stale_records"`
+	// StaleRebuilt is whether that scan discarded the spool and re-derived it from the
+	// harness's own history.
+	//
+	// Only a scan that imports the whole history does: the rescan half of "drop and
+	// rescan" has to be able to bring back everything the drop removed, and the
+	// hook-fired scan collects inside each repository's recorded boundary (ADR-0025), so
+	// what it re-derived would be narrower than what it deleted. This is what lets
+	// doctor report a rebuild that happened separately from one that is still owed.
+	//
+	// A rebuild is also the honest report of what it cannot promise: a period the
+	// harness has since pruned was in the store and nowhere else, so it does not come
+	// back (ADR-0014).
+	//
+	// A rebuild that happened is deliberately not one of Diagnose's "collects nothing"
+	// reasons — the scan that reports it is the scan that fixed it, so the state word
+	// would contradict the events that scan wrote, and the next scan reports zero. One
+	// that is still owed is: those records are in the store and no surface can read
+	// them, which is the definition that arm exists for.
+	StaleRebuilt bool `json:"stale_rebuilt"`
 }
 
 // Hooks is what the last `init` or `remove` managed to do. KeptOwned is the partial

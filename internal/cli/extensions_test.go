@@ -58,7 +58,7 @@ func TestDoctorOutputOnAFreshInstall(t *testing.T) {
 		"parse errors: 0\n" +
 		"skipped transcripts: 0\n" +
 		"events written: 0\n" +
-		"records rebuilt from an earlier schema version: 0\n" +
+		"records from an earlier schema version: 0\n" +
 		"refused project entries: 0\n" +
 		"global boundary directories gone: 0\n" +
 		"global boundary registrations refused: 0\n" +
@@ -66,6 +66,7 @@ func TestDoctorOutputOnAFreshInstall(t *testing.T) {
 		"pending calls: 0\n" +
 		"interrupted calls: 0\n" +
 		"ambiguous skill runs: 0\n" +
+		"store rebuild: not needed\n" +
 		"integration: never scanned\n" +
 		"global boundary: not set\n" +
 		"global boundary repositories: 0\n" +

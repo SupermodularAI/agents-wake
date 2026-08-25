@@ -1038,6 +1038,9 @@ func TestIngestRebuildsASpoolFromAnotherSchemaVersion(t *testing.T) {
 	if report.Scan.StaleRecords != 1 {
 		t.Errorf("Scan.StaleRecords = %d, want 1 — a discarded record is lost collection and carries a count", report.Scan.StaleRecords)
 	}
+	if !report.Scan.StaleRebuilt {
+		t.Error("Scan.StaleRebuilt = false; the scan that discarded the spool re-derived it, and doctor says so")
+	}
 }
 
 // TestIngestLeavesACurrentSpoolAlone is the guard on the other side: the rebuild

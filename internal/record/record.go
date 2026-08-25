@@ -24,12 +24,14 @@ import (
 // "Refused on read" is only half of that, and the half on its own is a silent
 // shrink: every consumer reads the spool through store.Entries, so a spool nobody
 // rebuilt would report the post-upgrade subset as the whole truth. The other half
-// is the scan, which discards a spool carrying a foreign version before it appends
-// to it and counts what it discarded (internal/activation, health.Scan.StaleRecords),
-// and the delivery watermark, which stamps this number and starts over when it
-// changes (internal/remote). What a rebuild cannot recover is a period the harness
-// has since pruned: the store was the only surviving copy of it, and ADR-0014
-// accepts that.
+// is the scan the user asks for, which discards a spool carrying a foreign version
+// before it appends to it and re-derives the whole history in its place — the scan a
+// hook fires collects inside each repository's recorded boundary (ADR-0025), so it
+// reports the count and leaves the drop to the one that can put the records back
+// (internal/activation, health.Scan.StaleRecords and StaleRebuilt). The third is the
+// delivery watermark, which stamps this number and starts over when it changes
+// (internal/remote). What a rebuild cannot recover is a period the harness has since
+// pruned: the store was the only surviving copy of it, and ADR-0014 accepts that.
 const SchemaVersion uint = 2
 
 // ErrUnsupportedVersion is the one refusal from Validate a caller is meant to

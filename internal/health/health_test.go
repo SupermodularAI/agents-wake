@@ -267,6 +267,13 @@ func TestEveryCounterFieldIsACountOrATime(t *testing.T) {
 				field := typ.Field(i)
 				switch field.Type.Kind() {
 				case reflect.Int:
+				// A bool is admitted for the same reason an int is, and more strictly:
+				// it has two values and neither of them is text, so it cannot hold the
+				// "and here is why" this test exists to refuse. It is here because one
+				// fact a scan records — whether it rebuilt the spool — is a yes or a
+				// no, and an int would have to encode it as a count of something it
+				// does not count.
+				case reflect.Bool:
 				case reflect.Struct:
 					if name := field.Type.Name(); name != "Time" && name != "Scan" && name != "Hooks" {
 						t.Errorf("field %s is a %s; only a time or another counter section is allowed", field.Name, name)

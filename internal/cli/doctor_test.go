@@ -137,6 +137,52 @@ func TestDoctorDoesNotCallPendingCallsLostCollection(t *testing.T) {
 	}
 }
 
+// A rebuild that is still owed has to name the command that performs it, because the
+// scan that found the records may be the hook-fired one, which is not allowed to
+// perform it: it collects inside each repository's recorded boundary (ADR-0025), so it
+// would re-derive less than it deleted. Until someone runs the command, those records
+// are in the store and no surface reads them — lost collection, not an honest zero.
+func TestDoctorNamesTheRebuildAScanCouldNotPerform(t *testing.T) {
+	paths := isolate(t)
+	if err := health.New(paths.HealthFile).RecordScan(health.Scan{At: time.Now().UTC(), Transcripts: 1, EventsWritten: 2, StaleRecords: 3}); err != nil {
+		t.Fatalf("RecordScan() error = %v", err)
+	}
+
+	out, _, err := runSplit(t, "doctor")
+	if err != nil {
+		t.Fatalf("doctor error = %v", err)
+	}
+	if !strings.Contains(out, "records from an earlier schema version: 3") {
+		t.Errorf("output is missing the stale-record count:\n%s", out)
+	}
+	if !strings.Contains(out, "store rebuild: run wake ingest --rebuild") {
+		t.Errorf("output does not name the command that rebuilds the store:\n%s", out)
+	}
+	if !strings.Contains(out, "integration: collects nothing") {
+		t.Errorf("records nothing can read were reported as an honest zero:\n%s", out)
+	}
+}
+
+// The other side: a scan that did rebuild says so, and must not tell the user to run
+// the command again or contradict the events it just wrote.
+func TestDoctorReportsARebuildThatHappened(t *testing.T) {
+	paths := isolate(t)
+	if err := health.New(paths.HealthFile).RecordScan(health.Scan{At: time.Now().UTC(), Transcripts: 1, EventsWritten: 2, StaleRecords: 3, StaleRebuilt: true}); err != nil {
+		t.Fatalf("RecordScan() error = %v", err)
+	}
+
+	out, _, err := runSplit(t, "doctor")
+	if err != nil {
+		t.Fatalf("doctor error = %v", err)
+	}
+	if !strings.Contains(out, "store rebuild: done") {
+		t.Errorf("output does not report the rebuild that happened:\n%s", out)
+	}
+	if !strings.Contains(out, "integration: collecting") {
+		t.Errorf("the scan that rebuilt the spool was reported as collecting nothing:\n%s", out)
+	}
+}
+
 func TestDoctorReportsAmbiguousSkillRuns(t *testing.T) {
 	// Its own line, because it is its own fact: how many attributed skill runs were
 	// collapsed into an already-counted one, which is uncertainty about the invocation
