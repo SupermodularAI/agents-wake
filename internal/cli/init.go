@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,7 +26,21 @@ func newInitCmd() *cobra.Command {
 		if !global {
 			return cobra.NoArgs(c, args)
 		}
-		return cobra.MaximumNArgs(1)(c, args)
+		if err := cobra.MaximumNArgs(1)(c, args); err != nil {
+			return err
+		}
+		// An empty argument is refused here rather than resolved anywhere: it is a
+		// directory the user did not name, and it is not the same request as naming
+		// no directory at all. `wake init -g "$DEVDIR"` with DEVDIR unset is the
+		// invocation this is about — a script or an alias, where the disclosure
+		// scrolls past unread — and reading it as "no argument" would consent the
+		// whole home directory as a side effect of an empty string. Refusing at parse
+		// time means nothing is printed and nothing is written. The message names the
+		// requirement and carries no path, there being none to carry.
+		if len(args) == 1 && args[0] == "" {
+			return errors.New("--global needs a directory to consent; an empty path names none")
+		}
+		return nil
 	}, RunE: func(cmd *cobra.Command, args []string) error {
 		pretty := ttyOutput(cmd)
 		paths, err := config.ResolvePaths()
@@ -49,14 +64,17 @@ func newInitCmd() *cobra.Command {
 		// TestInitCommandRunsNoProcessAndDiscoversNoRootItself).
 		var root, boundary string
 		if global {
-			if len(args) == 1 {
-				boundary = args[0]
-			}
-			if boundary == "" {
+			// Keyed off the count and not off the value: the default is what naming no
+			// directory means, and an argument that happens to be empty is not that
+			// request. Args refuses one before this runs, and this stays written so the
+			// widening cannot come back through a change up there.
+			if len(args) == 0 {
 				boundary, err = config.DefaultGlobalRoot()
 				if err != nil {
 					return err
 				}
+			} else {
+				boundary = args[0]
 			}
 		} else {
 			root, err = config.DiscoverRootForRegistration("", "")

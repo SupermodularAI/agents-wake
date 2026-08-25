@@ -110,6 +110,33 @@ func TestInitRefusesARelativeGlobalPath(t *testing.T) {
 	}
 }
 
+// An empty argument is a directory the user did not name, and it is not the same
+// request as naming no directory at all.
+//
+// `wake init -g "$DEVDIR"` with DEVDIR unset is the invocation this is about — a
+// script or an alias, where the disclosure scrolls past unread — and treating it as
+// "no argument" would consent the whole home directory as a side effect of an empty
+// string. Refused at parse time, before a path is printed or a file is written, and
+// nothing is recorded.
+func TestInitRefusesAnEmptyGlobalPath(t *testing.T) {
+	paths := isolate(t)
+
+	out, err := run(t, "init", "-g", "")
+	if err == nil {
+		t.Fatalf("init -g with an empty path succeeded; output:\n%s", out)
+	}
+	if message := err.Error(); strings.Contains(message, string(filepath.Separator)) {
+		t.Errorf("the refusal %q carries a path separator", message)
+	}
+	state, stateErr := config.GlobalRootStateFor(paths)
+	if stateErr != nil {
+		t.Fatalf("GlobalRootStateFor() error = %v", stateErr)
+	}
+	if state.Set || state.Refused {
+		t.Errorf("GlobalRootStateFor() = %+v; an empty argument recorded a boundary", state)
+	}
+}
+
 // One boundary at a time. The second run is in effect and the first is not, so a user
 // who narrows the boundary is not left with the wider one still consented.
 func TestInitGlobalTwiceReplacesTheBoundary(t *testing.T) {
