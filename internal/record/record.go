@@ -17,9 +17,27 @@ import (
 
 // SchemaVersion identifies the on-disk record contract. Adding a dimension bumps
 // it (ADR-0007), and a bump is a rebuild rather than a migration: the store is a
-// derived index, so every record of an earlier version is dropped on read and
-// rescanned (ADR-0015). Version 2 added entrypoint.
+// derived index, so a record of any other version is refused on read and the spool
+// that holds it is discarded and re-derived from the harness's own history
+// (ADR-0015). Version 2 added entrypoint.
+//
+// "Refused on read" is only half of that, and the half on its own is a silent
+// shrink: every consumer reads the spool through store.Entries, so a spool nobody
+// rebuilt would report the post-upgrade subset as the whole truth. The other half
+// is the scan, which discards a spool carrying a foreign version before it appends
+// to it and counts what it discarded (internal/activation, health.Scan.StaleRecords),
+// and the delivery watermark, which stamps this number and starts over when it
+// changes (internal/remote). What a rebuild cannot recover is a period the harness
+// has since pruned: the store was the only surviving copy of it, and ADR-0014
+// accepts that.
 const SchemaVersion uint = 2
+
+// ErrUnsupportedVersion is the one refusal from Validate a caller is meant to
+// recognise. Every other refusal means the record was never valid; this one means
+// an earlier build wrote it correctly under a contract this build does not read, and
+// the answer to it is a rebuild rather than a skip. It carries no field and no
+// value — only which of the two situations this is (plan §4.2).
+var ErrUnsupportedVersion = errors.New("unsupported schema version")
 
 var (
 	versionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+:-]{0,127}$`)
@@ -141,7 +159,7 @@ func Marshal(r Record) ([]byte, error) {
 // Validate checks the persisted privacy and format contract.
 func Validate(r Record) error {
 	if r.SchemaVersion != SchemaVersion {
-		return errors.New("unsupported schema version")
+		return ErrUnsupportedVersion
 	}
 	if !validSHA256(r.EventID) {
 		return errors.New("invalid event id")

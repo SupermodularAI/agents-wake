@@ -4,6 +4,8 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -135,6 +137,49 @@ func validRecord() Record {
 		Name:          "review",
 		Invoker:       InvokerModel,
 		Outcome:       &outcome,
+	}
+}
+
+// TestValidateNamesAnUnreadableSchemaVersion pins the one refusal a caller has to
+// be able to tell apart. Everything else Validate refuses is a record that was
+// always invalid; a foreign version is a record an earlier build wrote correctly,
+// and the store rebuilds for it rather than silently reading past it.
+func TestValidateNamesAnUnreadableSchemaVersion(t *testing.T) {
+	stale := validRecord()
+	stale.SchemaVersion = SchemaVersion - 1
+	if err := Validate(stale); !errors.Is(err, ErrUnsupportedVersion) {
+		t.Fatalf("Validate() error = %v, want ErrUnsupportedVersion", err)
+	}
+
+	future := validRecord()
+	future.SchemaVersion = SchemaVersion + 1
+	if err := Validate(future); !errors.Is(err, ErrUnsupportedVersion) {
+		t.Fatalf("Validate() on a future version error = %v, want ErrUnsupportedVersion", err)
+	}
+
+	// A record of this version that is invalid for any other reason must not be
+	// mistaken for one, or a scan would rebuild the whole spool over one bad line.
+	broken := validRecord()
+	broken.Name = "contains space"
+	if err := Validate(broken); err == nil || errors.Is(err, ErrUnsupportedVersion) {
+		t.Fatalf("Validate() error = %v, want a refusal that is not ErrUnsupportedVersion", err)
+	}
+}
+
+// TestDecodeCarriesTheVersionRefusal covers the path that matters: the store reads
+// lines through Decode, so the sentinel has to survive its wrapping.
+func TestDecodeCarriesTheVersionRefusal(t *testing.T) {
+	stale := validRecord()
+	stale.SchemaVersion = SchemaVersion - 1
+	line, err := json.Marshal(stale)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if _, err := Decode(line); !errors.Is(err, ErrUnsupportedVersion) {
+		t.Fatalf("Decode() error = %v, want ErrUnsupportedVersion", err)
+	}
+	if _, err := Decode([]byte("not json")); errors.Is(err, ErrUnsupportedVersion) {
+		t.Fatal("Decode() reported unreadable JSON as a foreign schema version")
 	}
 }
 

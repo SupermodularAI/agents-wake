@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -506,5 +507,66 @@ func testRecord(source string) record.Record {
 		Name:          "review",
 		Invoker:       record.InvokerModel,
 		Outcome:       &outcome,
+	}
+}
+
+// staleLine is one record as an earlier build would have written it: this build's
+// own encoding with only the version number changed. The format change that
+// prompted the bump was additive, so the two lines are otherwise identical in
+// shape — which is exactly why the difference has to be noticed rather than
+// inferred from a decode failure.
+func staleLine(t *testing.T, source string) []byte {
+	t.Helper()
+	event := testRecord(source)
+	encoded, err := json.Marshal(struct {
+		record.Record
+		SchemaVersion uint `json:"schema_version"`
+	}{Record: event, SchemaVersion: record.SchemaVersion - 1})
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	return append(encoded, '\n')
+}
+
+func TestStaleCountsOnlyLinesFromAnotherSchemaVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.ndjson")
+	store := New(path)
+	if _, err := store.Append([]record.Record{testRecord("current")}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("OpenFile() error = %v", err)
+	}
+	// Two foreign lines, one line that is not JSON at all, and an unterminated
+	// tail: only the first two are a reason to rebuild.
+	body := append(staleLine(t, "one"), staleLine(t, "two")...)
+	body = append(body, []byte("{not json}\n")...)
+	body = append(body, []byte(`{"schema_version":`)...)
+	if _, writeErr := file.Write(body); writeErr != nil {
+		t.Fatalf("Write() error = %v", writeErr)
+	}
+	if closeErr := file.Close(); closeErr != nil {
+		t.Fatalf("Close() error = %v", closeErr)
+	}
+
+	stale, err := store.Stale()
+	if err != nil {
+		t.Fatalf("Stale() error = %v", err)
+	}
+	if stale != 2 {
+		t.Fatalf("Stale() = %d, want 2", stale)
+	}
+}
+
+func TestStaleIsZeroWithoutASpool(t *testing.T) {
+	store := New(filepath.Join(t.TempDir(), "events.ndjson"))
+	stale, err := store.Stale()
+	if err != nil {
+		t.Fatalf("Stale() error = %v", err)
+	}
+	if stale != 0 {
+		t.Fatalf("Stale() = %d, want 0 on a machine that never ingested", stale)
 	}
 }
