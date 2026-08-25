@@ -7,6 +7,9 @@ import (
 	"net/http"
 	"os"
 	"testing"
+
+	"github.com/SupermodularAI/agents-wake/internal/record"
+	"github.com/SupermodularAI/agents-wake/internal/store"
 )
 
 // TestPreviewFlushMatchesWhatFlushPosts is the acceptance criterion
@@ -41,6 +44,27 @@ func TestPreviewFlushMatchesWhatFlushPosts(t *testing.T) {
 		if body := gunzip(t, receiver.request(t, i).body); !bytes.Equal(body, payload) {
 			t.Errorf("batch %d: posted body = %s\npreview = %s", i, body, payload)
 		}
+	}
+}
+
+func TestPreviewFlushOmitsBuiltinOnlyBatches(t *testing.T) {
+	paths := testPaths(t)
+	builtin := validRecord()
+	builtin.Kind = record.KindBuiltinTool
+	builtin.Name = "Bash"
+	if _, err := store.New(eventsPath(paths)).Append([]record.Record{builtin}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+
+	payloads, err := PreviewFlush(paths)
+	if err != nil {
+		t.Fatalf("PreviewFlush() error = %v", err)
+	}
+	if len(payloads.Batches) != 0 {
+		t.Errorf("Batches = %d, want 0", len(payloads.Batches))
+	}
+	if payloads.Dropped != 1 {
+		t.Errorf("Dropped = %d, want 1", payloads.Dropped)
 	}
 }
 

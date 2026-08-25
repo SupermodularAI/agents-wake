@@ -97,9 +97,9 @@ type Report struct {
 	Batches int
 	// Records is how many records those batches carried.
 	Records int
-	// Dropped is how many records the encoder refused, within accepted batches.
-	// Reported rather than discarded so a deliberate flush can say it was partly
-	// blind (plan §12).
+	// Dropped is how many records the encoder omitted from delivery.
+	// Reported rather than discarded so a deliberate flush can say records were
+	// omitted instead of treating the run as an empty delivery (plan §12).
 	Dropped int
 	// Suppressed is true when remote.min_interval held this run back before it
 	// read the spool, and false in every other case — including a run that read
@@ -229,17 +229,24 @@ func flushLocked(p config.Paths, auth config.RemoteAuth, minInterval time.Durati
 	var report Report
 	var deliveryErr error
 	for _, batch := range batches(entries) {
-		// Encode's dropped count is kept and reported. A record the encoder
-		// refuses is one it will refuse on every future run, so the watermark
-		// still advances past it — holding it back would stall delivery
-		// permanently — but a user who ran `remote flush` deliberately is
-		// someone this can be told, which is what Report exists for. The
-		// hook-invoked path still discards it, because it may not print at all
-		// (ADR-0016).
+		// Encode's omitted count is kept and reported. A record the encoder
+		// omits will stay omitted on every future run, so the watermark still
+		// advances past it — holding it back would stall delivery permanently —
+		// but a user who ran `remote flush` deliberately is someone this can be
+		// told, which is what Report exists for. The hook-invoked path still
+		// discards it, because it may not print at all (ADR-0016).
 		payload, dropped, encodeErr := Encode(recordsOf(batch))
 		if encodeErr != nil {
 			deliveryErr = encodeErr
 			break
+		}
+		if len(batch) == dropped {
+			// An empty OTLP batch is not an observation and only creates noise at
+			// the receiver. The watermark can advance without a POST because none
+			// of these records are eligible for remote delivery.
+			state.Position = batch[len(batch)-1].Position
+			report.Dropped += dropped
+			continue
 		}
 		body, gzipErr := gzipped(payload)
 		if gzipErr != nil {

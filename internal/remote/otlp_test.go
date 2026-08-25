@@ -612,7 +612,6 @@ func TestMinimalRecordEmitsOnlyAlwaysPresentKeys(t *testing.T) {
 func TestObservationTypeMapping(t *testing.T) {
 	cases := map[record.Kind]string{
 		record.KindMCPTool:      "tool",
-		record.KindBuiltinTool:  "tool",
 		record.KindSubagent:     "agent",
 		record.KindSkill:        "span",
 		record.KindMCPServer:    "span",
@@ -634,6 +633,31 @@ func TestObservationTypeMapping(t *testing.T) {
 				t.Fatalf("wake.kind = %v, want %q", got, kind)
 			}
 		})
+	}
+}
+
+func TestEncodeOmitsBuiltinTools(t *testing.T) {
+	builtin := fullRecord()
+	builtin.Kind = record.KindBuiltinTool
+	builtin.Name = "Bash"
+
+	payload, dropped, err := Encode([]record.Record{builtin, fullRecord()})
+	if err != nil {
+		t.Fatalf("Encode() error = %v", err)
+	}
+	if dropped != 1 {
+		t.Fatalf("Encode() dropped = %d, want 1", dropped)
+	}
+	spans := spansOf(t, payload)
+	if len(spans) != 1 {
+		t.Fatalf("Encode() emitted %d spans, want 1", len(spans))
+	}
+	if bytes.Contains(payload, []byte("Bash")) {
+		t.Fatal("payload contains the omitted built-in tool")
+	}
+	attributes := attributesOf(t, spans[0], "attributes")
+	if got := attributes["wake.kind"]["stringValue"]; got != string(record.KindSkill) {
+		t.Fatalf("wake.kind = %v, want %q", got, record.KindSkill)
 	}
 }
 

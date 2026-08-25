@@ -16,7 +16,7 @@ import (
 type Payloads struct {
 	// Batches is one encoded body per batch a flush would post.
 	Batches [][]byte
-	// Dropped is how many records the encoder refused across all batches.
+	// Dropped is how many records the encoder omitted across all batches.
 	Dropped int
 }
 
@@ -66,8 +66,10 @@ func PreviewFlush(p config.Paths) (Payloads, error) {
 		if encodeErr != nil {
 			return Payloads{}, encodeErr
 		}
-		preview.Batches = append(preview.Batches, payload)
 		preview.Dropped += dropped
+		if len(batch) != dropped {
+			preview.Batches = append(preview.Batches, payload)
+		}
 	}
 	return preview, nil
 }

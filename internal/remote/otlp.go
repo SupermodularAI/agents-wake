@@ -125,12 +125,14 @@ const (
 var errEncode = errors.New("encoding otlp payload")
 
 // Encode returns the OTLP/HTTP JSON payload for records and the number of
-// records dropped as unencodable.
+// records omitted from it.
 //
 // It fails closed: every record is re-validated here, on the way out, and one
 // that cannot be represented is dropped rather than emitted in a degraded form
-// (ADR-0030). Dropping is never silent — the count is returned so a caller can
-// report blindness instead of reporting zero (plan §12).
+// (ADR-0030). Built-in tools are also omitted: Wake retains them locally, but
+// they are implementation noise rather than useful remote observations. Omission
+// is never silent — the count is returned so a caller can report it rather than
+// treating it as an empty delivery (plan §12).
 func Encode(records []record.Record) ([]byte, int, error) {
 	spans := make([]span, 0, len(records))
 	dropped := 0
@@ -154,7 +156,8 @@ func Encode(records []record.Record) ([]byte, int, error) {
 }
 
 // encodeSpan projects one record onto a span, reporting false when the record
-// must be dropped. Every drop reason is a representability failure, never a
+// must be omitted. Built-in tools are intentionally excluded from remote
+// telemetry; every other omission is a representability failure, never a
 // judgement about the record's content.
 //
 // parentSpanId is deliberately absent in v1. ViaSkill and ViaAgent name a parent
@@ -167,6 +170,12 @@ func encodeSpan(r record.Record) (span, bool) {
 	// the same contract as the disk (ADR-0030), and this is the last point at
 	// which a malformed record can still be stopped.
 	if err := record.Validate(r); err != nil {
+		return span{}, false
+	}
+	// Built-in tools are retained for local reporting, but exporting every Bash,
+	// Read, and Write call obscures the user-configured primitives this signal is
+	// intended to show in Langfuse.
+	if r.Kind == record.KindBuiltinTool {
 		return span{}, false
 	}
 	start, end, ok := spanTimes(r)
@@ -267,7 +276,7 @@ func spanAttributes(r record.Record) []keyValue {
 // and in the mapping test, instead of silently inheriting "span".
 func observationType(kind record.Kind) string {
 	switch kind {
-	case record.KindMCPTool, record.KindBuiltinTool:
+	case record.KindMCPTool:
 		return "tool"
 	case record.KindSubagent:
 		return "agent"
