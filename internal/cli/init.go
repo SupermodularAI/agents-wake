@@ -19,7 +19,7 @@ func newInitCmd() *cobra.Command {
 	var full bool
 	cmd := &cobra.Command{Use: "init", Short: "Enable local Claude Code collection for this project", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		pretty := ttyOutput(cmd)
-		root, err := config.DiscoverRootForRegistration()
+		root, err := config.DiscoverRootForRegistration("", "")
 		if err != nil {
 			return err
 		}
