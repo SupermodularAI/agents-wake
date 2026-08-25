@@ -51,7 +51,12 @@ import (
 // and one of them is the only line that says a repository under the boundary could not
 // be registered. Same failure, same remedy, and the same cost — one scan's
 // diagnostics, on a file that is derived and non-precious (ADR-0014).
-const reportVersion = 4
+//
+// Bumped to 5 when the scan gained the stale-record counter (DG-81): a version-4 file
+// read as this format would report 0 for a counter nobody measured, and that counter is
+// the only line saying the store was rebuilt under this build's record schema. Same
+// failure, same remedy, same cost.
+const reportVersion = 5
 
 // reportFileMode is the mode the counter file is written with. It holds no path and
 // no label, but it is state about this user's machine and the rest of the local
@@ -135,6 +140,19 @@ type Scan struct {
 	// and refuses it again, so a state word driven by this counter could never change
 	// again.
 	BoundaryRefused int `json:"boundary_refused"`
+	// StaleRecords counts records the last scan discarded because they carried a
+	// record schema version this build does not read, and then re-derived from the
+	// harness's own history (record.SchemaVersion, ADR-0007's dimension addition,
+	// ADR-0015's rebuild-not-migration). It is the only line that says an upgrade
+	// rebuilt the store, and it is the honest report of what such a rebuild cannot
+	// promise: a period the harness has since pruned was in the store and nowhere
+	// else, so it does not come back (ADR-0014).
+	//
+	// It is deliberately not one of Diagnose's "collects nothing" reasons. The scan
+	// that reports it is the scan that rebuilt the spool, so the state word would
+	// contradict the events that scan wrote — and unlike a source nobody could read,
+	// this is a one-time event the next scan reports as zero.
+	StaleRecords int `json:"stale_records"`
 }
 
 // Hooks is what the last `init` or `remove` managed to do. KeptOwned is the partial

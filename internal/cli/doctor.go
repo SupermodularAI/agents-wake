@@ -124,6 +124,7 @@ func writeDiagnosis(out io.Writer, paths config.Paths, claudeDir string) error {
 		{"parse errors", report.Scan.ParseErrors},
 		{"skipped transcripts", report.Scan.Skipped},
 		{"events written", report.Scan.EventsWritten},
+		{"records rebuilt from an earlier schema version", report.Scan.StaleRecords},
 		{"refused project entries", report.Scan.RefusedProjects},
 		{"global boundary directories gone", report.Scan.BoundarySkipped},
 		{"global boundary registrations refused", report.Scan.BoundaryRefused},
