@@ -1,5 +1,3 @@
-//go:build remote
-
 package remote
 
 import (
@@ -45,8 +43,8 @@ func TestStatusReportsPresenceNotTheEndpoint(t *testing.T) {
 }
 
 // TestStatusFieldsAreExactly mirrors internal/config's
-// TestExportedTypesCarryNoPathOrLabelField, which is untagged and so cannot see
-// this type at all. Equality rather than containment: a field added later has to
+// TestExportedTypesCarryNoPathOrLabelField, which lives in another package and
+// so cannot see this type at all. Equality rather than containment: a field added later has to
 // be justified here, which is the only point at which "and here is why, as a
 // string" gets stopped.
 func TestStatusFieldsAreExactly(t *testing.T) {

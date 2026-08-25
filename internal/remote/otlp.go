@@ -1,5 +1,3 @@
-//go:build remote
-
 // Package remote projects stored records onto the OTLP/HTTP JSON wire format
 // and delivers them.
 //
@@ -9,16 +7,18 @@
 // is a record shape, and no single serialisation is both. What replaces it is
 // stricter, not looser: the emitted attribute key set is a frozen literal
 // asserted by test, so the privacy allowlist governs the wire exactly as it
-// governs the disk (ADR-0007, ADR-0012, plan §9).
+// governs the disk (ADR-0007, ADR-0030, plan §9). That holds in every build:
+// there is no configuration and no build in which a record reaches the wire
+// through any other encoder.
 //
 // The encoder is pure. This file and its helpers perform no I/O — no network,
 // no filesystem, no clock — and make no model call (ADR-0008). Encode takes
 // records and returns bytes.
 //
 // Sending them is deliver.go's business, and watermark.go and state.go are the
-// state it keeps: those three are this package's I/O surface, under this same
-// build tag, and they are the only outbound connection in the whole binary
-// (ADR-0012, ADR-0026). The import assertion in the test is therefore per file
+// state it keeps: those three are this package's I/O surface, and deliver.go's
+// POST is the only outbound connection the binary makes in its own process
+// (ADR-0026, ADR-0030). The import assertion in the test is therefore per file
 // rather than per package — each file declares its exact import set, and the
 // no-I/O forbidden set is asserted against the encoder's files, which is what
 // the purity claim above is actually about.
@@ -129,7 +129,7 @@ var errEncode = errors.New("encoding otlp payload")
 //
 // It fails closed: every record is re-validated here, on the way out, and one
 // that cannot be represented is dropped rather than emitted in a degraded form
-// (ADR-0012). Dropping is never silent — the count is returned so a caller can
+// (ADR-0030). Dropping is never silent — the count is returned so a caller can
 // report blindness instead of reporting zero (plan §12).
 func Encode(records []record.Record) ([]byte, int, error) {
 	spans := make([]span, 0, len(records))
@@ -164,7 +164,7 @@ func Encode(records []record.Record) ([]byte, int, error) {
 // carries a real parent id — an ADR conversation, not an implementation detail.
 func encodeSpan(r record.Record) (span, bool) {
 	// Validate on the way out as well as on the way in: the wire is subject to
-	// the same contract as the disk (ADR-0012), and this is the last point at
+	// the same contract as the disk (ADR-0030), and this is the last point at
 	// which a malformed record can still be stopped.
 	if err := record.Validate(r); err != nil {
 		return span{}, false

@@ -1,5 +1,3 @@
-//go:build remote
-
 package remote
 
 import (
@@ -66,9 +64,9 @@ type deliveryState struct {
 // rather than outlive it and describe records that are gone (ADR-0014).
 //
 // Composed here rather than added to config.Paths, for the reason
-// remoteAuthPath gives: a field on Paths would be a build-tagged field on an
-// untagged struct, which is how the default build ends up disclosing a file it
-// can never have.
+// remoteAuthPath gives: Paths is the list `init` discloses under ADR-0010, and a
+// file that exists only once delivery has actually run is not a path to
+// disclose.
 func deliveryStatePath(p config.Paths) string {
 	return filepath.Join(p.DataDir, deliveryStateFileName)
 }

@@ -1,5 +1,3 @@
-//go:build remote
-
 package remote
 
 import (
@@ -24,7 +22,7 @@ import (
 // frozenPackageImports is every non-test file in this package and the exact
 // import set that file may have, declared here and nowhere else. Asserting the
 // package against a list it exports itself would be vacuous, so the literal
-// lives in the test (ADR-0012: the wire is governed by the same allowlist
+// lives in the test (ADR-0030: the wire is governed by the same allowlist
 // discipline as the disk).
 //
 // Per file rather than per package, since DG-65 added the delivery loop beside
@@ -242,7 +240,7 @@ func TestFixturesAreValidRecords(t *testing.T) {
 // which is made about the PACKAGE and so must be checked across the package.
 //
 // It scans every non-test .go file in this directory rather than naming files.
-// The transport landed behind this same remote build tag, and a by-name
+// The transport landed after the encoder did, and a by-name
 // assertion would have stayed green while net/http entered the package: a file
 // this map does not declare is a failure, so a new file cannot arrive with
 // capabilities nobody reviewed. Build constraints are deliberately not honoured
@@ -556,7 +554,7 @@ func TestStatusCodeNeverGuessesSuccess(t *testing.T) {
 // The assertion against it is equality, not containment. Containment would pass
 // for a payload that had grown a new key, and a new key is exactly the way a
 // field carrying prompt text, tool arguments, or tool output would arrive
-// (ADR-0007, ADR-0012).
+// (ADR-0007, ADR-0030).
 var frozenSpanAttributeKeys = []string{
 	"gen_ai.request.model",
 	"langfuse.observation.type",
