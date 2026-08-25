@@ -61,17 +61,7 @@ const ingestLockName = "ingest.lock"
 // nobody measured and erase what an earlier import did find — the distinction ADR-0010
 // asks doctor to keep.
 func Init(paths config.Paths, root, claudeDir, executable string, full bool) (int, error) {
-	command, err := hookCommandFor(executable)
-	if err != nil {
-		return 0, err
-	}
-	// The refusals the settings file's shape decides say what the file's problem is
-	// and stop there, so the step that clears them is named here, by the command the
-	// user actually ran.
-	if settingsErr := checkSettingsShape(claudeDir); settingsErr != nil {
-		return 0, withSettingsFix(settingsErr, "then run wake init again")
-	}
-	repos, err := config.OpenRepos(paths)
+	repos, command, err := initPrologue(paths, claudeDir, executable)
 	if err != nil {
 		return 0, err
 	}
@@ -99,11 +89,79 @@ func Init(paths config.Paths, root, claudeDir, executable string, full bool) (in
 	if _, listErr := config.AddToList(paths, "scan.repos", id); listErr != nil {
 		return 0, listErr
 	}
+	return initEpilogue(paths, repos, claudeDir, command, root, full)
+}
+
+// InitGlobal records a machine-wide collection boundary and installs Wake's trigger.
+//
+// It registers no root of its own: the boundary encloses roots and is never one
+// (ADR-0032 §1, §7), and registering the directory the user stood in — most often the
+// home directory — would enclose every repository the boundary later discovers, which
+// ADR-0019 §5's nested-root refusal would then refuse. Every repository under it is
+// registered instead, under its own identity, as a scan first sees a session in it.
+//
+// It shares Init's prologue and epilogue exactly, so every refusal decidable from the
+// arguments alone is still raised before anything is written, and the trigger, the
+// hook counters and the inventory refresh are the same on both paths. What differs is
+// one call: Init registers a root, this records a boundary.
+//
+// full has the same meaning it has on Init, and the two facts it produces are
+// separate: the history under the boundary is imported now, and each repository the
+// import discovers still records the instant it was registered. The import is a
+// user-asked scan and ignores every recorded boundary already (ADR-0025), so nothing
+// needs clearing to make it work — clearing it would widen every later trigger's scan
+// with no disclosure behind it.
+func InitGlobal(paths config.Paths, boundary, claudeDir, executable string, full bool) (int, error) {
+	repos, command, err := initPrologue(paths, claudeDir, executable)
+	if err != nil {
+		return 0, err
+	}
+	if err := repos.SetGlobalRoot(boundary); err != nil {
+		return 0, err
+	}
+	// The boundary as the inventory root, which resolves to ProjectUnconsented
+	// (discoveryScope): the boundary is not a consented root, so project-local
+	// discovery is withheld for it. That is the honest answer rather than a gap —
+	// each repository under it gets project-local discovery once it is registered.
+	return initEpilogue(paths, repos, claudeDir, command, boundary, full)
+}
+
+// initPrologue raises every refusal decidable from the arguments alone and opens the
+// resolution table.
+//
+// It is the half of `init` that must run before anything is written, and it is shared
+// so the two entry points cannot drift on it: an installation that cannot host Wake's
+// trigger writes nothing at all, whether the user consented one repository or a whole
+// boundary.
+func initPrologue(paths config.Paths, claudeDir, executable string) (*config.Repos, string, error) {
+	command, err := hookCommandFor(executable)
+	if err != nil {
+		return nil, "", err
+	}
+	// The refusals the settings file's shape decides say what the file's problem is
+	// and stop there, so the step that clears them is named here, by the command the
+	// user actually ran.
+	if settingsErr := checkSettingsShape(claudeDir); settingsErr != nil {
+		return nil, "", withSettingsFix(settingsErr, "then run wake init again")
+	}
+	repos, err := config.OpenRepos(paths)
+	if err != nil {
+		return nil, "", err
+	}
+	return repos, command, nil
+}
+
+// initEpilogue installs the trigger and does whatever full asks for.
+//
+// inventoryRoot is the directory project-local primitive discovery is scoped to: the
+// consented root on Init's path, the boundary on InitGlobal's, where it resolves to
+// unconsented and withholds project-local discovery.
+func initEpilogue(paths config.Paths, repos *config.Repos, claudeDir, command, inventoryRoot string, full bool) (int, error) {
 	installed, err := installHooks(paths, claudeDir, command)
 	if err != nil {
-		// Wrapped for the same reason as the pre-check above: a file that changed
-		// shape in between is refused by the write's own read, and that refusal needs
-		// the same next step attached.
+		// Wrapped for the same reason as the pre-check in initPrologue: a file that
+		// changed shape in between is refused by the write's own read, and that refusal
+		// needs the same next step attached.
 		return 0, withSettingsFix(err, "then run wake init again")
 	}
 	counters := health.New(paths.HealthFile)
@@ -127,13 +185,13 @@ func Init(paths config.Paths, root, claudeDir, executable string, full bool) (in
 		// `wake ingest` actually found.
 		//
 		// Not calling the import is only half of forward-only; the other half is the
-		// boundary recorded above, which is what the trigger's own scan honours. The
-		// boundary is not a cursor and does not stand in for one: it says what the user
-		// consented to, never what has been seen, so re-scanning stays safe for the
+		// boundary recorded by the caller, which is what the trigger's own scan honours.
+		// The boundary is not a cursor and does not stand in for one: it says what the
+		// user consented to, never what has been seen, so re-scanning stays safe for the
 		// reason it always was (ADR-0004, ADR-0015).
-		return 0, refreshInventory(paths, repos, claudeDir, root, events)
+		return 0, refreshInventory(paths, repos, claudeDir, inventoryRoot, events)
 	}
-	written, scan, err := importHistory(repos, claudeDir, events, staleness(paths), wholeHistory)
+	written, scan, err := scanWithBoundary(paths, repos, claudeDir, events, staleness(paths), wholeHistory)
 	// The counters are recorded whether the scan succeeded or not: a partial
 	// activation — hooks written, history import failed — is reported through
 	// doctor rather than repaired silently, and the counters are the report.
@@ -143,7 +201,7 @@ func Init(paths config.Paths, root, claudeDir, executable string, full bool) (in
 	if err != nil {
 		return written, err
 	}
-	return written, refreshInventory(paths, repos, claudeDir, root, events)
+	return written, refreshInventory(paths, repos, claudeDir, inventoryRoot, events)
 }
 
 // Ingest imports available transcripts for consented repositories only.
@@ -174,7 +232,10 @@ func ingestScoped(paths config.Paths, claudeDir string, scope collectionScope) (
 		return 0, fmt.Errorf("resolving current directory: %w", err)
 	}
 	events := store.New(filepath.Join(paths.DataDir, eventsFile))
-	written, scan, err := importHistory(repos, claudeDir, events, staleness(paths), scope)
+	// Through the sequencer, so a user-asked scan picks up a repository the boundary
+	// encloses that no scan has seen a session in yet — requirement 6's "not only the
+	// ones present when --global ran".
+	written, scan, err := scanWithBoundary(paths, repos, claudeDir, events, staleness(paths), scope)
 	if recordErr := health.New(paths.HealthFile).RecordScan(scan); recordErr != nil && err == nil {
 		err = recordErr
 	}
@@ -316,10 +377,19 @@ const (
 // judged against the same table and the same boundaries (ADR-0019 §1). The id is
 // returned even when the answer is no: the reader ignores it, and computing it
 // unconditionally keeps this function a pure question about consent.
-func resolverFor(repos *config.Repos, scope collectionScope) claudecode.Resolver {
+//
+// discover is where a working directory the recorded global root encloses is noted, and
+// noting is all that happens: no git, no os.Stat, no registration on this path
+// (ADR-0032 §5). Registering here would judge two events of one scan against two
+// different tables. It is nil when there is nothing to collect for, and observe treats
+// a nil collector as a no-op.
+func resolverFor(repos *config.Repos, scope collectionScope, discover *boundaryDiscovery) claudecode.Resolver {
 	return func(cwd string, at time.Time) (record.Hash, bool) {
 		identity, err := repos.Identify(cwd)
 		if err != nil || !identity.Matched {
+			if err == nil {
+				discover.observe(cwd)
+			}
 			return record.Hash(identity.ID), false
 		}
 		if scope == wholeHistory {
@@ -347,10 +417,10 @@ var importHistory = ingestHistory
 // rather than an error that breaks the command (plan §4.3). Swallowed and
 // uncounted, though, they are indistinguishable from a machine with no history —
 // which is the confusion ADR-0010 asks doctor to end.
-func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Store, stale claudecode.Staleness, scope collectionScope) (int, health.Scan, error) {
+func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Store, stale claudecode.Staleness, scope collectionScope, discover *boundaryDiscovery) (int, health.Scan, error) {
 	written := 0
 	scan := health.Scan{At: time.Now().UTC(), RefusedProjects: repos.DroppedEntries()}
-	resolve := resolverFor(repos, scope)
+	resolve := resolverFor(repos, scope, discover)
 	err := filepath.WalkDir(filepath.Join(claudeDir, "projects"), func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			// "Not there" arrives by this same route as "could not be read":

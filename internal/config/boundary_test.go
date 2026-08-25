@@ -119,6 +119,10 @@ func TestExportedTypesCarryNoPathOrLabelField(t *testing.T) {
 	assertFieldsAre(t, reflect.TypeOf(Problem{}), "Key", "Reason")
 	assertFieldsAre(t, reflect.TypeOf(NestedRootError{}), "EnclosingID", "Outer")
 	assertFieldsAre(t, reflect.TypeOf(Key{}), "Name", "Kind", "Default", "Sentinels", "Provisional")
+	// The collection boundary is a directory the user typed, and this is the type
+	// that reports on it: flags and a count, never the path. `doctor` is the caller,
+	// and its output is what people paste into issues (ADR-0019 §7).
+	assertFieldsAre(t, reflect.TypeOf(GlobalRootState{}), "Set", "Refused", "Discovered")
 
 	// A second, looser net for a field added under a name the allowlists above
 	// would have to be updated to admit: whoever adds it has to justify the name
@@ -129,6 +133,7 @@ func TestExportedTypesCarryNoPathOrLabelField(t *testing.T) {
 		reflect.TypeOf(Problem{}),
 		reflect.TypeOf(NestedRootError{}),
 		reflect.TypeOf(Key{}),
+		reflect.TypeOf(GlobalRootState{}),
 	} {
 		for i := range typ.NumField() {
 			name := strings.ToLower(typ.Field(i).Name)

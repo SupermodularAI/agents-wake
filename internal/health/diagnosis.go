@@ -69,6 +69,26 @@ type Diagnosis struct {
 // never finished (ADR-0015). Both are honest, and neither is a source nobody could
 // read.
 //
+// Neither boundary counter is in it, and the refused one is the interesting case.
+//
+// A directory the recorded global root encloses whose repository could not be
+// registered did lose collection: it has no identity, so every session in it counted
+// as belonging to nothing. What keeps it out of this arm is that it is a standing fact
+// rather than something a scan found out — every scan re-observes the same directory
+// and refuses it again, nothing records that it was refused, and no command removes
+// the entry it nests with (ADR-0019 §5 is the usual refusal). A state word driven by
+// that counter could never change again, so a machine collecting normally would read
+// as "collects nothing" for good, and a diagnosis that cannot change is not one. This
+// is the same reason Skipped and an ambiguous skill run are excluded, and the counter
+// is what reports the loss: doctor prints it beside the boundary's own state, which is
+// where a fact about the boundary belongs rather than in the machine-wide word.
+//
+// A boundary directory that is gone is not in it either, for the reason Skipped is
+// not: there is nothing left there to read, so nothing was lost by not registering it.
+// Folding it in would put every machine that has ever deleted a project directory
+// permanently into "collects nothing", since nothing about that directory will ever
+// change.
+//
 // An ambiguous skill run is not in it either. The transcript was read completely and
 // the collapse is a documented decision (ADR-0023's accepted limitation), not
 // blindness: no transcript signal separates one slash-command run from two with no tool

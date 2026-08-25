@@ -147,6 +147,8 @@ func TestDiagnoseOnlyEverReturnsAKnownState(t *testing.T) {
 		{Scan: Scan{At: scannedAt, Transcripts: 3, Skipped: 3}},
 		{Scan: Scan{At: scannedAt, EventsWritten: 4}},
 		{Scan: Scan{At: scannedAt, EventsWritten: 1, PendingCalls: 5, InterruptedCalls: 3}},
+		{Scan: Scan{At: scannedAt, EventsWritten: 1, BoundarySkipped: 2}},
+		{Scan: Scan{At: scannedAt, EventsWritten: 1, BoundaryRefused: 2}},
 	}
 	failures := []error{nil, errors.New("refused")}
 
@@ -158,5 +160,33 @@ func TestDiagnoseOnlyEverReturnsAKnownState(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// A registration the boundary could not complete is reported as its own number and
+// does not blind the integration state.
+//
+// It is a standing fact about a directory rather than a source nobody could read: the
+// same directory is re-observed and re-refused by every scan, nothing records that it
+// was refused, and no command removes the entry it nests with. Folding it in would put
+// a machine that is collecting normally into "collects nothing" permanently, which is
+// the reason Skipped and an ambiguous skill run are not in it either. The counter is
+// what says collection was lost there, and doctor prints it beside the boundary's own
+// state.
+func TestDiagnoseDoesNotLetARefusedBoundaryRegistrationBlindTheIntegrationState(t *testing.T) {
+	got := Diagnose(Report{Scan: Scan{At: scannedAt, Transcripts: 2, EventsWritten: 4, BoundaryRefused: 1}}, nil, nil)
+	if got.State != StateCollecting {
+		t.Errorf("State = %q, want %q", got.State, StateCollecting)
+	}
+}
+
+// A directory the boundary discovered and that is no longer there is an honest zero,
+// for the reason Skipped is one: there is nothing left there to read, so nothing was
+// lost by not registering it. Folding it in would put every machine that has ever
+// deleted a project directory permanently into "collects nothing".
+func TestDiagnoseDoesNotCallAVanishedBoundaryDirectoryLostCollection(t *testing.T) {
+	got := Diagnose(Report{Scan: Scan{At: scannedAt, Transcripts: 2, EventsWritten: 4, BoundarySkipped: 3}}, nil, nil)
+	if got.State != StateCollecting {
+		t.Errorf("State = %q, want %q", got.State, StateCollecting)
 	}
 }

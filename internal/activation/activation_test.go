@@ -92,9 +92,9 @@ func TestInitWithoutFullNeverWalksHarnessHistory(t *testing.T) {
 	original := importHistory
 	t.Cleanup(func() { importHistory = original })
 	walks := 0
-	importHistory = func(repos *config.Repos, claudeDir string, destination *store.Store, stale claudecode.Staleness, scope collectionScope) (int, health.Scan, error) {
+	importHistory = func(repos *config.Repos, claudeDir string, destination *store.Store, stale claudecode.Staleness, scope collectionScope, discover *boundaryDiscovery) (int, health.Scan, error) {
 		walks++
-		return original(repos, claudeDir, destination, stale, scope)
+		return original(repos, claudeDir, destination, stale, scope, discover)
 	}
 
 	written, err := Init(paths, root, claudeDir, testExecutable(t), false)

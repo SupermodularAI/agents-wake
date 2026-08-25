@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -47,7 +48,7 @@ func TestDiscoverRootForRegistrationReturnsTheRepositoryRootFromASubdirectory(t 
 	root, nested := initRepo(t)
 	t.Chdir(nested)
 
-	got, err := DiscoverRootForRegistration()
+	got, err := DiscoverRootForRegistration("", "")
 	if err != nil {
 		t.Fatalf("DiscoverRootForRegistration() error = %v", err)
 	}
@@ -77,12 +78,96 @@ func TestDiscoverRootForRegistrationAcceptsANonRepositoryDirectoryAsItsOwnRoot(t
 	if err != nil {
 		t.Fatalf("resolving the working directory: %v", err)
 	}
-	got, err := DiscoverRootForRegistration()
+	got, err := DiscoverRootForRegistration("", "")
 	if err != nil {
 		t.Fatalf("DiscoverRootForRegistration() error = %v", err)
 	}
 	if got != cwd {
 		t.Errorf("DiscoverRootForRegistration() = %q, want the working directory %q unchanged", got, cwd)
+	}
+}
+
+// A directory that is gone is refused rather than invented as its own root.
+//
+// The git fallback exists for a directory that is not a repository, not for one that
+// is not there: returning it would record consent for a path nothing can be read
+// from, and every later scan would report a complete pass over nothing. The returned
+// root has to be empty as well as the error non-nil — a caller that ignores the error
+// must not receive the vanished path either.
+func TestDiscoverRootForRegistrationRefusesADirectoryThatIsGone(t *testing.T) {
+	gone := mkdirAll(t, filepath.Join(tempRealDir(t), "gone"))
+	if err := os.RemoveAll(gone); err != nil {
+		t.Fatalf("removing %s: %v", gone, err)
+	}
+
+	got, err := DiscoverRootForRegistration(gone, "")
+	if !errors.Is(err, errRootNotADirectory) {
+		t.Errorf("DiscoverRootForRegistration(a vanished directory) error = %v, want errRootNotADirectory", err)
+	}
+	if got != "" {
+		t.Errorf("DiscoverRootForRegistration(a vanished directory) = %q, want no root at all", got)
+	}
+}
+
+// The ceiling is what bounds discovery under a recorded collection boundary: a
+// toplevel at or above the boundary is unreachable, so the ingested directory becomes
+// its own root instead (ADR-0019 §5's plain-directory case).
+//
+// git's own semantics are the load-bearing part — the starting directory is always
+// searched and only the upward walk stops — so the case is written against the real
+// tool rather than a stub.
+func TestDiscoverRootForRegistrationStopsAtTheCeiling(t *testing.T) {
+	requireGit(t)
+	base := tempRealDir(t)
+	if output, err := exec.Command("git", "init", base).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+	ceiling := mkdirAll(t, filepath.Join(base, "a"))
+	dir := mkdirAll(t, filepath.Join(ceiling, "b"))
+
+	got, err := DiscoverRootForRegistration(dir, ceiling)
+	if err != nil {
+		t.Fatalf("DiscoverRootForRegistration() error = %v", err)
+	}
+	if got != dir {
+		t.Errorf("DiscoverRootForRegistration() = %q, want the directory itself %q", got, dir)
+	}
+	if got == base {
+		t.Errorf("DiscoverRootForRegistration() = %q, the repository above the ceiling; the walk was not bounded", got)
+	}
+}
+
+// A ceiling is not the whole boundary on its own. git documents that it "will not
+// exclude ... a GIT_DIR set on the command line or in the environment", and the
+// bounded call is the unattended one: the scan a hook fires inherits the session's
+// environment, so a shell that exported GIT_DIR would make every discovery under the
+// boundary answer with a repository nowhere near it. Verified against git 2.50.1,
+// which answers with GIT_WORK_TREE.
+//
+// Dropped only where a ceiling is given. With no ceiling there is no boundary to
+// escape and the directory the user is standing in is the one they are consenting, so
+// plain `wake init` keeps honouring the environment exactly as before.
+func TestDiscoverRootForRegistrationIgnoresAnInheritedGitDirWhenBounded(t *testing.T) {
+	requireGit(t)
+	base := tempRealDir(t)
+	if output, err := exec.Command("git", "init", base).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+	ceiling := mkdirAll(t, filepath.Join(base, "a"))
+	dir := mkdirAll(t, filepath.Join(ceiling, "b"))
+	elsewhere := tempRealDir(t)
+	if output, err := exec.Command("git", "init", elsewhere).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+	t.Setenv("GIT_DIR", filepath.Join(elsewhere, ".git"))
+	t.Setenv("GIT_WORK_TREE", elsewhere)
+
+	got, err := DiscoverRootForRegistration(dir, ceiling)
+	if err != nil {
+		t.Fatalf("DiscoverRootForRegistration() error = %v", err)
+	}
+	if got != dir {
+		t.Errorf("DiscoverRootForRegistration() = %q, want the directory itself %q; the environment redirected the bounded walk", got, dir)
 	}
 }
 
@@ -97,9 +182,13 @@ func TestDiscoverRootForRegistrationAcceptsANonRepositoryDirectoryAsItsOwnRoot(t
 func TestDiscoverRootForRegistrationIsNamedOnlyOnInitsPath(t *testing.T) {
 	root := moduleRoot(t)
 	allowed := map[string]bool{
-		"internal/cli/init.go":         true,
-		"internal/config/root.go":      true,
-		"internal/config/root_test.go": true,
+		"internal/cli/init.go":    true,
+		"internal/config/root.go": true,
+		// The one entry ADR-0032 §2 adds: a directory discovered under a recorded
+		// collection boundary reaches this function through
+		// RegisterUnderGlobalRoot, which is registration and not derivation.
+		"internal/config/globalroot.go": true,
+		"internal/config/root_test.go":  true,
 	}
 	const symbol = "DiscoverRootForRegistration"
 	scanned := 0
