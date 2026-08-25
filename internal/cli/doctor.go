@@ -62,6 +62,15 @@ func newDoctorCmd() *cobra.Command {
 // invocation total, which is why it stands apart from the counts above it rather than
 // being folded into any of them.
 //
+// The two collection-boundary lines sit beside the refused-entry count because they
+// are the same family — what registration could not do — and they are two lines for
+// the same reason pending and interrupted are: a directory that is gone is an honest
+// zero, since there is nothing left there to read, and a registration that was refused
+// is collection that was lost, which is why only the second moves the state word below.
+// They live in this function because every health.Scan counter does; the boundary's own
+// state word needs the project table, which this function knows nothing about, so it
+// arrives through the seam instead (doctor_boundary.go).
+//
 // The interpretation of these counters lives in health.Diagnose, because
 // internal/cli only parses and prints (ADR-0001, plan §6.2). This function is the
 // print loop and holds no decision about what the numbers mean.
@@ -111,6 +120,8 @@ func writeDiagnosis(out io.Writer, paths config.Paths, claudeDir string) error {
 		{"skipped transcripts", report.Scan.Skipped},
 		{"events written", report.Scan.EventsWritten},
 		{"refused project entries", report.Scan.RefusedProjects},
+		{"global boundary directories gone", report.Scan.BoundarySkipped},
+		{"global boundary registrations refused", report.Scan.BoundaryRefused},
 		{"refused calls", report.Scan.RefusedCalls},
 		{"pending calls", report.Scan.PendingCalls},
 		{"interrupted calls", report.Scan.InterruptedCalls},
