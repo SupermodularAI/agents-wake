@@ -104,22 +104,71 @@ func TestOsPrompterIsNilWithoutATerminal(t *testing.T) {
 	}
 }
 
-// The positive half of the branch, without a TTY: /dev/null is a character
-// device on both platforms ADR-0021 supports, which is the exact property
-// root.go's isTerminal tests. Asserting through it is what pins the seam to that
-// check rather than to term.IsTerminal.
-func TestOsPrompterUsesTheCharacterDeviceCheck(t *testing.T) {
+// A character device is not a terminal, and this is the distinction the seam
+// turns on (ADR-0031 §1 Correction). /dev/null is a character device on both
+// platforms ADR-0021 supports and is what a systemd unit, cron, `nohup` and a CI
+// `run:` step with nothing to pipe put on standard input; /dev/zero is one too,
+// and is the stream a wizard's ReadString('\n') would read until memory ran out.
+// Neither answers the ioctl a terminal answers, so neither reaches a prompt.
+func TestOsPrompterIsNilForACharacterDeviceThatIsNotATerminal(t *testing.T) {
+	for _, name := range []string{os.DevNull, "/dev/zero"} {
+		t.Run(name, func(t *testing.T) {
+			file, err := os.Open(name)
+			if err != nil {
+				t.Skipf("os.Open(%q) = %v", name, err)
+			}
+			t.Cleanup(func() { _ = file.Close() })
+			if info, statErr := file.Stat(); statErr != nil || info.Mode()&os.ModeCharDevice == 0 {
+				t.Skipf("%s is not a character device here, so it does not test the distinction", name)
+			}
+
+			cmd := &cobra.Command{}
+			cmd.SetIn(file)
+
+			if got := osPrompter(cmd); got != nil {
+				t.Errorf("osPrompter() = %#v for %s, want nil: a character device is not a terminal", got, name)
+			}
+		})
+	}
+}
+
+// The regression pr-review found: `wake remote set <url> < /dev/null` is the
+// default non-interactive shape, and it has to configure the endpoint and exit 0
+// exactly as a pipe does. Driven through the real osPrompter — the seam under
+// test is the branch, so a fake terminal here would test nothing.
+func TestSetWithRedirectedNullStdinTakesTheNonInteractivePath(t *testing.T) {
+	paths := isolateRemote(t)
 	devNull, err := os.Open(os.DevNull)
 	if err != nil {
 		t.Fatalf("os.Open(%q) = %v", os.DevNull, err)
 	}
 	t.Cleanup(func() { _ = devNull.Close() })
 
-	cmd := &cobra.Command{}
+	const url = "https://api.example.com/v1/traces"
+	var out, errOut bytes.Buffer
+	cmd := newRemoteSetCmd(osPrompter)
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
 	cmd.SetIn(devNull)
+	cmd.SetArgs([]string{url})
+	cmd.SilenceUsage = true
 
-	if osPrompter(cmd) == nil {
-		t.Error("osPrompter() = nil for a character device, want a prompter")
+	if err = cmd.Execute(); err != nil {
+		t.Fatalf("remote set with /dev/null on standard input = %v, want it to configure the endpoint", err)
+	}
+	if !strings.Contains(out.String(), "remote endpoint configured") {
+		t.Errorf("remote set did not confirm what it did:\n%s", out.String())
+	}
+
+	auth, err := config.LoadRemoteAuth(paths)
+	if err != nil {
+		t.Fatalf("LoadRemoteAuth() = %v", err)
+	}
+	if auth.Endpoint != url {
+		t.Errorf("stored endpoint = %q, want %q", auth.Endpoint, url)
+	}
+	if auth.Credential != "" {
+		t.Errorf("a credential was written from an empty standard input")
 	}
 }
 

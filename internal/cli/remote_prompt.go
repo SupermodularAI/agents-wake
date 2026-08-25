@@ -53,18 +53,27 @@ type promptFactory func(*cobra.Command) prompter
 // osPrompter returns a prompter when standard input is a real terminal, and nil
 // when it is not.
 //
-// The check is the one internal/cli/root.go already applies to stdout — a
-// character device, per os.ModeCharDevice — so both ends of this package answer
-// "is a human here" the same way (ADR-0031 §1). A bytes.Buffer, a strings.Reader
-// and a pipe are all not *os.File or not a character device, which is what keeps
-// the piped path byte-for-byte what it was.
+// The check is term.IsTerminal, which performs the ioctl a terminal answers and
+// a redirected file does not — deliberately *not* root.go's os.ModeCharDevice
+// check on stdout (ADR-0031 §1 Correction). The two fds ask different questions:
+// on stdout a wrong answer costs a colour code, while on stdin it decides
+// whether the command runs at all, and /dev/null is a character device. Reading
+// `wake remote set <url> < /dev/null` — what systemd, cron, nohup and a CI
+// `run:` step with nothing to pipe supply — as a human at a keyboard would fail
+// it at the first prompt, on an invocation ADR-0031 promises is untouched.
+//
+// A bytes.Buffer, a strings.Reader, a pipe, a redirected file and /dev/null are
+// all either not *os.File or not a terminal, which is what keeps the piped path
+// byte-for-byte what it was. It is also what keeps termPrompter's bufio.Reader
+// off a stream with no newline in it: /dev/zero is not a terminal either, so the
+// wizard is never constructed over one.
 //
 // The nil is returned as an untyped nil so the interface value is nil too; a
 // typed nil *termPrompter would pass a `!= nil` check and take a human's branch
 // in a script.
 func osPrompter(cmd *cobra.Command) prompter {
 	file, ok := cmd.InOrStdin().(*os.File)
-	if !ok || !isTerminal(file) {
+	if !ok || !term.IsTerminal(int(file.Fd())) {
 		return nil
 	}
 	return &termPrompter{in: file, out: cmd.ErrOrStderr(), lines: bufio.NewReader(file)}
