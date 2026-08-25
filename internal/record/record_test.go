@@ -73,6 +73,11 @@ func TestValidateAcceptsAnAbsentEntrypoint(t *testing.T) {
 	if candidate.Entrypoint != "" {
 		t.Fatalf("validRecord() presets Entrypoint = %q", candidate.Entrypoint)
 	}
+	// Both halves of "absence is omission" (C5), asserted directly rather than
+	// through Marshal's internal validation: absence validates, and it leaves no key.
+	if err := Validate(candidate); err != nil {
+		t.Fatalf("Validate() rejected an absent entrypoint: %v", err)
+	}
 	encoded, err := Marshal(candidate)
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)

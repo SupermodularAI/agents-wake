@@ -1337,6 +1337,32 @@ func TestReadDropsAndCountsACallWithAnUnknownEntrypoint(t *testing.T) {
 	}
 }
 
+// TestReadTreatsANonStringEntrypointAsAnUnusableLine covers the blast radius the
+// refusal path does not: a field of the wrong JSON type fails the whole entry's
+// unmarshal, so it is a line the read had no entry for rather than a call it
+// refused — and because that entry could have carried a terminator, it is also what
+// holds the staleness rule back. entrypointCallTranscript takes raw JSON precisely
+// so this can be asserted rather than assumed.
+func TestReadTreatsANonStringEntrypointAsAnUnusableLine(t *testing.T) {
+	for _, value := range []string{"123", "{}", "[]", "true", "null"} {
+		result, err := Read(strings.NewReader(entrypointCallTranscript(value)), resolver, names, Staleness{})
+		if err != nil {
+			t.Fatalf("Read() error = %v", err)
+		}
+		// null is a valid JSON string value in Go's decoder: it leaves the field at
+		// its zero value, which is a reported absence and a collectable call.
+		if value == "null" {
+			if len(result.Records) != 1 || result.Malformed != 0 || result.Refused != 0 {
+				t.Errorf("Read(entrypoint=null) = %+v, want one record", result)
+			}
+			continue
+		}
+		if len(result.Records) != 0 || result.Malformed != 1 || result.Refused != 0 {
+			t.Errorf("Read(entrypoint=%s) = %+v, want no records and one malformed line", value, result)
+		}
+	}
+}
+
 func TestReadDropsCallsWithAHostileEntrypoint(t *testing.T) {
 	for _, value := range hostileValues {
 		result, err := Read(strings.NewReader(entrypointCallTranscript(quoted(t, value))), resolver, names, Staleness{})
