@@ -137,6 +137,40 @@ func TestDiscoverRootForRegistrationStopsAtTheCeiling(t *testing.T) {
 	}
 }
 
+// A ceiling is not the whole boundary on its own. git documents that it "will not
+// exclude ... a GIT_DIR set on the command line or in the environment", and the
+// bounded call is the unattended one: the scan a hook fires inherits the session's
+// environment, so a shell that exported GIT_DIR would make every discovery under the
+// boundary answer with a repository nowhere near it. Verified against git 2.50.1,
+// which answers with GIT_WORK_TREE.
+//
+// Dropped only where a ceiling is given. With no ceiling there is no boundary to
+// escape and the directory the user is standing in is the one they are consenting, so
+// plain `wake init` keeps honouring the environment exactly as before.
+func TestDiscoverRootForRegistrationIgnoresAnInheritedGitDirWhenBounded(t *testing.T) {
+	requireGit(t)
+	base := tempRealDir(t)
+	if output, err := exec.Command("git", "init", base).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+	ceiling := mkdirAll(t, filepath.Join(base, "a"))
+	dir := mkdirAll(t, filepath.Join(ceiling, "b"))
+	elsewhere := tempRealDir(t)
+	if output, err := exec.Command("git", "init", elsewhere).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+	t.Setenv("GIT_DIR", filepath.Join(elsewhere, ".git"))
+	t.Setenv("GIT_WORK_TREE", elsewhere)
+
+	got, err := DiscoverRootForRegistration(dir, ceiling)
+	if err != nil {
+		t.Fatalf("DiscoverRootForRegistration() error = %v", err)
+	}
+	if got != dir {
+		t.Errorf("DiscoverRootForRegistration() = %q, want the directory itself %q; the environment redirected the bounded walk", got, dir)
+	}
+}
+
 // The mechanical half of the layering rule this resolver has to keep.
 //
 // ADR-0019 §1 allows git at registration and forbids it on the derivation path:

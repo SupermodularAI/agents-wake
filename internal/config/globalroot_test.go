@@ -210,6 +210,64 @@ func TestRegisterUnderGlobalRootRefusesTheBoundaryItself(t *testing.T) {
 	}
 }
 
+// The check that has to hold after discovery, not only before it: the root git hands
+// back is the one written to the table, so it is the one consent is about.
+//
+// The environment is real rather than contrived. GIT_CEILING_DIRECTORIES is a
+// colon-separated list, so a boundary whose own path contains a colon splits into
+// entries that are ancestors of nothing, and git walks straight past the ceiling to
+// the repository above it — verified against git 2.50.1, which answers with the
+// boundary's parent. Registering that would attribute every repository under the
+// parent to one id, which is the identity collapse ADR-0019 §5 keeps the root set
+// non-nested to prevent.
+func TestRegisterUnderGlobalRootRefusesARootDiscoveredOutsideTheBoundary(t *testing.T) {
+	requireGit(t)
+	p := testPaths(t)
+	outer := tempRealDir(t)
+	if output, err := exec.Command("git", "init", outer).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+	boundary := mkdirAll(t, filepath.Join(outer, "dev:ops"))
+	project := mkdirAll(t, filepath.Join(boundary, "project"))
+
+	r := openRepos(t, p)
+	setGlobalRoot(t, r, boundary)
+	before := readFileOrFail(t, p.ProjectsFile)
+
+	if _, err := r.RegisterUnderGlobalRoot(project, time.Time{}); !errors.Is(err, ErrOutsideGlobalRoot) {
+		t.Errorf("RegisterUnderGlobalRoot(a directory whose discovered root is outside the boundary) = %v, want ErrOutsideGlobalRoot", err)
+	}
+	if after := readFileOrFail(t, p.ProjectsFile); after != before {
+		t.Errorf("a root the boundary does not enclose was recorded:\n%s", after)
+	}
+}
+
+// The same post-condition against the other spelling that reaches it. Register records
+// the symlink-resolved root, so a directory under the boundary whose physical location
+// is outside it would be recorded outside the boundary: consent is about where the
+// repository is, not about how a transcript spelled the way to it.
+func TestRegisterUnderGlobalRootRefusesADirectoryThatSymlinksOutsideTheBoundary(t *testing.T) {
+	p := testPaths(t)
+	base := tempRealDir(t)
+	boundary := mkdirAll(t, filepath.Join(base, "boundary"))
+	elsewhere := mkdirAll(t, filepath.Join(base, "elsewhere"))
+	link := filepath.Join(boundary, "project")
+	if err := os.Symlink(elsewhere, link); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	r := openRepos(t, p)
+	setGlobalRoot(t, r, boundary)
+	before := readFileOrFail(t, p.ProjectsFile)
+
+	if _, err := r.RegisterUnderGlobalRoot(link, time.Time{}); !errors.Is(err, ErrOutsideGlobalRoot) {
+		t.Errorf("RegisterUnderGlobalRoot(a link out of the boundary) = %v, want ErrOutsideGlobalRoot", err)
+	}
+	if after := readFileOrFail(t, p.ProjectsFile); after != before {
+		t.Errorf("a root outside the boundary was recorded through a link inside it:\n%s", after)
+	}
+}
+
 // An auto-registered repository collects forward only, like every repository a plain
 // `wake init` consents (ADR-0024, ADR-0025). The instant is the registration's, and it
 // is recorded rather than merely intended.

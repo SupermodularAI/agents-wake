@@ -71,13 +71,42 @@ func DiscoverRootForRegistration(dir, ceiling string) (string, error) {
 
 	cmd := exec.Command("git", "-C", cleaned, "rev-parse", "--show-toplevel")
 	if ceiling != "" {
-		// os.Environ rather than a bare slice: a caller — a test, most often — that
-		// neutralised GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM has to keep doing so, or what
-		// git answers here would depend on the machine's own configuration.
-		cmd.Env = append(os.Environ(), "GIT_CEILING_DIRECTORIES="+ceiling)
+		cmd.Env = boundedDiscoveryEnv(ceiling)
 	}
 	if output, gitErr := cmd.Output(); gitErr == nil {
 		return strings.TrimSpace(string(output)), nil
 	}
 	return cleaned, nil
+}
+
+// boundedDiscoveryEnv is the environment a bounded discovery runs git in.
+//
+// os.Environ rather than a bare slice: a caller — a test, most often — that
+// neutralised GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM has to keep doing so, or what git
+// answers here would depend on the machine's own configuration.
+//
+// GIT_DIR and GIT_WORK_TREE are dropped, because git documents that the ceiling "will
+// not exclude ... a GIT_DIR set on the command line or in the environment": with
+// either set, the toplevel git reports is the one they name and the ceiling is not
+// consulted at all. The bounded call is the unattended one — the scan a hook fires
+// inherits the session's environment — so a shell that exported GIT_DIR would
+// otherwise make every discovery under a collection boundary answer with a repository
+// nowhere near it.
+//
+// Dropped only here, where a ceiling was asked for. With no ceiling there is no
+// boundary to escape and the directory the caller is standing in is the one being
+// consented, so plain `wake init` keeps honouring the environment as it always has.
+// Even so, this is a narrowing of the exposure and not the guarantee: what makes a
+// discovered root safe is that RegisterUnderGlobalRoot checks it against the boundary
+// afterwards, whatever git was persuaded to say.
+func boundedDiscoveryEnv(ceiling string) []string {
+	environ := os.Environ()
+	kept := make([]string, 0, len(environ)+1)
+	for _, entry := range environ {
+		if strings.HasPrefix(entry, "GIT_DIR=") || strings.HasPrefix(entry, "GIT_WORK_TREE=") {
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	return append(kept, "GIT_CEILING_DIRECTORIES="+ceiling)
 }

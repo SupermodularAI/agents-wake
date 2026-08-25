@@ -286,9 +286,13 @@ func (r *Repos) SetGlobalRoot(root string) error {
 // — observing is not registering — and this runs after the walk, once, per directory
 // the walk saw (ADR-0032 §5).
 //
-// Discovery is bounded by the boundary, handed to git as a ceiling, so the root can
-// never be the boundary or anything above it: a repository enclosing the boundary
-// would otherwise become the recorded root of everything inside it.
+// Discovery is bounded by the boundary twice over: it is handed to git as a ceiling,
+// and the root git hands back is then checked against it. The check is what makes the
+// guarantee independent of git's environment — the ceiling narrows the exposure and
+// does not close it (see boundedDiscoveryEnv and the check below) — and the guarantee
+// is that the root can never be the boundary or anything above it, because a
+// repository enclosing the boundary would otherwise become the recorded root of
+// everything inside it.
 //
 // It does not take the projects lock. Register does, and withProjectsLock is not
 // reentrant — taking it here would deadlock against the write this function exists to
@@ -321,7 +325,43 @@ func (r *Repos) RegisterUnderGlobalRoot(dir string, from time.Time) (string, err
 		}
 		return "", err
 	}
-	return r.Register(root, filepath.Base(root), from)
+	discovered, err := lexicalClean(root)
+	if err != nil {
+		return "", fmt.Errorf("a discovered repository root %w", err)
+	}
+	// The check the guarantee actually rests on, and it is about the root rather than
+	// about the directory that led to it: the root is what goes into the table as a
+	// consented repository, so it is the thing consent has to be true of.
+	//
+	// The ceiling handed to git is a narrowing, not a proof. git documents two ways it
+	// does not bound the walk — GIT_CEILING_DIRECTORIES is a colon-separated list, so a
+	// boundary whose own path contains a colon splits into entries that are ancestors
+	// of nothing, and an entry git cannot resolve is skipped silently — and both make
+	// it answer with a directory above the boundary. Registering that would attribute
+	// every repository under the boundary's parent to one id, the identity collapse
+	// ADR-0019 §5 keeps the root set non-nested to prevent, and this path is
+	// unattended: nobody is asked and nothing is printed.
+	//
+	// Both spellings are checked, because both can leave the boundary. The canonical
+	// one is what Register records (ADR-0019 §5 owns symlink resolution), so a
+	// directory under the boundary that resolves outside it would be recorded outside
+	// it — consent is about where the repository is, not about how a transcript spelled
+	// the way to it.
+	canonical, err := canonicalRoot(discovered)
+	if err != nil {
+		// The root discovery named is no longer there. The honest zero again, and the
+		// same one the vanished starting directory gets: there is nothing left to read.
+		return "", ErrDiscoveredDirectoryGone
+	}
+	if !strictlyEncloses(boundary.Root, discovered, boundary.CaseInsensitive) ||
+		!strictlyEncloses(boundary.Root, canonical, boundary.CaseInsensitive) {
+		return "", ErrOutsideGlobalRoot
+	}
+	// The discovered spelling rather than the canonical one, so Register records the
+	// alias it derives from the difference: a working directory spelled through a link
+	// inside the boundary is one later scans have to match without discovering it
+	// again.
+	return r.Register(discovered, filepath.Base(discovered), from)
 }
 
 // strictlyEncloses reports whether inner is a directory inside outer, and not outer
