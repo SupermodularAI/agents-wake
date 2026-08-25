@@ -132,7 +132,7 @@ review. Its default design keeps the sensitive path local:
 - Repository identity is a salted, per-machine HMAC. The readable project map
   stays local with restrictive permissions.
 - Every binary ships the remote-delivery capability and it is off until you run
-  `wake remote set <url>` and `wake remote on`. Until you do, no endpoint is
+  `wake remote set [url]` and `wake remote on`. Until you do, no endpoint is
   configured, nothing is sent, and `wake remote status` and `wake doctor` both
   say so. The dashboard is bound to loopback only.
 - `wake update` and `wake update --check` are the only commands that reach the
@@ -153,7 +153,8 @@ collector, such as [Langfuse](https://cloud.langfuse.com). The capability
 ships in every build and stays off until you configure it:
 
 ```sh
-wake remote set https://cloud.langfuse.com/api/public/otel   # credential via stdin
+wake remote set                                              # at a terminal: prompts for the URL and both keys
+wake remote set https://cloud.langfuse.com/api/public/otel   # scripted: credential on stdin as public:secret
 wake remote on
 wake remote flush
 wake remote status
@@ -161,7 +162,7 @@ wake remote status
 
 | Command | Purpose |
 | --- | --- |
-| `wake remote set <url>` | Configure the delivery endpoint. The credential is read from standard input, never as an argument, and never echoed back — confirms with "remote endpoint configured", not the endpoint itself. |
+| `wake remote set [url]` | Configure the delivery endpoint. At a terminal it prompts for the URL if you did not pass one, shows the destination's bare host and asks you to confirm it, then asks for the public key (shown) and the secret key (not shown). Piped or in CI it is unchanged: the URL is an argument and the joined `public:secret` credential is read whole from standard input, never as an argument. Neither path ever echoes the secret key or the joined credential, and neither ever prints the full URL. |
 | `wake remote on` | Start delivering records to the configured endpoint. |
 | `wake remote off` | Stop delivering; the endpoint is kept, so nothing needs re-entering to resume. |
 | `wake remote flush` | Deliver everything pending now. Add `--dry-run` to print the exact payload the next flush would send, without sending it. |
