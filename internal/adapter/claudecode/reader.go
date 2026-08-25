@@ -62,9 +62,12 @@ type Result struct {
 	// its cursor past [an unterminated call]" to the session grain. It is meaningful
 	// only when OpenSessions is positive.
 	CursorFloor int64
-	// Refused counts tool calls dropped because the primitive's own name failed
-	// validation — a Task block naming no subagent, or a name the name/scope
-	// grammar refuses. Fail closed (ADR-0007): nothing is written and no
+	// Refused counts invocations dropped because a validated field refused its
+	// source value: the primitive's own name — a Task block naming no subagent, or
+	// a name the name/scope grammar refuses — or an entrypoint outside Wake's
+	// vocabulary. Both derivations feed it, a tool call and an attributed skill run,
+	// because both are an invocation that happened and that no number will carry
+	// otherwise. Fail closed (ADR-0007): nothing is written and no
 	// placeholder name is substituted. It is deliberately not Malformed, which
 	// means "a line that is unusable" and feeds doctor's drift signal, and
 	// deliberately not the store's Dropped, which counts records refused at write
@@ -185,8 +188,17 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 			}
 			return
 		}
-		if event, ok := entry.attributedSkillCandidate(resolve, names); ok {
+		switch event, status := entry.attributedSkillCandidate(resolve, names); status {
+		case callAccepted:
 			deferSkillCandidate(skillCandidates, skillRun{session: event.SessionID, name: event.Name}, event)
+		case callRefused:
+			// Counted per refused run rather than per entry that would have collapsed
+			// into one: the collapse is a deduplication of records that do exist, and a
+			// candidate refused here never enters it, so there is nothing to collapse
+			// against. What the number says is how many attributed runs this read could
+			// have collected and did not.
+			result.Refused++
+		case callSkipped:
 		}
 		for _, block := range entry.Message.Content {
 			switch block.Type {
@@ -217,7 +229,7 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 					} else {
 						pending[pendingCall.id] = pendingCall
 					}
-				case callRefusedName:
+				case callRefused:
 					result.Refused++
 					delete(earlyResults, block.ID)
 				case callSkipped:
@@ -391,6 +403,11 @@ type transcriptEntry struct {
 	AttributionAgent     string    `json:"attributionAgent"`
 	AttributionSkill     string    `json:"attributionSkill"`
 	ToolDenialKind       string    `json:"toolDenialKind"`
+	// Entrypoint is how the harness process was started ("cli", "sdk-py",
+	// "sdk-cli" on Claude Code today). It is mapped onto record.Entrypoint's own
+	// vocabulary and never persisted verbatim: an unmapped value refuses the event
+	// rather than being passed through (ADR-0005, ADR-0007).
+	Entrypoint string `json:"entrypoint"`
 	// IsSidechain marks a subagent's own turn. It is read for exactly one purpose:
 	// excluding such a turn from ever being considered a skill invocation (ADR-0023
 	// §1). It is never a discriminator between "already covered by a Skill tool_use"
@@ -600,11 +617,14 @@ type call struct {
 	viaAgent    record.Identifier
 	model       record.Identifier
 	invoker     record.Invoker
+	entrypoint  record.Entrypoint
 	repo        record.Hash
 }
 
-// callStatus separates a tool_use block whose primitive name was refused from one
-// Wake deliberately does not collect. A refused name is a fail-closed drop worth
+// callStatus separates an invocation a validated field refused from one Wake
+// deliberately does not collect. Both derivations report it: a tool_use block, and
+// an attributed skill run. A value a validated field refuses — the primitive's own
+// name, or an entrypoint outside Wake's vocabulary — is a fail-closed drop worth
 // counting (ADR-0007); an unusable id, an unconsented repository, and a call that
 // predates the instant collection began for its repository are all a clean zero,
 // which activation already reports as a skip rather than a failure, and must not be
@@ -614,7 +634,7 @@ type callStatus int
 const (
 	callSkipped callStatus = iota
 	callAccepted
-	callRefusedName
+	callRefused
 )
 
 func (entry transcriptEntry) call(block contentBlock, resolve Resolver, names record.Namer) (call, callStatus) {
@@ -640,18 +660,26 @@ func (entry transcriptEntry) call(block contentBlock, resolve Resolver, names re
 	// never consented to is outside collection, not lost from it.
 	name, err := primitiveName(block, names)
 	if err != nil {
-		return call{}, callRefusedName
+		return call{}, callRefused
+	}
+	// After consent and the name gate, for the same reason the name gate is last: a
+	// refusal is reported as lost collection, so it may only count a call that would
+	// otherwise have been collected.
+	entrypoint, known := entrypointFor(entry.Entrypoint)
+	if !known {
+		return call{}, callRefused
 	}
 
 	derived := call{
-		id:        string(id),
-		eventID:   record.DeriveEventID(harness, callSourceEvent(entry.UUID, id)),
-		sessionID: sessionID,
-		timestamp: timestamp,
-		kind:      kindFor(record.Identifier(block.Name)),
-		name:      name,
-		invoker:   record.InvokerModel,
-		repo:      repo,
+		id:         string(id),
+		eventID:    record.DeriveEventID(harness, callSourceEvent(entry.UUID, id)),
+		sessionID:  sessionID,
+		timestamp:  timestamp,
+		kind:       kindFor(record.Identifier(block.Name)),
+		name:       name,
+		invoker:    record.InvokerModel,
+		entrypoint: entrypoint,
+		repo:       repo,
 	}
 	if version, err := record.BoundedVersion(entry.Version); err == nil {
 		derived.version = version
@@ -703,23 +731,33 @@ func (entry transcriptEntry) call(block contentBlock, resolve Resolver, names re
 // so the collapse has to happen here rather than at write time. plan §5.1 names
 // the Task call as the subagent primitive's source; attributionAgent's own role is
 // via_agent attribution on the calls a subagent makes (see call).
-func (entry transcriptEntry) attributedSkillCandidate(resolve Resolver, names record.Namer) (record.Record, bool) {
+func (entry transcriptEntry) attributedSkillCandidate(resolve Resolver, names record.Namer) (record.Record, callStatus) {
 	if entry.Message.StopReason != "end_turn" || entry.AttributionSkill == "" || entry.IsSidechain {
-		return record.Record{}, false
+		return record.Record{}, callSkipped
 	}
 
 	primitive, err := names.DerivedName(entry.AttributionSkill)
 	if err != nil {
-		return record.Record{}, false
+		return record.Record{}, callSkipped
 	}
 	sessionID, err := record.BoundedToken(entry.SessionID)
 	if err != nil {
-		return record.Record{}, false
+		return record.Record{}, callSkipped
 	}
 	timestamp := record.NormalizedTimestamp(entry.Timestamp)
 	repo, consented := resolve(entry.CWD, timestamp)
 	if !consented {
-		return record.Record{}, false
+		return record.Record{}, callSkipped
+	}
+	// The one gate on this path that counts, and it counts because it is the only
+	// one that sits after consent: an entrypoint outside Wake's vocabulary refuses a
+	// run this repository had agreed to collect, so the invocation is lost rather
+	// than never Wake's. The gates above it are ordered the other way round from
+	// call's — naming comes first here — so a refusal there could not tell an
+	// unconsented turn from a lost one, and stays a clean zero (ADR-0007, plan §12).
+	entrypoint, known := entrypointFor(entry.Entrypoint)
+	if !known {
+		return record.Record{}, callRefused
 	}
 
 	event := record.Record{
@@ -732,6 +770,7 @@ func (entry transcriptEntry) attributedSkillCandidate(resolve Resolver, names re
 		Kind:          record.KindSkill,
 		Name:          primitive,
 		Invoker:       record.InvokerUser,
+		Entrypoint:    entrypoint,
 	}
 	if version, err := record.BoundedVersion(entry.Version); err == nil {
 		event.HarnessVersion = version
@@ -739,7 +778,7 @@ func (entry transcriptEntry) attributedSkillCandidate(resolve Resolver, names re
 	if model, err := record.BoundedIdentifier(entry.Message.Model); err == nil {
 		event.Model = model
 	}
-	return event, true
+	return event, callAccepted
 }
 
 func primitiveName(block contentBlock, names record.Namer) (record.Identifier, error) {
@@ -782,6 +821,7 @@ func (call call) complete(result callResult) record.Record {
 		ViaAgent:       call.viaAgent,
 		Model:          call.model,
 		Invoker:        call.invoker,
+		Entrypoint:     call.entrypoint,
 		Outcome:        result.outcome,
 	}
 }
@@ -805,6 +845,24 @@ func (call call) complete(result callResult) record.Record {
 func (call call) interrupted() record.Record {
 	outcome := record.OutcomeInterrupted
 	return call.complete(callResult{timestamp: call.timestamp, outcome: &outcome})
+}
+
+// entrypointFor maps Claude Code's entrypoint spelling onto Wake's vocabulary.
+// The empty source value is absence and maps to the unset field; anything the
+// switch does not name is refused by the caller, never blanked and never
+// guessed at (ADR-0005, ADR-0008 — this is a lookup, not an inference).
+func entrypointFor(value string) (record.Entrypoint, bool) {
+	switch value {
+	case "":
+		return "", true
+	case "cli":
+		return record.EntrypointCLI, true
+	case "sdk-py":
+		return record.EntrypointSDKPython, true
+	case "sdk-cli":
+		return record.EntrypointSDKCLI, true
+	}
+	return "", false
 }
 
 func kindFor(name record.Identifier) record.Kind {

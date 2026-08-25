@@ -1262,6 +1262,199 @@ func TestReadDropsAttributedRunWithPathShapedAttribution(t *testing.T) {
 	}
 }
 
+// entrypointCallTranscript is a terminated Bash call whose tool_use entry carries
+// the given raw JSON as its top-level entrypoint. Claude Code stamps the field on
+// the entry, not on the content block, so this is where the reader has to read it
+// from.
+func entrypointCallTranscript(entrypointJSON string) string {
+	return strings.Join([]string{
+		fmt.Sprintf(`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","entrypoint":%s,"message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`, entrypointJSON),
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+	}, "\n")
+}
+
+// The ticket's three-value acceptance criterion, on the read side: Claude Code's
+// own spelling maps onto Wake's vocabulary, and the mapping is a lookup rather
+// than a pass-through (ADR-0008).
+func TestReadCarriesEachClaudeCodeEntrypoint(t *testing.T) {
+	for source, want := range map[string]record.Entrypoint{
+		"cli":     record.EntrypointCLI,
+		"sdk-py":  record.EntrypointSDKPython,
+		"sdk-cli": record.EntrypointSDKCLI,
+	} {
+		result, err := Read(strings.NewReader(entrypointCallTranscript(quoted(t, source))), resolver, names, Staleness{})
+		if err != nil {
+			t.Fatalf("Read() error = %v", err)
+		}
+		if len(result.Records) != 1 || result.Refused != 0 || result.Malformed != 0 {
+			t.Fatalf("Read(entrypoint=%q) = %+v", source, result)
+		}
+		event := result.Records[0]
+		if event.Entrypoint != want {
+			t.Errorf("Read(entrypoint=%q) carried %q, want %q", source, event.Entrypoint, want)
+		}
+		if err := record.Validate(event); err != nil {
+			t.Errorf("Validate() error = %v", err)
+		}
+	}
+}
+
+func TestReadOmitsAnAbsentEntrypoint(t *testing.T) {
+	input := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+	}, "\n")
+	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 1 || result.Refused != 0 {
+		t.Fatalf("Read() = %+v", result)
+	}
+	event := result.Records[0]
+	if event.Entrypoint != "" {
+		t.Errorf("record carried Entrypoint = %q for an entry that reported none", event.Entrypoint)
+	}
+	if err := record.Validate(event); err != nil {
+		t.Errorf("Validate() error = %v", err)
+	}
+}
+
+// An unmapped value drops the call and counts the drop. It is never blanked, which
+// would emit the record in a degraded form, and never passed through, which would
+// put an unvalidated harness string in a persisted field (ADR-0007).
+func TestReadDropsAndCountsACallWithAnUnknownEntrypoint(t *testing.T) {
+	// "sdk_python" is deliberate: Wake's own spelling is not a Claude Code spelling
+	// and a transcript claiming it must not be trusted.
+	for _, value := range []string{"sdk-ts", "vscode", "CLI", "sdk_python"} {
+		result, err := Read(strings.NewReader(entrypointCallTranscript(quoted(t, value))), resolver, names, Staleness{})
+		if err != nil {
+			t.Fatalf("Read() error = %v", err)
+		}
+		if len(result.Records) != 0 || result.Refused != 1 {
+			t.Errorf("Read(entrypoint=%q) = %+v, want no records and one refusal", value, result)
+		}
+	}
+}
+
+// TestReadTreatsANonStringEntrypointAsAnUnusableLine covers the blast radius the
+// refusal path does not: a field of the wrong JSON type fails the whole entry's
+// unmarshal, so it is a line the read had no entry for rather than a call it
+// refused — and because that entry could have carried a terminator, it is also what
+// holds the staleness rule back. entrypointCallTranscript takes raw JSON precisely
+// so this can be asserted rather than assumed.
+func TestReadTreatsANonStringEntrypointAsAnUnusableLine(t *testing.T) {
+	for _, value := range []string{"123", "{}", "[]", "true", "null"} {
+		result, err := Read(strings.NewReader(entrypointCallTranscript(value)), resolver, names, Staleness{})
+		if err != nil {
+			t.Fatalf("Read() error = %v", err)
+		}
+		// null is a valid JSON string value in Go's decoder: it leaves the field at
+		// its zero value, which is a reported absence and a collectable call.
+		if value == "null" {
+			if len(result.Records) != 1 || result.Malformed != 0 || result.Refused != 0 {
+				t.Errorf("Read(entrypoint=null) = %+v, want one record", result)
+			}
+			continue
+		}
+		if len(result.Records) != 0 || result.Malformed != 1 || result.Refused != 0 {
+			t.Errorf("Read(entrypoint=%s) = %+v, want no records and one malformed line", value, result)
+		}
+	}
+}
+
+func TestReadDropsCallsWithAHostileEntrypoint(t *testing.T) {
+	for _, value := range hostileValues {
+		result, err := Read(strings.NewReader(entrypointCallTranscript(quoted(t, value))), resolver, names, Staleness{})
+		if err != nil {
+			t.Fatalf("Read() error = %v", err)
+		}
+		if len(result.Records) != 0 || result.Refused != 1 {
+			t.Errorf("Read(entrypoint=%q) = %+v, want no records and one refusal", value, result)
+		}
+	}
+}
+
+// The staleness path builds its record through complete, like both
+// result-terminated paths, so it inherits the field rather than losing it.
+func TestReadCarriesEntrypointOnAnInterruptedCall(t *testing.T) {
+	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","entrypoint":"sdk-py","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`
+	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 1 {
+		t.Fatalf("Read() records = %+v", result.Records)
+	}
+	event := result.Records[0]
+	if event.Outcome == nil || *event.Outcome != record.OutcomeInterrupted {
+		t.Fatalf("record = %+v, want an interrupted outcome", event)
+	}
+	if event.Entrypoint != record.EntrypointSDKPython {
+		t.Errorf("record carried Entrypoint = %q, want %q", event.Entrypoint, record.EntrypointSDKPython)
+	}
+}
+
+func TestReadCarriesEntrypointOnAnAttributedSkillRun(t *testing.T) {
+	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"pr-review","entrypoint":"cli","message":{"model":"sonnet","stop_reason":"end_turn"}}`
+	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 1 {
+		t.Fatalf("Read() records = %+v", result.Records)
+	}
+	if got := result.Records[0].Entrypoint; got != record.EntrypointCLI {
+		t.Errorf("record carried Entrypoint = %q, want %q", got, record.EntrypointCLI)
+	}
+}
+
+func TestReadDropsAnAttributedRunWithAnUnknownEntrypoint(t *testing.T) {
+	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"pr-review","entrypoint":"sdk-ts","message":{"model":"sonnet","stop_reason":"end_turn"}}`
+	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	// No candidate is built, so there is no ambiguity to report either. The drop is
+	// still lost collection and carries a count: a session whose only trace is an
+	// attributed run would otherwise leave none at all.
+	if len(result.Records) != 0 || result.AmbiguousSkillRuns != 0 || result.Refused != 1 {
+		t.Errorf("Read() = %+v, want no records, no ambiguity and one refusal", result)
+	}
+}
+
+// TestReadCountsEveryRefusedAttributedRun pins the counter to the invocations that
+// were lost rather than to the entries that carried them: two runs of different
+// skills in one session are two records that will never exist.
+func TestReadCountsEveryRefusedAttributedRun(t *testing.T) {
+	input := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"pr-review","entrypoint":"sdk-ts","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","attributionSkill":"commit-message","entrypoint":"sdk-ts","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
+	}, "\n")
+
+	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 0 || result.Refused != 2 {
+		t.Errorf("Read() = %+v, want no records and two refusals", result)
+	}
+}
+
+// TestReadSkipsAnAttributedRunItNeverCollects keeps the refusal counter honest in
+// the other direction: an unconsented repository is outside collection, not lost
+// from it, so nothing about it may reach doctor's "collects nothing" arm.
+func TestReadSkipsAnAttributedRunItNeverCollects(t *testing.T) {
+	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/elsewhere","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"pr-review","entrypoint":"cli","message":{"model":"sonnet","stop_reason":"end_turn"}}`
+	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 0 || result.Refused != 0 {
+		t.Errorf("Read() = %+v, want no records and no refusal", result)
+	}
+}
+
 func TestReadOmitsUnsafeOptionalFieldsAndKeepsTheEvent(t *testing.T) {
 	input := strings.Join([]string{
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","version":"../1.0.0","attributionSkill":"/etc/passwd","attributionAgent":"../x","attributionMcpServer":"plugin:../evil:tool","message":{"model":"C:\\Windows","content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,

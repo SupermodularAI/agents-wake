@@ -15,8 +15,31 @@ import (
 	"time"
 )
 
-// SchemaVersion identifies the on-disk record contract.
-const SchemaVersion uint = 1
+// SchemaVersion identifies the on-disk record contract. Adding a dimension bumps
+// it (ADR-0007), and a bump is a rebuild rather than a migration: the store is a
+// derived index, so a record of any other version is refused on read and the spool
+// that holds it is discarded and re-derived from the harness's own history
+// (ADR-0015). Version 2 added entrypoint.
+//
+// "Refused on read" is only half of that, and the half on its own is a silent
+// shrink: every consumer reads the spool through store.Entries, so a spool nobody
+// rebuilt would report the post-upgrade subset as the whole truth. The other half
+// is the scan the user asks for, which discards a spool carrying a foreign version
+// before it appends to it and re-derives the whole history in its place — the scan a
+// hook fires collects inside each repository's recorded boundary (ADR-0025), so it
+// reports the count and leaves the drop to the one that can put the records back
+// (internal/activation, health.Scan.StaleRecords and StaleRebuilt). The third is the
+// delivery watermark, which stamps this number and starts over when it changes
+// (internal/remote). What a rebuild cannot recover is a period the harness has since
+// pruned: the store was the only surviving copy of it, and ADR-0014 accepts that.
+const SchemaVersion uint = 2
+
+// ErrUnsupportedVersion is the one refusal from Validate a caller is meant to
+// recognise. Every other refusal means the record was never valid; this one means
+// an earlier build wrote it correctly under a contract this build does not read, and
+// the answer to it is a rebuild rather than a skip. It carries no field and no
+// value — only which of the two situations this is (plan §4.2).
+var ErrUnsupportedVersion = errors.New("unsupported schema version")
 
 var (
 	versionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+:-]{0,127}$`)
@@ -67,6 +90,19 @@ const (
 	InvokerAuto  Invoker = "auto"
 )
 
+// Entrypoint is how the harness process itself was started: a person at a
+// terminal, or an SDK driving it. It is Wake's own vocabulary, not a harness's —
+// an adapter maps its harness's spelling onto these members and is never allowed
+// to pass an unrecognised one through (ADR-0005, ADR-0007). Absent is the zero
+// value: the harness reported nothing, which is never one of the members.
+type Entrypoint string
+
+const (
+	EntrypointCLI       Entrypoint = "cli"
+	EntrypointSDKPython Entrypoint = "sdk_python"
+	EntrypointSDKCLI    Entrypoint = "sdk_cli"
+)
+
 // Outcome is nullable on Record. Nil means the harness did not report one.
 type Outcome string
 
@@ -101,6 +137,7 @@ type Record struct {
 	Model          Identifier `json:"model,omitempty"`
 	Effort         Identifier `json:"effort,omitempty"`
 	Invoker        Invoker    `json:"invoker"`
+	Entrypoint     Entrypoint `json:"entrypoint,omitempty"`
 	Outcome        *Outcome   `json:"outcome"`
 	DurationMS     *int64     `json:"duration_ms"`
 }
@@ -124,7 +161,7 @@ func Marshal(r Record) ([]byte, error) {
 // Validate checks the persisted privacy and format contract.
 func Validate(r Record) error {
 	if r.SchemaVersion != SchemaVersion {
-		return errors.New("unsupported schema version")
+		return ErrUnsupportedVersion
 	}
 	if !validSHA256(r.EventID) {
 		return errors.New("invalid event id")
@@ -137,6 +174,9 @@ func Validate(r Record) error {
 	}
 	if !validOptionalName(r.Package) || !validOptionalName(r.ViaSkill) || !validOptionalName(r.ViaAgent) || !validOptionalName(r.Model) || !validOptionalName(r.Effort) || !validOptionalVersion(r.HarnessVersion) || !validOptionalVersion(r.PackageVersion) {
 		return errors.New("invalid optional record field")
+	}
+	if r.Entrypoint != "" && !validEntrypoint(r.Entrypoint) {
+		return errors.New("invalid entrypoint")
 	}
 	if r.Source != nil && !validSource(*r.Source) {
 		return errors.New("invalid source")
@@ -169,6 +209,13 @@ func validSource(v Source) bool {
 
 func validInvoker(v Invoker) bool {
 	return v == InvokerUser || v == InvokerModel || v == InvokerAuto
+}
+
+// validEntrypoint is a membership check, not a shape check. A bounded-token
+// pattern would accept a future harness value such as "sdk-ts" and let an
+// unmapped dimension through; the allowlist is the enum itself.
+func validEntrypoint(v Entrypoint) bool {
+	return v == EntrypointCLI || v == EntrypointSDKPython || v == EntrypointSDKCLI
 }
 
 func validOutcome(v Outcome) bool {

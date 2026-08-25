@@ -15,6 +15,7 @@ import (
 	"github.com/SupermodularAI/agents-wake/internal/config"
 	"github.com/SupermodularAI/agents-wake/internal/health"
 	"github.com/SupermodularAI/agents-wake/internal/lockfile"
+	"github.com/SupermodularAI/agents-wake/internal/record"
 	"github.com/SupermodularAI/agents-wake/internal/store"
 )
 
@@ -167,6 +168,120 @@ func TestAPlainInitOnAnUnboundedRepositoryBoundsTheNextTrigger(t *testing.T) {
 	if len(entries) != 1 || entries[0].Record.Name != "Read" {
 		t.Fatalf("Entries() = %+v, want only the call that happened after the plain init", entries)
 	}
+}
+
+// A schema bump must not turn the hook-fired scan into a destructive one.
+//
+// The rebuild a bump asks for is "drop and rescan" (ADR-0015), and the rescan half is
+// a whole-history scan: the spool holds whatever the user backfilled with `wake
+// ingest`, including events from before the repository's recorded boundary. The
+// hook-fired scan cannot re-derive those — it runs under that boundary, because it is
+// the one scan nobody asked for (ADR-0025) — so a discard here would delete history it
+// is not allowed to bring back, from a process ADR-0016 keeps silent.
+//
+// So it leaves the spool alone, keeps collecting forward, and reports the stale count
+// as a rebuild that has not happened. The user's own scan does the drop and the rescan
+// together, exactly once, which is the pairing Rebuild has always had.
+func TestATriggerLeavesASpoolFromAnotherSchemaVersionForAUserAskedScan(t *testing.T) {
+	paths := testPaths(t)
+	claudeDir, root := inventoryFixture(t)
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), false); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	// The backfill a plain `init` names in its own output: history from before the
+	// boundary, in the spool because the user asked for it.
+	if written, err := Ingest(paths, claudeDir); err != nil || written != 1 {
+		t.Fatalf("Ingest() = %d, %v; want the pre-boundary history backfilled", written, err)
+	}
+	spoolPath := filepath.Join(paths.DataDir, eventsFile)
+	staleID := appendRecordFromAnotherSchemaVersion(t, spoolPath)
+
+	if ran, err := Trigger(paths, claudeDir); err != nil || !ran {
+		t.Fatalf("Trigger() = %v, %v; want the scan to run", ran, err)
+	}
+
+	entries, err := store.New(spoolPath).Entries(0)
+	if err != nil {
+		t.Fatalf("Entries() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("Entries() = %+v, want the backfilled record still in the spool", entries)
+	}
+	raw, err := os.ReadFile(spoolPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !strings.Contains(string(raw), string(staleID)) {
+		t.Error("the hook-fired scan discarded the spool; only a scan that re-derives the whole history may")
+	}
+	scan := scanCounters(t, paths)
+	if scan.StaleRecords != 1 {
+		t.Errorf("Scan.StaleRecords = %d, want 1 — the records this build cannot read are what doctor reports", scan.StaleRecords)
+	}
+	if scan.StaleRebuilt {
+		t.Error("Scan.StaleRebuilt = true, want false — doctor must not claim a rebuild this scope cannot perform")
+	}
+
+	// The user asks, and the drop and the rescan happen together: the backfilled
+	// record comes back and the unreadable one does not.
+	if _, ingestErr := Ingest(paths, claudeDir); ingestErr != nil {
+		t.Fatalf("second Ingest() error = %v", ingestErr)
+	}
+	raw, err = os.ReadFile(spoolPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if strings.Contains(string(raw), string(staleID)) {
+		t.Error("the user-asked scan left the record from an earlier schema version; a bump is a rebuild, not a skip")
+	}
+	entries, err = store.New(spoolPath).Entries(0)
+	if err != nil {
+		t.Fatalf("Entries() error = %v", err)
+	}
+	if len(entries) != 1 || entries[0].Record.Name != "Bash" {
+		t.Fatalf("Entries() = %+v, want the backfilled record re-derived from the transcript", entries)
+	}
+	if scan := scanCounters(t, paths); scan.StaleRecords != 1 || !scan.StaleRebuilt {
+		t.Errorf("Scan.StaleRecords, Scan.StaleRebuilt = %d, %v; want 1, true — the rebuild happened and says so", scan.StaleRecords, scan.StaleRebuilt)
+	}
+}
+
+// appendRecordFromAnotherSchemaVersion writes one line no build but an earlier one
+// could have written, and returns its id.
+//
+// By hand, because there is no earlier build here to write it: this build's own
+// encoding of a valid record with only the version number changed, which is what an
+// additive dimension addition actually leaves on disk.
+func appendRecordFromAnotherSchemaVersion(t *testing.T, spoolPath string) record.Hash {
+	t.Helper()
+	outcome := record.OutcomeOK
+	stale := record.Record{
+		SchemaVersion: record.SchemaVersion - 1,
+		EventID:       record.DeriveEventID("claude-code", "an-event-only-the-store-remembers"),
+		Timestamp:     time.Date(2026, time.August, 1, 12, 0, 0, 0, time.UTC),
+		Harness:       "claude-code",
+		SessionID:     "session-0",
+		Repo:          "0123456789abcdef0123456789abcdef",
+		Kind:          record.KindBuiltinTool,
+		Name:          "Bash",
+		Invoker:       record.InvokerModel,
+		Outcome:       &outcome,
+	}
+	line, err := json.Marshal(stale)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	spool, err := os.OpenFile(spoolPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("OpenFile() error = %v", err)
+	}
+	if _, err := spool.Write(append(line, '\n')); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if err := spool.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	return stale.EventID
 }
 
 // Single-flight, not a queue. ADR-0016 rules out concurrent session-ends each

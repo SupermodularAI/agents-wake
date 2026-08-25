@@ -942,3 +942,160 @@ func contains(value, want string) bool {
 	}
 	return false
 }
+
+// TestIngestRebuildsASpoolFromAnotherSchemaVersion is the other half of "a schema
+// bump is a rebuild rather than a migration" (ADR-0007, ADR-0015). Refusing an
+// earlier version on read is only the drop; without the rebuild every consumer
+// reads the spool through Entries and reports the post-upgrade subset as the whole
+// truth, and every position over it shifts under the delivery watermark.
+//
+// The stale line is written by hand because there is no earlier build to write it:
+// it is this build's own encoding of a valid record with only the version number
+// changed, which is what an additive dimension addition actually leaves on disk.
+func TestIngestRebuildsASpoolFromAnotherSchemaVersion(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("MkdirAll() root error = %v", err)
+	}
+	claudeDir := filepath.Join(t.TempDir(), "claude")
+	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll() Claude dir error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("WriteFile() settings error = %v", err)
+	}
+	transcriptDir := filepath.Join(claudeDir, "projects", "project")
+	if err := os.MkdirAll(transcriptDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll() transcript error = %v", err)
+	}
+	transcript := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"` + root + `","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"` + root + `","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(transcriptDir, "session.jsonl"), []byte(transcript), 0o600); err != nil {
+		t.Fatalf("WriteFile() transcript error = %v", err)
+	}
+	paths := testPaths(t)
+
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+
+	spoolPath := filepath.Join(paths.DataDir, eventsFile)
+	outcome := record.OutcomeOK
+	stale := record.Record{
+		SchemaVersion: record.SchemaVersion - 1,
+		EventID:       record.DeriveEventID("claude-code", "an-event-only-the-store-remembers"),
+		Timestamp:     time.Date(2026, time.August, 1, 12, 0, 0, 0, time.UTC),
+		Harness:       "claude-code",
+		SessionID:     "session-0",
+		Repo:          "0123456789abcdef0123456789abcdef",
+		Kind:          record.KindBuiltinTool,
+		Name:          "Bash",
+		Invoker:       record.InvokerModel,
+		Outcome:       &outcome,
+	}
+	line, err := json.Marshal(stale)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	spool, openErr := os.OpenFile(spoolPath, os.O_APPEND|os.O_WRONLY, 0)
+	if openErr != nil {
+		t.Fatalf("OpenFile() error = %v", openErr)
+	}
+	if _, writeErr := spool.Write(append(line, '\n')); writeErr != nil {
+		t.Fatalf("Write() error = %v", writeErr)
+	}
+	if closeErr := spool.Close(); closeErr != nil {
+		t.Fatalf("Close() error = %v", closeErr)
+	}
+
+	if _, ingestErr := Ingest(paths, claudeDir); ingestErr != nil {
+		t.Fatalf("Ingest() error = %v", ingestErr)
+	}
+
+	raw, err := os.ReadFile(spoolPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if strings.Contains(string(raw), string(stale.EventID)) {
+		t.Error("the spool still holds the record from an earlier schema version; a bump is a rebuild, not a skip")
+	}
+	entries, err := store.New(spoolPath).Entries(0)
+	if err != nil {
+		t.Fatalf("Entries() error = %v", err)
+	}
+	// Re-derived from the transcript, at position 1: the rebuild is what keeps a
+	// cursor over this spool meaningful.
+	if len(entries) != 1 || entries[0].Position != 1 {
+		t.Fatalf("Entries() = %+v, want one re-derived record at position 1", entries)
+	}
+
+	report, err := health.New(paths.HealthFile).Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if report.Scan.StaleRecords != 1 {
+		t.Errorf("Scan.StaleRecords = %d, want 1 — a discarded record is lost collection and carries a count", report.Scan.StaleRecords)
+	}
+	if !report.Scan.StaleRebuilt {
+		t.Error("Scan.StaleRebuilt = false; the scan that discarded the spool re-derived it, and doctor says so")
+	}
+}
+
+// TestIngestLeavesACurrentSpoolAlone is the guard on the other side: the rebuild
+// fires on a foreign schema version and on nothing else, so an ordinary scan may
+// never discard the history it is adding to.
+func TestIngestLeavesACurrentSpoolAlone(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("MkdirAll() root error = %v", err)
+	}
+	claudeDir := filepath.Join(t.TempDir(), "claude")
+	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll() Claude dir error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("WriteFile() settings error = %v", err)
+	}
+	transcriptDir := filepath.Join(claudeDir, "projects", "project")
+	if err := os.MkdirAll(transcriptDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll() transcript error = %v", err)
+	}
+	transcript := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"` + root + `","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"` + root + `","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(transcriptDir, "session.jsonl"), []byte(transcript), 0o600); err != nil {
+		t.Fatalf("WriteFile() transcript error = %v", err)
+	}
+	paths := testPaths(t)
+
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	spoolPath := filepath.Join(paths.DataDir, eventsFile)
+	before, err := os.ReadFile(spoolPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+
+	if _, ingestErr := Ingest(paths, claudeDir); ingestErr != nil {
+		t.Fatalf("Ingest() error = %v", ingestErr)
+	}
+
+	after, err := os.ReadFile(spoolPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if string(before) != string(after) {
+		t.Error("a second scan rewrote a spool it could read; the rebuild must fire only on a foreign schema version")
+	}
+	report, err := health.New(paths.HealthFile).Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if report.Scan.StaleRecords != 0 {
+		t.Errorf("Scan.StaleRecords = %d, want 0", report.Scan.StaleRecords)
+	}
+}

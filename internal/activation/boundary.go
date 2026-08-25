@@ -112,7 +112,82 @@ func registerDiscovered(repos *config.Repos, dirs []string, from time.Time) (reg
 // not a property of the source but of the work done, so the two walks' contributions
 // are summed. Taking the second walk's alone would report zero events written for a
 // scan that wrote plenty on the first, and doctor would say "collects zero".
+// The two stale-spool counters are set here rather than inside either walk, for the
+// reason the paragraph above gives: a walk's counters describe the source it read, and
+// these describe the store it wrote into. Setting them at the one return point is also
+// what keeps them from being dropped when the second walk's counters replace the
+// first's.
 func scanWithBoundary(paths config.Paths, repos *config.Repos, claudeDir string, events *store.Store, stale claudecode.Staleness, scope collectionScope) (int, health.Scan, error) {
+	found, rebuilt, err := rebuildStaleSpool(events, scope)
+	if err != nil {
+		// A spool this build cannot read and could not replace. At is stamped so the
+		// failed scan is reported as a scan that read nothing rather than as one that
+		// never ran; the error itself is what the caller surfaces.
+		return 0, health.Scan{At: time.Now().UTC()}, err
+	}
+	written, scan, err := scanBoundaryWalks(paths, repos, claudeDir, events, stale, scope)
+	scan.StaleRecords, scan.StaleRebuilt = found, rebuilt
+	return written, scan, err
+}
+
+// rebuildStaleSpool reports how many records the spool holds from a record schema
+// version this build does not read, and discards them — for the scan that can put them
+// back, and only for that scan.
+//
+// This is the rebuild half of ADR-0015's "rebuild rather than migration". The drop
+// half — record.Validate refusing a foreign version — is already true everywhere the
+// spool is read, and on its own it is silent: store.Entries skips those lines the way
+// it skips any line that does not decode, so every consumer reports the post-upgrade
+// subset as the whole truth and every position over the spool shifts under the
+// delivery watermark. Discarding is what turns that into one visible rebuild, and it is
+// safe for the reason a rebuild always is: event ids are derived from the source event
+// (ADR-0004), so re-deriving writes the same records back.
+//
+// "Re-deriving writes the same records back" is a claim about scope, which is why the
+// discard is gated on it. ADR-0015's rescan is a rescan of the whole history, and the
+// spool holds whatever the user backfilled with `wake ingest` — events from before each
+// repository's recorded boundary. The hook-fired scan collects inside that boundary,
+// because it is the one scan nobody asked for (ADR-0025), so discarding under it would
+// delete history and re-derive a subset: a `wake ingest` backfill destroyed by a hook
+// nobody typed, in a process ADR-0016 keeps silent. Widening that scan to the whole
+// history instead is the same ADR's other prohibition — it would import the history a
+// plain `init` declined. So the hook-fired scan leaves the spool exactly as it found it
+// and reports the count; the drop and the rescan stay one operation, the pairing
+// Rebuild has always had, and happen once on the next scan the user asks for.
+//
+// Leaving it means one scan does append onto a spool that still holds unreadable lines.
+// On disk that costs those lines' bytes until the rebuild and nothing else: they decode
+// for no consumer, contribute no id to the append index, and are dropped whole by the
+// rebuild that follows. What it does cost is that store.Entries' numbering is not
+// settled until the rebuild — the unreadable lines take their positions back when they
+// become readable again — so a cursor over the spool must not record a position it took
+// meanwhile. Remote delivery is the only such cursor and holds its watermark back for
+// exactly as long as store.Stale reports lines it cannot read, which costs a re-send and
+// never a record. It is the conservative half of the trade — forward collection keeps
+// running, and nothing on disk is destroyed by a scan that could not put it back.
+//
+// The discard runs before the walk, not after, so a scan that does rebuild never
+// appends onto a spool of mixed versions. A spool this build can read is left
+// byte-identical by either scope.
+//
+// The read and the drop are two operations, so a concurrent scan can append between
+// them and have its records dropped with the rest. That costs a re-derivation and
+// never a record: both scans read the same harness history, and every id in it is
+// the same id (ADR-0004). Holding the spool lock across the whole scan instead would
+// deadlock against that scan's own Append, which is the reason Rebuild does not
+// either.
+func rebuildStaleSpool(events *store.Store, scope collectionScope) (found int, rebuilt bool, err error) {
+	found, err = events.Stale()
+	if err != nil || found == 0 || scope != wholeHistory {
+		return found, false, err
+	}
+	if err := events.Discard(); err != nil {
+		return found, false, err
+	}
+	return found, true, nil
+}
+
+func scanBoundaryWalks(paths config.Paths, repos *config.Repos, claudeDir string, events *store.Store, stale claudecode.Staleness, scope collectionScope) (int, health.Scan, error) {
 	discovery := newBoundaryDiscovery(repos)
 	written, scan, err := importHistory(repos, claudeDir, events, stale, scope, discovery)
 	if err != nil {

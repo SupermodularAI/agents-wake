@@ -344,25 +344,20 @@ func lastRecordBoundary(file *os.File, size int64) (int64, error) {
 
 // Entries returns complete, valid NDJSON records in write order. A trailing
 // partial line is ignored so readers remain safe while another process writes.
+//
+// A complete line that does not decode contributes no entry and no position. That
+// is right for a line that was never valid, and it is why Stale exists for the one
+// case where it is not: a spool written under an earlier schema version reads as a
+// smaller store rather than as one that needs rebuilding, and positions renumber
+// under any cursor over it.
 func (s *Store) Entries(after uint64) ([]Entry, error) {
-	raw, err := os.ReadFile(s.path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
-	}
+	lines, err := s.completeLines()
 	if err != nil {
-		return nil, fmt.Errorf("reading store: %w", err)
+		return nil, err
 	}
-
-	lines := bytes.Split(raw, []byte{'\n'})
 	entries := make([]Entry, 0, len(lines))
 	var position uint64
-	for index, line := range lines {
-		if index == len(lines)-1 && len(line) > 0 {
-			break
-		}
-		if len(line) == 0 {
-			continue
-		}
+	for _, line := range lines {
 		candidate, err := record.Decode(line)
 		if err != nil {
 			continue
@@ -373,6 +368,64 @@ func (s *Store) Entries(after uint64) ([]Entry, error) {
 		}
 	}
 	return entries, nil
+}
+
+// Stale counts complete spool lines this build refuses because they carry another
+// schema version — records an earlier build wrote correctly under a contract that
+// has since changed (ADR-0007's dimension addition).
+//
+// It is deliberately not part of Entries' answer. Entries drops them the way it
+// drops any line that does not decode, and a caller that only reads cannot tell the
+// difference; this reports it so the callers that can act on it do — the scan the
+// user asks for discards the spool and re-derives it, and the one a hook fires reports
+// the number and leaves the spool alone, because re-deriving is what makes discarding
+// safe (ADR-0015). The other caller is any cursor over the spool: a positive count
+// means Entries' numbering is not settled — these lines take their positions back at
+// the rebuild — so a position taken now must not be recorded for later. A line that is
+// not JSON, or that
+// is invalid for any other reason, is not counted: it was never valid, so no rebuild
+// would repair it.
+func (s *Store) Stale() (int, error) {
+	lines, err := s.completeLines()
+	if err != nil {
+		return 0, err
+	}
+	stale := 0
+	for _, line := range lines {
+		if _, err := record.Decode(line); errors.Is(err, record.ErrUnsupportedVersion) {
+			stale++
+		}
+	}
+	return stale, nil
+}
+
+// completeLines returns the spool's non-empty terminated lines. An unterminated
+// final line belongs to nobody yet: another process may still be writing it, so it
+// is dropped here rather than at each caller, which is what keeps the rule that the
+// store is readable while being written in one place.
+//
+// A missing spool is no lines and no error — a machine that never ingested.
+func (s *Store) completeLines() ([][]byte, error) {
+	raw, err := os.ReadFile(s.path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading store: %w", err)
+	}
+
+	split := bytes.Split(raw, []byte{'\n'})
+	lines := make([][]byte, 0, len(split))
+	for index, line := range split {
+		if index == len(split)-1 && len(line) > 0 {
+			break
+		}
+		if len(line) == 0 {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	return lines, nil
 }
 
 // Head returns the last valid record position.

@@ -72,6 +72,15 @@ func newDoctorCmd() *cobra.Command {
 // change back. These lines are what report the loss, which is why they are printed
 // whatever the state word says.
 //
+// The stale-record count and the store-rebuild word are two lines for the same reason:
+// the count says how many records the store holds that this build cannot read, and the
+// word says whether anything has re-derived them. The scan that found them may not have
+// been allowed to — the one a hook fires collects inside each repository's recorded
+// boundary (ADR-0025), so it would re-derive less than it deleted — and the word is
+// what keeps the count from reading as the report of a rebuild that never happened. It
+// is the one line here that names a command, because it is the one state whose remedy
+// is a command the user has to type.
+//
 // They live in this function because every health.Scan counter does; the boundary's own
 // state word needs the project table, which this function knows nothing about, so it
 // arrives through the seam instead (doctor_boundary.go).
@@ -124,6 +133,7 @@ func writeDiagnosis(out io.Writer, paths config.Paths, claudeDir string) error {
 		{"parse errors", report.Scan.ParseErrors},
 		{"skipped transcripts", report.Scan.Skipped},
 		{"events written", report.Scan.EventsWritten},
+		{"records from an earlier schema version", report.Scan.StaleRecords},
 		{"refused project entries", report.Scan.RefusedProjects},
 		{"global boundary directories gone", report.Scan.BoundarySkipped},
 		{"global boundary registrations refused", report.Scan.BoundaryRefused},
@@ -135,6 +145,10 @@ func writeDiagnosis(out io.Writer, paths config.Paths, claudeDir string) error {
 		if _, err := fmt.Fprintf(out, "%s: %d\n", line.key, line.value); err != nil {
 			return err
 		}
+	}
+
+	if _, err := fmt.Fprintf(out, "store rebuild: %s\n", diagnosis.StoreRebuild); err != nil {
+		return err
 	}
 
 	if _, err := fmt.Fprintf(out, "integration: %s\n", diagnosis.State); err != nil {

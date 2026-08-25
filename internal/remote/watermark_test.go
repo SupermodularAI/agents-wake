@@ -2,6 +2,7 @@ package remote
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/SupermodularAI/agents-wake/internal/config"
+	"github.com/SupermodularAI/agents-wake/internal/record"
 )
 
 // testPaths gives each test its own config and data roots. It constructs the
@@ -94,6 +96,50 @@ func TestDeliveryStateUnreadableResetsToZero(t *testing.T) {
 				t.Errorf("Position = %d, want 0 — an unreadable cursor must fail toward re-sending", got.Position)
 			}
 		})
+	}
+}
+
+// TestDeliveryStateForgetsAPositionFromAnotherSchemaVersion is the reason the
+// record schema version is on this file at all. A position counts records the
+// spool holds, and a schema bump discards every record the spool held, so a
+// position carried across one indexes records that no longer exist — and the
+// rebuild self-heal in Flush cannot notice, because the rebuilt spool is about
+// the same length. Failing backward re-sends, which the receiver collapses.
+func TestDeliveryStateForgetsAPositionFromAnotherSchemaVersion(t *testing.T) {
+	paths := testPaths(t)
+	path := deliveryStatePath(paths)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	contents := fmt.Sprintf(`{"version":%d,"schema_version":%d,"position":500,`+
+		`"last_flush":"2026-08-24T12:00:00Z"}`, deliveryStateVersion, record.SchemaVersion-1)
+	if err := os.WriteFile(path, []byte(contents), deliveryStateFileMode); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	got := readDeliveryState(path)
+	if got.Position != 0 {
+		t.Errorf("Position = %d, want 0 — a position from another schema version indexes records that are gone", got.Position)
+	}
+	// The flush interval is not a cursor and survives: throttling has nothing to
+	// do with which records were delivered.
+	if got.LastFlush.IsZero() {
+		t.Error("LastFlush was discarded with the position; only the position indexes the spool")
+	}
+}
+
+// TestDeliveryStateStampsTheSchemaVersion pins the write half: a caller that
+// forgot the field would write a file every later read resets, which presents as
+// delivery re-sending the whole spool on every single flush.
+func TestDeliveryStateStampsTheSchemaVersion(t *testing.T) {
+	paths := testPaths(t)
+	path := deliveryStatePath(paths)
+
+	if err := writeDeliveryState(path, deliveryState{Position: 7}); err != nil {
+		t.Fatalf("writeDeliveryState() error = %v", err)
+	}
+	if got := readDeliveryState(path); got.Position != 7 || got.SchemaVersion != record.SchemaVersion {
+		t.Errorf("readDeliveryState() = %+v, want position 7 at schema version %d", got, record.SchemaVersion)
 	}
 }
 

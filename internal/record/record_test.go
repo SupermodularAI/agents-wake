@@ -4,6 +4,8 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -48,6 +50,60 @@ func TestOutcomeHasNoSuccessZeroValue(t *testing.T) {
 	}
 }
 
+func TestEntrypointHasNoDefaultMember(t *testing.T) {
+	for _, member := range []Entrypoint{EntrypointCLI, EntrypointSDKPython, EntrypointSDKCLI} {
+		if Entrypoint("") == member {
+			t.Fatalf("zero Entrypoint must not mean %q", member)
+		}
+	}
+}
+
+func TestValidateAcceptsEveryEntrypointMember(t *testing.T) {
+	for _, member := range []Entrypoint{EntrypointCLI, EntrypointSDKPython, EntrypointSDKCLI} {
+		candidate := validRecord()
+		candidate.Entrypoint = member
+		if err := Validate(candidate); err != nil {
+			t.Errorf("Validate() rejected Entrypoint = %q: %v", member, err)
+		}
+	}
+}
+
+func TestValidateAcceptsAnAbsentEntrypoint(t *testing.T) {
+	candidate := validRecord()
+	if candidate.Entrypoint != "" {
+		t.Fatalf("validRecord() presets Entrypoint = %q", candidate.Entrypoint)
+	}
+	// Both halves of "absence is omission" (C5), asserted directly rather than
+	// through Marshal's internal validation: absence validates, and it leaves no key.
+	if err := Validate(candidate); err != nil {
+		t.Fatalf("Validate() rejected an absent entrypoint: %v", err)
+	}
+	encoded, err := Marshal(candidate)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if strings.Contains(string(encoded), "entrypoint") {
+		t.Fatalf("Marshal() emitted an absent entrypoint: %s", encoded)
+	}
+}
+
+func TestValidateRejectsAnUnknownEntrypoint(t *testing.T) {
+	values := []string{"sdk-py", "sdk-cli", "sdk-ts", "CLI", "cli ", "vscode", "sdk_py"}
+	for _, value := range hostileIdentifiers {
+		if value == "" {
+			continue
+		}
+		values = append(values, value)
+	}
+	for _, value := range values {
+		candidate := validRecord()
+		candidate.Entrypoint = Entrypoint(value)
+		if err := Validate(candidate); err == nil {
+			t.Errorf("Validate() accepted Entrypoint = %q", value)
+		}
+	}
+}
+
 func TestMarshalIsDeterministic(t *testing.T) {
 	record := validRecord()
 	first, err := Marshal(record)
@@ -86,6 +142,49 @@ func validRecord() Record {
 		Name:          "review",
 		Invoker:       InvokerModel,
 		Outcome:       &outcome,
+	}
+}
+
+// TestValidateNamesAnUnreadableSchemaVersion pins the one refusal a caller has to
+// be able to tell apart. Everything else Validate refuses is a record that was
+// always invalid; a foreign version is a record an earlier build wrote correctly,
+// and the store rebuilds for it rather than silently reading past it.
+func TestValidateNamesAnUnreadableSchemaVersion(t *testing.T) {
+	stale := validRecord()
+	stale.SchemaVersion = SchemaVersion - 1
+	if err := Validate(stale); !errors.Is(err, ErrUnsupportedVersion) {
+		t.Fatalf("Validate() error = %v, want ErrUnsupportedVersion", err)
+	}
+
+	future := validRecord()
+	future.SchemaVersion = SchemaVersion + 1
+	if err := Validate(future); !errors.Is(err, ErrUnsupportedVersion) {
+		t.Fatalf("Validate() on a future version error = %v, want ErrUnsupportedVersion", err)
+	}
+
+	// A record of this version that is invalid for any other reason must not be
+	// mistaken for one, or a scan would rebuild the whole spool over one bad line.
+	broken := validRecord()
+	broken.Name = "contains space"
+	if err := Validate(broken); err == nil || errors.Is(err, ErrUnsupportedVersion) {
+		t.Fatalf("Validate() error = %v, want a refusal that is not ErrUnsupportedVersion", err)
+	}
+}
+
+// TestDecodeCarriesTheVersionRefusal covers the path that matters: the store reads
+// lines through Decode, so the sentinel has to survive its wrapping.
+func TestDecodeCarriesTheVersionRefusal(t *testing.T) {
+	stale := validRecord()
+	stale.SchemaVersion = SchemaVersion - 1
+	line, err := json.Marshal(stale)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if _, err := Decode(line); !errors.Is(err, ErrUnsupportedVersion) {
+		t.Fatalf("Decode() error = %v, want ErrUnsupportedVersion", err)
+	}
+	if _, err := Decode([]byte("not json")); errors.Is(err, ErrUnsupportedVersion) {
+		t.Fatal("Decode() reported unreadable JSON as a foreign schema version")
 	}
 }
 

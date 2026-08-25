@@ -9,6 +9,7 @@ import (
 
 	"github.com/SupermodularAI/agents-wake/internal/atomicfile"
 	"github.com/SupermodularAI/agents-wake/internal/config"
+	"github.com/SupermodularAI/agents-wake/internal/record"
 )
 
 const (
@@ -52,10 +53,31 @@ const (
 // as the signal, would not advance on a failed or empty run, so a dead endpoint
 // would be retried on every single trigger, which is precisely what the minimum
 // interval exists to prevent.
+//
+// SchemaVersion is the record schema the spool held when Position was taken, and
+// it is what makes Position mean something. Position counts the records the spool
+// holds; a record schema bump makes every record the spool held unreadable, so the
+// scan discards the spool and re-derives it (ADR-0007, ADR-0015) and every position
+// over the old one now indexes a record that is gone. The rebuild self-heal in
+// Flush cannot catch that on its own: it fires on a position past head, and a
+// re-derived spool is about as long as the one it replaced, so head passes the
+// stale position again and the records below it are skipped permanently. Stamping
+// the schema version is what turns that into a re-send, which is free.
+//
+// It is half of that defence and not the whole of it, because it is spent once: the
+// first flush after the bump clears the position and stamps the new version, and the
+// rebuild that renumbers the spool can come later — the scan a hook fires leaves a
+// stale spool for the scan the user asks for (ADR-0025), and a flush is spawned after
+// both. The other half is in Flush and is a property of the spool rather than of this
+// file: a position is only ever taken from, or recorded over, a spool this build reads
+// whole. The two are complementary. This field covers a rebuild that happened before
+// any flush saw the new schema; the spool check covers a rebuild that happens after
+// one already did.
 type deliveryState struct {
-	Version   int       `json:"version"`
-	Position  uint64    `json:"position"`
-	LastFlush time.Time `json:"last_flush"`
+	Version       int       `json:"version"`
+	SchemaVersion uint      `json:"schema_version"`
+	Position      uint64    `json:"position"`
+	LastFlush     time.Time `json:"last_flush"`
 }
 
 // deliveryStatePath is where the state lives: under the data root, because it is
@@ -97,6 +119,14 @@ func readDeliveryState(path string) deliveryState {
 	if stored.Version != deliveryStateVersion {
 		return deliveryState{}
 	}
+	if stored.SchemaVersion != record.SchemaVersion {
+		// Only the position is forgotten. LastFlush is not a cursor — it gates
+		// remote.min_interval — so a schema bump must not turn into an unthrottled
+		// flush on top of a full re-send. A file written before this field existed
+		// reads as version 0 and lands here, which is the correct answer for it:
+		// nothing vouches for what its position counted.
+		stored.Position = 0
+	}
 	return stored
 }
 
@@ -104,14 +134,16 @@ func readDeliveryState(path string) deliveryState {
 // position or the new one and never a truncated file that reads as zero and
 // re-sends the spool.
 //
-// It stamps the version itself rather than trusting the caller's field: a caller
-// that forgot would write a file this build then refuses to read back, which
-// presents as delivery silently restarting from the beginning on every flush.
+// It stamps both versions itself rather than trusting the caller's fields: a caller
+// that forgot either one would write a file this build then refuses, or whose
+// position this build then discards, which presents as delivery silently restarting
+// from the beginning on every flush.
 func writeDeliveryState(path string, s deliveryState) error {
 	s.Version = deliveryStateVersion
+	s.SchemaVersion = record.SchemaVersion
 	data, err := json.Marshal(s)
 	if err != nil {
-		// Three scalars, so this cannot fail — and the message still names no
+		// Four scalars, so this cannot fail — and the message still names no
 		// field, because a marshal error embeds the value it choked on.
 		return err
 	}
