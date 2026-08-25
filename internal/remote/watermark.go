@@ -63,6 +63,16 @@ const (
 // re-derived spool is about as long as the one it replaced, so head passes the
 // stale position again and the records below it are skipped permanently. Stamping
 // the schema version is what turns that into a re-send, which is free.
+//
+// It is half of that defence and not the whole of it, because it is spent once: the
+// first flush after the bump clears the position and stamps the new version, and the
+// rebuild that renumbers the spool can come later — the scan a hook fires leaves a
+// stale spool for the scan the user asks for (ADR-0025), and a flush is spawned after
+// both. The other half is in Flush and is a property of the spool rather than of this
+// file: a position is only ever taken from, or recorded over, a spool this build reads
+// whole. The two are complementary. This field covers a rebuild that happened before
+// any flush saw the new schema; the spool check covers a rebuild that happens after
+// one already did.
 type deliveryState struct {
 	Version       int       `json:"version"`
 	SchemaVersion uint      `json:"schema_version"`

@@ -50,6 +50,12 @@ func PreviewFlush(p config.Paths) (Payloads, error) {
 	// into a helper would move flushLocked's store read to before its
 	// minimum-interval gate; TestPreviewFlushMatchesWhatFlushPosts pins the two
 	// together behaviourally instead.
+	//
+	// Flush's other view — no position is ever recorded over a spool this build
+	// cannot read whole — needs nothing here, and that is the point of putting it
+	// where the position is written rather than where it is read: a stale spool's
+	// state file says "delivered through nothing", so this reader and every other one
+	// already agrees with what the next flush will send.
 	state := readDeliveryState(deliveryStatePath(p))
 	if state.Position > head {
 		state.Position = 0

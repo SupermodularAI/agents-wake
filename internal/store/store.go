@@ -376,10 +376,13 @@ func (s *Store) Entries(after uint64) ([]Entry, error) {
 //
 // It is deliberately not part of Entries' answer. Entries drops them the way it
 // drops any line that does not decode, and a caller that only reads cannot tell the
-// difference; this reports it so the caller that can act on it does — the scan the
+// difference; this reports it so the callers that can act on it do — the scan the
 // user asks for discards the spool and re-derives it, and the one a hook fires reports
 // the number and leaves the spool alone, because re-deriving is what makes discarding
-// safe (ADR-0015). A line that is not JSON, or that
+// safe (ADR-0015). The other caller is any cursor over the spool: a positive count
+// means Entries' numbering is not settled — these lines take their positions back at
+// the rebuild — so a position taken now must not be recorded for later. A line that is
+// not JSON, or that
 // is invalid for any other reason, is not counted: it was never valid, so no rebuild
 // would repair it.
 func (s *Store) Stale() (int, error) {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"io/fs"
@@ -306,6 +307,125 @@ func TestWatermarkPastHeadResetsAndResends(t *testing.T) {
 	if got := spansOf(t, gunzip(t, receiver.request(t, 0).body)); len(got) != 3 {
 		t.Errorf("payload carried %d spans, want all 3 re-sent", len(got))
 	}
+}
+
+// TestAStaleSpoolStrandsNothingWhenTheRebuildArrivesLater is the other direction of
+// the rebuild self-heal, and the one no length comparison can see: a rebuild that
+// makes the readable set *grow*.
+//
+// A record schema bump makes every line an earlier build wrote unreadable, and the
+// scan a hook fires leaves those lines on disk for the scan the user asks for
+// (ADR-0015, ADR-0025). A flush is spawned after every scan, including that one, so
+// delivery runs over a spool whose Entries numbering is provisional: the lines it
+// cannot decode take no position yet and will take one once the rebuild puts them
+// back. Recording a position over that numbering fails *forward* — the rebuild
+// renumbers within one schema version, so the schema stamp cannot notice and
+// Position > head cannot either, because the spool grew rather than shrank.
+//
+// The assertion is the one readDeliveryState's doc comment makes: every record the
+// user consented to send reaches the wire. Re-sending is free, because the receiver
+// collapses a duplicate on a span id derived from the deterministic event id
+// (ADR-0004, ADR-0018, ADR-0027); a skip is permanent and nothing downstream ever
+// notices.
+func TestAStaleSpoolStrandsNothingWhenTheRebuildArrivesLater(t *testing.T) {
+	paths := testPaths(t)
+	receiver, endpoint := serve(t, http.StatusOK)
+	enable(t, paths, endpoint)
+
+	// The spool an upgrade leaves behind: five records the earlier build wrote, and
+	// the ones the hook-fired scan appended beside them without discarding anything.
+	earlier, fresh := testRecords(0, 5), testRecords(5, 3)
+	seedFromAnotherSchemaVersion(t, paths, earlier)
+	if _, err := store.New(eventsPath(paths)).Append(fresh); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+
+	// The flush spawned after that scan. Forward collection must keep flowing: the
+	// three readable records are delivered.
+	if err := Flush(paths); err != nil {
+		t.Fatalf("first Flush() error = %v", err)
+	}
+	if got := len(deliveredSpanIDs(t, receiver)); got != len(fresh) {
+		t.Errorf("first flush delivered %d spans, want %d — a stale spool must not stall forward delivery", got, len(fresh))
+	}
+	if got := storedPosition(t, paths); got != 0 {
+		t.Errorf("position = %d, want 0 — a position over a spool a rebuild will renumber may not be recorded", got)
+	}
+
+	// The scan doctor asked for: the spool is discarded and re-derived whole, so the
+	// earlier records become readable again and take the low positions. Every
+	// position in the spool now means something else, under the same schema version
+	// the last flush stamped.
+	events := store.New(eventsPath(paths))
+	if err := events.Discard(); err != nil {
+		t.Fatalf("Discard() error = %v", err)
+	}
+	if _, err := events.Append(slices.Concat(earlier, fresh)); err != nil {
+		t.Fatalf("Append() after the rebuild: error = %v", err)
+	}
+
+	if err := Flush(paths); err != nil {
+		t.Fatalf("second Flush() error = %v", err)
+	}
+	delivered := deliveredSpanIDs(t, receiver)
+	for _, r := range slices.Concat(earlier, fresh) {
+		if !slices.Contains(delivered, spanID(r)) {
+			t.Errorf("a record on disk the whole time never reached the wire: %s", spanID(r))
+		}
+	}
+	if got := storedPosition(t, paths); got != uint64(len(earlier)+len(fresh)) {
+		t.Errorf("position = %d, want %d — a whole spool's position is the one worth recording", got, len(earlier)+len(fresh))
+	}
+}
+
+// seedFromAnotherSchemaVersion appends records to the spool one schema version back.
+//
+// By hand, because there is no earlier build here to write them and this build's own
+// encoder refuses the version (record.Marshal validates). What it leaves on disk is
+// what an additive dimension addition actually leaves: the same records, one version
+// number back.
+func seedFromAnotherSchemaVersion(t *testing.T, p config.Paths, records []record.Record) {
+	t.Helper()
+	if err := os.MkdirAll(p.DataDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	var lines []byte
+	for _, r := range records {
+		r.SchemaVersion = record.SchemaVersion - 1
+		line, err := json.Marshal(r)
+		if err != nil {
+			t.Fatalf("Marshal() error = %v", err)
+		}
+		lines = append(lines, append(line, '\n')...)
+	}
+	spool, err := os.OpenFile(eventsPath(p), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("OpenFile(spool) error = %v", err)
+	}
+	if _, err := spool.Write(lines); err != nil {
+		t.Fatalf("Write(spool) error = %v", errors.Join(err, spool.Close()))
+	}
+	if err := spool.Close(); err != nil {
+		t.Fatalf("Close(spool) error = %v", err)
+	}
+}
+
+// deliveredSpanIDs is every span id the receiver has been sent, across every request
+// of every flush so far. Delivery is at-least-once by design, so the question a test
+// asks of the wire is which records arrived, never how many times.
+func deliveredSpanIDs(t *testing.T, receiver *spy) []string {
+	t.Helper()
+	var ids []string
+	for index := range receiver.count() {
+		for _, span := range spansOf(t, gunzip(t, receiver.request(t, index).body)) {
+			id, ok := span["spanId"].(string)
+			if !ok {
+				t.Fatalf("spanId is %T, want a string", span["spanId"])
+			}
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 // TestDeadEndpointReturnsPromptly is ADR-0018's "no command ever waits on the

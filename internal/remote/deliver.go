@@ -206,6 +206,28 @@ func flushLocked(p config.Paths, auth config.RemoteAuth, minInterval time.Durati
 	if err != nil {
 		return Report{}, err
 	}
+	// A spool this build cannot read whole has no settled numbering, so this run
+	// takes no position from it and records none. Stale counts the lines refused for
+	// their schema version; they hold no position now and take one back the moment
+	// the scan the user asks for re-derives the spool (ADR-0015), which renumbers
+	// Entries and *grows* it. Neither guard below can see that: the schema stamp is
+	// spent by the first flush after the bump, which can come before the rebuild, and
+	// a spool that grew never puts head under the position. Delivering from the
+	// beginning and leaving the file saying "delivered through nothing" is the
+	// backward direction this whole path is built on — it costs a re-send the
+	// receiver collapses on a span id derived from the deterministic event id
+	// (ADR-0004, ADR-0018, ADR-0027), where recording a provisional position would
+	// skip every record beneath it permanently and silently.
+	//
+	// Forward delivery keeps running throughout: the records this build can read are
+	// sent on every flush until the rebuild lands.
+	stale, err := events.Stale()
+	if err != nil {
+		return Report{}, err
+	}
+	if stale > 0 {
+		state.Position = 0
+	}
 	// Self-heal after a rebuild. `ingest --rebuild` calls store.Discard and
 	// re-derives the spool, so positions shift; a watermark past head means the
 	// store shrank under it. Reset and re-send rather than clamp: at-least-once
@@ -272,6 +294,15 @@ func flushLocked(p config.Paths, auth config.RemoteAuth, minInterval time.Durati
 	// accepted, and LastFlush has to advance or a dead endpoint is retried on
 	// every single trigger — which is what the minimum interval exists to
 	// prevent.
+	//
+	// Except over a stale spool, where the position this run reached counts a
+	// numbering the pending rebuild will replace. It is dropped rather than written,
+	// for the reason given where it was refused on the way in; LastFlush is not a
+	// cursor and still advances, so a stale spool cannot turn into an unthrottled
+	// flush either.
+	if stale > 0 {
+		state.Position = 0
+	}
 	state.LastFlush = startedAt
 	return report, errors.Join(deliveryErr, writeDeliveryState(statePath, state))
 }

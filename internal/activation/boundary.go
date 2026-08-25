@@ -156,9 +156,14 @@ func scanWithBoundary(paths config.Paths, repos *config.Repos, claudeDir string,
 // Rebuild has always had, and happen once on the next scan the user asks for.
 //
 // Leaving it means one scan does append onto a spool that still holds unreadable lines.
-// That costs those lines' bytes until the rebuild and nothing else: they decode for no
-// consumer, contribute no id to the append index, and are dropped whole by the rebuild
-// that follows. It is the conservative half of the trade — forward collection keeps
+// On disk that costs those lines' bytes until the rebuild and nothing else: they decode
+// for no consumer, contribute no id to the append index, and are dropped whole by the
+// rebuild that follows. What it does cost is that store.Entries' numbering is not
+// settled until the rebuild — the unreadable lines take their positions back when they
+// become readable again — so a cursor over the spool must not record a position it took
+// meanwhile. Remote delivery is the only such cursor and holds its watermark back for
+// exactly as long as store.Stale reports lines it cannot read, which costs a re-send and
+// never a record. It is the conservative half of the trade — forward collection keeps
 // running, and nothing on disk is destroyed by a scan that could not put it back.
 //
 // The discard runs before the walk, not after, so a scan that does rebuild never
