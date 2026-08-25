@@ -77,6 +77,17 @@ you want the history, ask for it — `wake init --full` imports this project's
 Claude Code history in the same call, and `wake ingest` does it afterwards for
 a project that is already consented.
 
+If you'd rather consent a whole tree once than run `wake init` in every
+project, `wake init -g ~/Developer` consents everything under a directory;
+`wake init -g` on its own means your home directory. Each repository under the
+boundary is registered under **its own** identity the first time a scan sees a
+session in it — including repositories you create later — so `report` and
+`serve` keep their per-project breakdown rather than folding the tree into one.
+Each one starts collecting from the moment it is registered, the same
+forward-only default a plain `wake init` gives, and `wake init -g --full`
+imports the existing history under the boundary in the same call. `wake doctor`
+says whether a boundary is set and how many repositories it has picked up.
+
 Open the local dashboard when you want a browser view:
 
 ```sh
@@ -88,6 +99,7 @@ collection current; use these commands when needed:
 
 ```sh
 wake init --full        # Consent and import existing history now
+wake init -g ~/Developer # Consent every project under a directory
 wake ingest             # Re-scan consented history
 wake ingest --rebuild   # Rebuild the derived event store
 wake doctor             # Inspect collection and hook health
@@ -106,6 +118,8 @@ wake uninstall          # Remove everything, including ~/.config/wake and the bi
 | `wake serve` | Open the local dashboard. |
 | `wake init` | Enable collection for the current project. |
 | `wake init --full` | Enable collection and import existing history now. |
+| `wake init --global [path]` | Consent every project under a directory (your home directory when no path is given), registering each repository under its own identity as sessions run in it. Records the boundary; consents no root of its own. |
+| `wake init --global --full` | ...and import the existing Claude Code history under that boundary in the same call. |
 | `wake ingest` | Import activity for consented projects. |
 | `wake doctor` | Show collection and hook health. |
 | `wake remove` | Remove Wake-owned Claude Code hooks. `--purge` also deletes collected data; `~/.config/wake` is kept either way, so a later `wake init` keeps the same repository identity. |
@@ -180,6 +194,11 @@ Wake stores configuration under `~/.config/wake` and derived state under
 `~/.local/state/wake`. Set `WAKE_DIR` to move the state directory. Removing the
 derived event store is safe: `wake ingest --rebuild` recreates it from consented
 history.
+
+The collection boundary `wake init --global` records lives in the project table
+under the state directory, beside the repository identities, and never in
+`config.toml` — there is no configuration key for it, so it cannot be widened by
+editing a settings file.
 
 ## Development
 

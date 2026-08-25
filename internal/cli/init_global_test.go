@@ -117,9 +117,9 @@ func TestInitGlobalTwiceReplacesTheBoundary(t *testing.T) {
 	// Symlink-resolved, so the negative assertion below is about the replacement
 	// rather than about /var → /private/var: SetGlobalRoot records the resolved
 	// spelling, and an unresolved one would fail to match for the wrong reason.
-	base, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatalf("resolving the temporary directory: %v", err)
+	base, resolveErr := filepath.EvalSymlinks(t.TempDir())
+	if resolveErr != nil {
+		t.Fatalf("resolving the temporary directory: %v", resolveErr)
 	}
 	first := filepath.Join(base, "first")
 	second := filepath.Join(base, "second")

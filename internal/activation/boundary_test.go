@@ -225,17 +225,17 @@ func TestASecondScanAfterAutoRegistrationLeavesTheSpoolByteIdentical(t *testing.
 		t.Fatalf("first Ingest() error = %v", err)
 	}
 	spool := filepath.Join(paths.DataDir, eventsFile)
-	before, err := os.ReadFile(spool)
-	if err != nil {
-		t.Fatalf("reading the spool: %v", err)
+	before, readErr := os.ReadFile(spool)
+	if readErr != nil {
+		t.Fatalf("reading the spool: %v", readErr)
 	}
 
 	if _, err := Ingest(paths, claudeDir); err != nil {
 		t.Fatalf("second Ingest() error = %v", err)
 	}
-	after, err := os.ReadFile(spool)
-	if err != nil {
-		t.Fatalf("reading the spool: %v", err)
+	after, readErr := os.ReadFile(spool)
+	if readErr != nil {
+		t.Fatalf("reading the spool: %v", readErr)
 	}
 	if !bytes.Equal(before, after) {
 		t.Errorf("the spool changed on a re-scan:\nbefore:\n%s\nafter:\n%s", before, after)

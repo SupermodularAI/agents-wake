@@ -22,8 +22,8 @@ func widenTheRecordedBoundary(t *testing.T, paths config.Paths) {
 		t.Fatalf("reading the project table: %v", err)
 	}
 	var table map[string]any
-	if err := json.Unmarshal(raw, &table); err != nil {
-		t.Fatalf("decoding the project table: %v", err)
+	if decodeErr := json.Unmarshal(raw, &table); decodeErr != nil {
+		t.Fatalf("decoding the project table: %v", decodeErr)
 	}
 	boundary, ok := table["global_root"].(map[string]any)
 	if !ok {
