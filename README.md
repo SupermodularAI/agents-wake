@@ -112,6 +112,7 @@ wake uninstall          # Remove everything, including ~/.config/wake and the bi
 | `wake uninstall` | Irreversible. Removes the integration, all collected data, `~/.config/wake` (configuration and the identity salt) and the binary itself — plus the symlink you invoked it through, if the `wake` on your PATH is a link. It prints every path before deleting anything, and removes nothing at all if it cannot take its hook entry out of `settings.json` first. |
 | `wake update` | Download the newest release, verify its SHA-256 against the published `checksums.txt`, and replace this binary in place. Refuses and changes nothing if the checksum does not match. |
 | `wake update --check` | Report whether a newer release exists and stop there — it downloads nothing. On a build with no release tag it says so rather than guessing. |
+| `wake remote` | Configure and control delivery to a remote endpoint — see [Remote Delivery](#remote-delivery) below. |
 
 ## Privacy And Enterprise Use
 
@@ -130,18 +131,47 @@ review. Its default design keeps the sensitive path local:
   and counters. Invalid or path-shaped values are dropped rather than stored.
 - Repository identity is a salted, per-machine HMAC. The readable project map
   stays local with restrictive permissions.
-- The official binaries contain no remote-delivery code. Wake sends no
-  transcript data or telemetry, and the dashboard is bound to loopback only.
+- Every binary ships the remote-delivery capability and it is off until you run
+  `wake remote set <url>` and `wake remote on`. Until you do, no endpoint is
+  configured, nothing is sent, and `wake remote status` and `wake doctor` both
+  say so. The dashboard is bound to loopback only.
 - `wake update` and `wake update --check` are the only commands that reach the
-  network, and only when you run them: nothing checks for updates in the
-  background, and both shell out to `curl` rather than linking a network client,
-  so the binary itself still carries no network code.
+  network without being asked to deliver, and only when you run them: nothing
+  checks for updates in the background, and both shell out to `curl` rather than
+  linking a network client.
 - `wake doctor` reports safe counters, never transcript content or repository
   paths, so its output is suitable for sharing in support requests.
 
 This means security teams can inspect a small local data boundary: the source
 transcript stays with its harness, Wake stores only derived metadata, and no
 network destination is configured by default.
+
+## Remote Delivery
+
+Wake can deliver its derived records to an OTLP/HTTP JSON-compatible
+collector, such as [Langfuse](https://cloud.langfuse.com). The capability
+ships in every build and stays off until you configure it:
+
+```sh
+wake remote set https://cloud.langfuse.com/api/public/otel   # credential via stdin
+wake remote on
+wake remote flush
+wake remote status
+```
+
+| Command | Purpose |
+| --- | --- |
+| `wake remote set <url>` | Configure the delivery endpoint. The credential is read from standard input, never as an argument, and never echoed back — confirms with "remote endpoint configured", not the endpoint itself. |
+| `wake remote on` | Start delivering records to the configured endpoint. |
+| `wake remote off` | Stop delivering; the endpoint is kept, so nothing needs re-entering to resume. |
+| `wake remote flush` | Deliver everything pending now. Add `--dry-run` to print the exact payload the next flush would send, without sending it. |
+| `wake remote status` | Report the endpoint's bare host, whether a credential and delivery are configured, the last flush time, and what's pending. This is the one command allowed to name the endpoint; `doctor` and everything else report presence only. |
+
+A `wake ingest` scan triggers a detached flush automatically once delivery is
+on, throttled by `remote.min_interval` (15 minutes by default, provisional) —
+run `wake remote flush` directly whenever you want one immediately.
+`WAKE_REMOTE_AUTHORIZATION` overrides the stored credential when set, useful
+for CI or anyone who prefers no secret on disk at all.
 
 ## Local State
 

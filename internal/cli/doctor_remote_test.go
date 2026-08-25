@@ -1,5 +1,3 @@
-//go:build remote
-
 package cli
 
 import (
@@ -9,9 +7,8 @@ import (
 	"testing"
 )
 
-// Acceptance criterion 5, first half: under the remote tag, doctor reports the
-// delivery state, and the numbers it prints are the real ones rather than a
-// placeholder row.
+// Acceptance criterion 5, first half: doctor reports the delivery state, and
+// the numbers it prints are the real ones rather than a placeholder row.
 func TestDoctorReportsTheDeliveryState(t *testing.T) {
 	paths := isolateRemote(t)
 	_, endpoint := serveRemote(t)

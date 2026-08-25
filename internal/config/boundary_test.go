@@ -39,12 +39,10 @@ func moduleRoot(t *testing.T) string {
 	}
 }
 
-// confinedFileNames is every filename only this package may spell. The remote
-// credential store is a literal rather than remoteAuthFileName because that
-// constant lives in a //go:build remote file and this test is untagged; the
-// tagged TestRemoteAuthFileNameIsConfined asserts the two spellings agree, so
-// they cannot drift (ADR-0028).
-var confinedFileNames = []string{projectsFileName, saltFileName, "remote-auth.json"}
+// confinedFileNames is every filename only this package may spell. All three are
+// taken as constants rather than literals, so the names this test walks the tree
+// for are by construction the names the package writes (ADR-0028).
+var confinedFileNames = []string{projectsFileName, saltFileName, remoteAuthFileName}
 
 // Acceptance item 12, mechanically. The privacy guarantee — the repository label
 // and path never leave the local store, only the hashed id — is checkable by

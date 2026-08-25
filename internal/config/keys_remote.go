@@ -1,12 +1,12 @@
-//go:build remote
-
 package config
 
-// The whole remote.* configuration surface, present only under //go:build
-// remote. ADR-0012 compiles remote delivery out rather than configuring it off,
-// so this file is the only place a remote.* key is registered and the default
-// build has none — which is why registry.go keeps an open append list instead of
-// a closed literal, and why this ticket edits neither registry.go nor keys.go.
+// The whole remote.* configuration surface: one key, registered in every build.
+//
+// The endpoint, the enabled flag and the credential are not here and never will
+// be. They live in the 0600 remote-auth store, because config.toml is the file
+// people paste into a bug report and a secret that can reach it is a secret that
+// will (ADR-0028, ADR-0030). What is configuration here is a sizing knob and
+// nothing else.
 //
 // One key, not a group. ADR-0018 decides that a flush is always a detached
 // child, single-flight by lockfile, with a minimum interval; that interval is
@@ -21,8 +21,7 @@ package config
 // become a burst of flushes, short enough that a day's work is not one delivery
 // — and must not be described anywhere as calibrated.
 //
-// KindDuration is reused rather than extended, so no new Kind reaches the
-// default build.
+// KindDuration is reused rather than extended, so this key adds no new Kind.
 func init() {
 	register(Key{
 		Name:        "remote.min_interval",

@@ -1,5 +1,3 @@
-//go:build remote
-
 package config
 
 import (
@@ -9,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"strings"
 	"testing"
 )
@@ -624,16 +621,6 @@ func TestRemoteAuthRedactsItselfWhenFormatted(t *testing.T) {
 // later has to be justified here.
 func TestRemoteAuthCarriesNoPathOrLabelField(t *testing.T) {
 	assertFieldsAre(t, reflect.TypeOf(RemoteAuth{}), "Endpoint", "Enabled", "Credential")
-}
-
-// The anti-drift link between the tagged constant and the untagged literal in
-// boundary_test.go. That test cannot name remoteAuthFileName — it is untagged
-// and the constant is not — so this is what stops the two spellings diverging
-// and leaving the boundary walk watching a filename nothing writes.
-func TestRemoteAuthFileNameIsConfined(t *testing.T) {
-	if !slices.Contains(confinedFileNames, remoteAuthFileName) {
-		t.Errorf("confinedFileNames = %v, want it to hold %q", confinedFileNames, remoteAuthFileName)
-	}
 }
 
 // ADR-0028: never inside config.toml. That is the file users are asked to paste

@@ -343,10 +343,8 @@ func TestListDistinguishesDefaultFromOverridden(t *testing.T) {
 		}
 		// The provisional fact has to reach T007 through List, which is the
 		// only thing the command reads. Compared against the registry rather
-		// than a literal pair of names: which keys are provisional is a
-		// per-build fact — the tagged build has a third, remote.min_interval —
-		// and it is pinned exhaustively by registry_default_test.go and
-		// keys_remote_test.go. What is under test here is that List carries the
+		// than a literal pair of names: the provisional set is pinned
+		// exhaustively by keys_test.go, in one place. What is under test here is that List carries the
 		// flag through unchanged, and a second closed literal would only make
 		// this test fail on a key it says nothing about.
 		k, ok := lookup(s.Key)

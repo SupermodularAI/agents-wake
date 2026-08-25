@@ -1,5 +1,3 @@
-//go:build remote
-
 package remote
 
 import (
@@ -127,9 +125,9 @@ var deliveryClient = &http.Client{Timeout: requestTimeout}
 // Flush delivers everything the spool holds past the watermark and advances the
 // watermark over what the receiver accepted.
 //
-// It is the only place in this codebase that opens an outbound connection, and
-// it is compiled only under the remote build tag: the default binary links no
-// network client at all (ADR-0012, ADR-0026).
+// It is the only place in this codebase that opens an outbound connection from
+// this process, and it reaches that line only once a user has configured an
+// endpoint and turned delivery on (ADR-0026, ADR-0030).
 //
 // Nothing here prints. A caller on the hook-invoked path is forbidden to report
 // a failure (ADR-0016) and hands the returned error to internal/cli's discard;
@@ -144,14 +142,14 @@ func Flush(p config.Paths) error {
 
 // FlushReport is Flush with the counts a deliberate `remote flush` prints.
 //
-// It is the only place in this codebase that opens an outbound connection, and
-// it is compiled only under the remote build tag: the default binary links no
-// network client at all (ADR-0012, ADR-0026).
+// It is the only place in this codebase that opens an outbound connection from
+// this process, and it reaches that line only once a user has configured an
+// endpoint and turned delivery on (ADR-0026, ADR-0030).
 //
 // The order of the first two steps is the acceptance criterion "assert no
 // request is ever constructed when the endpoint is unset or state is off": the
-// credential store is consulted before anything else happens, and a build that
-// is off returns before a lock file, a state file, or a request exists.
+// credential store is consulted before anything else happens, and an install
+// that is off returns before a lock file, a state file, or a request exists.
 func FlushReport(p config.Paths) (Report, error) {
 	auth, err := config.LoadRemoteAuth(p)
 	if err != nil {

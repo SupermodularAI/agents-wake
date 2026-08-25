@@ -10,7 +10,7 @@ import (
 )
 
 var (
-	// errNegativeDuration rejects a negative value. None of the seven keys has a
+	// errNegativeDuration rejects a negative value. None of the eight keys has a
 	// meaning for one: a negative window or timeout would produce nonsense
 	// numbers downstream instead of an error a user can see.
 	errNegativeDuration = errors.New("a duration must not be negative")

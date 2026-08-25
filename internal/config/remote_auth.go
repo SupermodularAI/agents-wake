@@ -1,7 +1,4 @@
-//go:build remote
-
-// The third member of the secrets boundary internal/config owns, present only
-// under //go:build remote.
+// The third member of the secrets boundary internal/config owns.
 //
 // It holds a third-party-issued credential — the first secret this project
 // stores that did not originate on this machine — and that is why it is a file
@@ -15,11 +12,6 @@
 // It is never in config.toml. That is the file users are asked to paste into a
 // bug report (ADR-0019 §4), so a secret that can reach it is a secret that will
 // (ADR-0028).
-//
-// The package comment in config.go says "the two sensitive files". In the
-// default build that is exactly true, and it is a shared untagged file this
-// build-tagged change does not edit; the boundary this file joins is stated
-// here instead.
 package config
 
 import (
@@ -39,9 +31,8 @@ import (
 // matches the encoding, as every other name in this package does — projects.json
 // is JSON and repo-salt is raw bytes.
 //
-// It is spelled here and once more as a literal in boundary_test.go's
-// confinedFileNames, because that test is untagged and cannot see this constant.
-// TestRemoteAuthFileNameIsConfined pins the two together so they cannot drift.
+// boundary_test.go's confinedFileNames takes this constant directly, so the
+// name is spelled once and cannot drift (ADR-0028).
 const remoteAuthFileName = "remote-auth.json"
 
 // remoteAuthVersion is the format version stamped on every write. A future
@@ -145,9 +136,9 @@ func presence(s string) string {
 // root (ADR-0028).
 //
 // Composed here rather than added to Paths. Paths is the surface other packages
-// see and the list `init` discloses under ADR-0010, and a field on it would be a
-// build-tagged field on an untagged struct — which is how the default build ends
-// up disclosing a file it can never have.
+// see and the list `init` discloses under ADR-0010, and a file the user has not
+// created — a fresh install has no remote-auth store at all — is not a path to
+// disclose.
 func remoteAuthPath(p Paths) string {
 	return filepath.Join(p.ConfigDir, remoteAuthFileName)
 }

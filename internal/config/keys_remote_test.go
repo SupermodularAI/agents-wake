@@ -1,39 +1,20 @@
-//go:build remote
-
 package config
 
 import (
-	"slices"
 	"strings"
 	"testing"
 )
-
-// The tagged mirror of TestKnownKeysAreExactlyTheSevenInADR0014. It is
-// exhaustive for the same reason that one is: ADR-0014 keeps the config surface
-// small, and the tagged build is not an exemption from that — it is one more key
-// than the default build, not an open door.
-func TestTaggedBuildRegistersRemoteMinInterval(t *testing.T) {
-	want := []string{
-		"remote.min_interval",
-		"scan.harnesses",
-		"scan.repos",
-		"scan.stale_call_timeout",
-		"session.idle_timeout",
-		"store.retention_raw",
-		"store.rollup_after",
-		"ui.default_window",
-	}
-	if got := KeyNames(); !slices.Equal(got, want) {
-		t.Errorf("KeyNames() = %v, want %v", got, want)
-	}
-}
 
 // One remote.* key, not a group. The flush interval is the only sizing knob a
 // document asks for (ADR-0018); batch record counts and byte ceilings have no
 // decision behind them and stay constants in internal/remote, per keys.go's rule
 // that a key with no decision behind it is scope creep rather than a
 // convenience.
-func TestTaggedBuildAddsExactlyOneRemoteKey(t *testing.T) {
+//
+// The endpoint, the enabled flag and the credential are not keys at all — they
+// live in the 0600 remote-auth store and never enter config.toml (ADR-0028), so
+// this count is the whole remote configuration surface.
+func TestExactlyOneRemoteKeyIsRegistered(t *testing.T) {
 	var got []string
 	for _, name := range KeyNames() {
 		if strings.HasPrefix(name, "remote.") {
@@ -47,8 +28,8 @@ func TestTaggedBuildAddsExactlyOneRemoteKey(t *testing.T) {
 
 // No document states a value for the flush interval, so ADR-0014's rule for
 // exactly that case applies: it ships provisional and labelled, and 15m must not
-// be presented anywhere as calibrated. KindDuration is reused deliberately — a
-// new Kind would reach the default build, which this ticket does not touch.
+// be presented anywhere as calibrated. KindDuration is reused deliberately — this
+// key adds no new Kind.
 func TestRemoteMinIntervalIsAProvisionalDuration(t *testing.T) {
 	k, ok := lookup("remote.min_interval")
 	if !ok {
@@ -65,22 +46,5 @@ func TestRemoteMinIntervalIsAProvisionalDuration(t *testing.T) {
 	}
 	if err := validate(k, k.Default); err != nil {
 		t.Errorf("the default for remote.min_interval is invalid: %v", err)
-	}
-}
-
-// The tagged mirror of TestTheTwoTimeoutsAreMarkedProvisional. The uncalibrated
-// set grows by exactly one under the tag, and stays exhaustive so a later key
-// cannot join it unnoticed.
-func TestTheThreeProvisionalKeysInTheTaggedBuild(t *testing.T) {
-	want := []string{"remote.min_interval", "scan.stale_call_timeout", "session.idle_timeout"}
-
-	var got []string
-	for _, k := range Keys() {
-		if k.Provisional {
-			got = append(got, k.Name)
-		}
-	}
-	if !slices.Equal(got, want) {
-		t.Errorf("provisional keys = %v, want %v", got, want)
 	}
 }

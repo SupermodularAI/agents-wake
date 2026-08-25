@@ -7,19 +7,15 @@ import (
 	"github.com/SupermodularAI/agents-wake/internal/config"
 )
 
-// diagnosisSections and afterScan are the two seams a build-tagged file reaches
-// the default build through.
+// diagnosisSections and afterScan are the two seams a feature adds a `doctor`
+// section or a post-scan hook through.
 //
-// Both are empty here and stay empty in the default binary. A file compiled only
-// under //go:build remote appends to them from its own init(), exactly as a
-// subcommand appends to commands in registry.go and a setting appends to keys in
-// internal/config/registry.go. An empty slice of plain funcs is not network code
-// and names no remote symbol, so the claim ADR-0012 defends — that the default
-// binary contains no delivery path at all — is untouched by their existence.
-//
-// The alternative is what this file exists to avoid: a build-tag conditional
-// inside doctor.go and ingest.go, which would put the absence of delivery behind
-// something a reader has to verify rather than something they can see.
+// A file appends to them from its own init(), exactly as a subcommand appends to
+// commands in registry.go and a setting appends to keys in
+// internal/config/registry.go, and for the same mechanical reason: the
+// alternative is editing doctor.go and ingest.go — two shared files — to add one
+// feature, so two lanes adding unrelated hooks in parallel would conflict on the
+// same line for no design reason.
 //
 // Access is unsynchronised by design, for the reason internal/config/registry.go
 // gives: init() runs before any goroutine of ours, and nothing appends after it.

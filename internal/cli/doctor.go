@@ -125,9 +125,8 @@ func writeDiagnosis(out io.Writer, paths config.Paths, claudeDir string) error {
 		return err
 	}
 
-	// The seam, after every line this function owns: a build that has extra
+	// The seam, after every line this function owns: a feature with extra
 	// diagnosis to add appends a section from its own init() rather than
-	// editing this file. Empty in the default build, so this output is
-	// byte-for-byte what it was (extensions.go).
+	// editing this file (extensions.go).
 	return writeDiagnosisSections(out, paths)
 }

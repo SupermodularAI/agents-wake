@@ -1,5 +1,3 @@
-//go:build remote
-
 package remote
 
 import (
@@ -18,7 +16,7 @@ import (
 // `remote status` reports and ADR-0028 said never to echo what was read;
 // ADR-0029 settled the two by consumer rather than by seniority. This struct is
 // the one `doctor` renders, and `doctor` output is what people paste into
-// issues, so it answers presence — which is also exactly what ADR-0012 asks
+// issues, so it answers presence — which is also exactly what ADR-0030 asks
 // `doctor` for. The host that the person who configured it asked to see is
 // rendered by internal/cli from config.RemoteEndpointHost, which is a separate
 // entry point precisely so this struct cannot grow the value by accident.
