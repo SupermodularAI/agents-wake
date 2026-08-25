@@ -397,3 +397,20 @@ func TestGlobalRootRefusalsNameNoPath(t *testing.T) {
 		})
 	}
 }
+
+// `wake init -g` with no argument means the home directory, and the resolution lives
+// here rather than in internal/cli: which directory gets consented is a decision, and
+// nothing under internal/cli resolves the home directory (ADR-0001,
+// TestInternalCliResolvesNoHomeDirectory).
+func TestDefaultGlobalRootIsTheHomeDirectory(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	got, err := DefaultGlobalRoot()
+	if err != nil {
+		t.Fatalf("DefaultGlobalRoot() = %v", err)
+	}
+	if got != home {
+		t.Errorf("DefaultGlobalRoot() = %q, want the home directory %q", got, home)
+	}
+}

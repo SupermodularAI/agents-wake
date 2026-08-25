@@ -40,23 +40,23 @@ func newInitCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		// Which directory gets consented is a decision below this layer either way.
-		// --global takes the one the user named, defaulting to the home directory —
-		// os.UserHomeDir is not root discovery and starts no process, so this file
-		// still names none of the three tokens
-		// TestInitCommandRunsNoProcessAndDiscoversNoRootItself forbids. Without it,
-		// config decides, from the working directory it asks for itself.
+		// Which directory gets consented is a decision below this layer either way, and
+		// both halves of it are resolved by name: config.DefaultGlobalRoot answers what
+		// `-g` with no argument means, and config.DiscoverRootForRegistration answers
+		// what plain `init` consents from the directory it asks for itself. Nothing under
+		// internal/cli resolves the home directory or starts a process (ADR-0001,
+		// TestInternalCliResolvesNoHomeDirectory,
+		// TestInitCommandRunsNoProcessAndDiscoversNoRootItself).
 		var root, boundary string
 		if global {
 			if len(args) == 1 {
 				boundary = args[0]
 			}
 			if boundary == "" {
-				home, homeErr := os.UserHomeDir()
-				if homeErr != nil {
-					return homeErr
+				boundary, err = config.DefaultGlobalRoot()
+				if err != nil {
+					return err
 				}
-				boundary = home
 			}
 		} else {
 			root, err = config.DiscoverRootForRegistration("", "")
@@ -87,10 +87,10 @@ func newInitCmd() *cobra.Command {
 		// either way, and --full is named in the output that used to just do it.
 		//
 		// config.toml appears only without --global, and that asymmetry is the point: a
-		// boundary is recorded in projects.json and writes no config key (ADR-0032 §2),
-		// so naming config.toml there would be a disclosure that over-states what the
-		// command does — as wrong as one that omits a file it writes. The list is built
-		// conditionally rather than trimmed, so both directions stay honest.
+		// boundary is recorded in the project table and writes no config key (ADR-0032
+		// §2), so naming config.toml there would be a disclosure that over-states what
+		// the command does — as wrong as one that omits a file it writes. The list is
+		// built conditionally rather than trimmed, so both directions stay honest.
 		//
 		// Every other file init writes is here, including the two it writes without
 		// being asked: the salt config.OpenRepos creates on first need, and the

@@ -16,8 +16,8 @@ import (
 //
 // config.toml's absence afterwards is the other half of the same rule: a disclosure
 // that names a file the command leaves alone is as wrong as one that omits a file it
-// writes. `--global` records the boundary in projects.json and writes no config key
-// (ADR-0032 §2 against requirement 10).
+// writes. `--global` records the boundary in the project table and writes no config
+// key (ADR-0032 §2 against requirement 10).
 func TestInitGlobalDisclosesEveryFileAndTheRegistrationBeforeWriting(t *testing.T) {
 	paths := isolate(t)
 	boundary := filepath.Join(t.TempDir(), "boundary")

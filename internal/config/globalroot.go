@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -179,6 +180,22 @@ func GlobalRootStateFor(p Paths) (GlobalRootState, error) {
 	}
 	r.table, r.dropped, r.boundaryRefused = table, dropped, refused
 	return r.GlobalRootState(), nil
+}
+
+// DefaultGlobalRoot returns the boundary `wake init --global` records when the user
+// names none: the home directory, which is the invocation the feature exists for.
+//
+// It lives here rather than in internal/cli for ADR-0001's reason, and the same one
+// that keeps os.Getwd inside DiscoverRootForRegistration: which directory gets
+// consented is a decision, and internal/cli only parses and prints. Nothing under
+// internal/cli resolves the home directory —
+// TestInternalCliResolvesNoHomeDirectory is the mechanical guard — so the default has
+// to be resolvable by name from up there.
+//
+// It creates nothing and records nothing. SetGlobalRoot is what records a boundary,
+// and the caller has a disclosure to print between the two.
+func DefaultGlobalRoot() (string, error) {
+	return os.UserHomeDir()
 }
 
 // WithinGlobalRoot reports whether the recorded boundary strictly encloses cwd.
