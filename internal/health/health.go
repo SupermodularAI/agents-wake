@@ -45,7 +45,13 @@ import (
 // Bumped to 3 when the scan gained the ambiguous-skill-run counter (T121): a version-2
 // file read as this format would report 0 for a counter nobody measured, which is the
 // same failure the bump to 2 avoided.
-const reportVersion = 3
+//
+// Bumped to 4 when the scan gained the two collection-boundary counters (DG-75): a
+// version-3 file read as this format would report 0 for two counters nobody measured,
+// and one of them is the only line that says a repository under the boundary could not
+// be registered. Same failure, same remedy, and the same cost — one scan's
+// diagnostics, on a file that is derived and non-precious (ADR-0014).
+const reportVersion = 4
 
 // reportFileMode is the mode the counter file is written with. It holds no path and
 // no label, but it is state about this user's machine and the rest of the local
@@ -109,6 +115,18 @@ type Scan struct {
 	// nothing" reasons: the transcript was read completely and the collapse is a
 	// documented decision, not a source nobody could read.
 	AmbiguousSkillRuns int `json:"ambiguous_skill_runs"`
+	// BoundarySkipped counts directories a scan discovered under the recorded global
+	// root and did not register because the directory no longer exists (ADR-0032
+	// Consequences). It is an honest zero, not lost collection: there is nothing left
+	// there to read, so it is deliberately not one of Diagnose's "collects nothing"
+	// reasons — the same reason Skipped is not.
+	BoundarySkipped int `json:"boundary_skipped"`
+	// BoundaryRefused counts directories a scan discovered under the recorded global
+	// root and could not register — most often a root that nests with one already
+	// recorded (ADR-0019 §5). The sessions in it were readable and no number carries
+	// them, so this is collection that was lost and it does join "collects nothing"
+	// (plan §3.3, §12).
+	BoundaryRefused int `json:"boundary_refused"`
 }
 
 // Hooks is what the last `init` or `remove` managed to do. KeptOwned is the partial

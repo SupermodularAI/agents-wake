@@ -147,6 +147,8 @@ func TestDiagnoseOnlyEverReturnsAKnownState(t *testing.T) {
 		{Scan: Scan{At: scannedAt, Transcripts: 3, Skipped: 3}},
 		{Scan: Scan{At: scannedAt, EventsWritten: 4}},
 		{Scan: Scan{At: scannedAt, EventsWritten: 1, PendingCalls: 5, InterruptedCalls: 3}},
+		{Scan: Scan{At: scannedAt, EventsWritten: 1, BoundarySkipped: 2}},
+		{Scan: Scan{At: scannedAt, EventsWritten: 1, BoundaryRefused: 2}},
 	}
 	failures := []error{nil, errors.New("refused")}
 
@@ -158,5 +160,29 @@ func TestDiagnoseOnlyEverReturnsAKnownState(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// A registration the boundary could not complete is collection that was lost: the
+// sessions in that directory were readable, the repository it belongs to has no
+// identity, and no number carries them. Most often it is a discovered root that nests
+// with one already recorded (ADR-0019 §5), and the remedy — consenting the inner root
+// or the outer one, not both — is undiscoverable if doctor calls the situation a
+// complete count of zero.
+func TestDiagnoseCallsARefusedBoundaryRegistrationLostCollection(t *testing.T) {
+	got := Diagnose(Report{Scan: Scan{At: scannedAt, Transcripts: 2, EventsWritten: 4, BoundaryRefused: 1}}, nil, nil)
+	if got.State != StateCollectsNothing {
+		t.Errorf("State = %q, want %q", got.State, StateCollectsNothing)
+	}
+}
+
+// A directory the boundary discovered and that is no longer there is an honest zero,
+// for the reason Skipped is one: there is nothing left there to read, so nothing was
+// lost by not registering it. Folding it in would put every machine that has ever
+// deleted a project directory permanently into "collects nothing".
+func TestDiagnoseDoesNotCallAVanishedBoundaryDirectoryLostCollection(t *testing.T) {
+	got := Diagnose(Report{Scan: Scan{At: scannedAt, Transcripts: 2, EventsWritten: 4, BoundarySkipped: 3}}, nil, nil)
+	if got.State != StateCollecting {
+		t.Errorf("State = %q, want %q", got.State, StateCollecting)
 	}
 }
