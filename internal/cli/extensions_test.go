@@ -29,7 +29,11 @@ func TestEachSeamIsRegisteredExactlyOnce(t *testing.T) {
 //
 // The whole of stdout means the boundary section too, which is why this case is the one
 // that has to change when a section is added. Section order is registration order,
-// which is the package's file order: doctor_boundary.go before doctor_remote.go.
+// which follows the order the toolchain hands this package's files to the compiler —
+// today, sorted, so doctor_boundary.go precedes doctor_remote.go. That is a toolchain
+// detail rather than a language guarantee, which is exactly why the order is pinned by
+// this snapshot: a build that ordered them differently fails here rather than shipping
+// a doctor whose sections moved.
 //
 // isolateRemote rather than isolate, because isolate does not clear
 // WAKE_REMOTE_AUTHORIZATION: a developer who exports it would otherwise see

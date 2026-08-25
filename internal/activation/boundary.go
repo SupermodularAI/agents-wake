@@ -98,6 +98,14 @@ func registerDiscovered(repos *config.Repos, dirs []string, from time.Time) (reg
 // derived from the source event (ADR-0004), so the spool deduplicates and the re-read
 // writes only what the newly recorded identities made collectable.
 //
+// That is a user-asked scan's story. On the hook-fired path the newly registered
+// entries collect forward only from the instant just taken, and every event this walk
+// can reach was in the file before it, so the re-read writes nothing and the pass buys
+// nothing but the counters it replaces. It still runs, for one scan per newly
+// discovered repository, rather than being gated on the scope: the sequencing is one
+// rule for every entry point, and a walk that is a no-op for a real reason is easier to
+// keep right than a walk that happens on one path and not another.
+//
 // Its counters replace the first walk's, because a walk is a complete pass over the
 // source and its numbers describe that source — a partial merge would report two
 // different windows as one. EventsWritten is the exception, and the only one: it is

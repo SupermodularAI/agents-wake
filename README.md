@@ -86,7 +86,10 @@ session in it — including repositories you create later — so `report` and
 Each one starts collecting from the moment it is registered, the same
 forward-only default a plain `wake init` gives, and `wake init -g --full`
 imports the existing history under the boundary in the same call. `wake doctor`
-says whether a boundary is set and how many repositories it has picked up.
+says whether a boundary is set, and counts the consented repositories it
+encloses — including any you consented with a plain `wake init` before the
+boundary existed, so the number is what is under the boundary rather than what
+the boundary found.
 
 Open the local dashboard when you want a browser view:
 
@@ -98,16 +101,16 @@ Wake listens only on [127.0.0.1:8080](http://127.0.0.1:8080). The hooks keep
 collection current; use these commands when needed:
 
 ```sh
-wake init --full        # Consent and import existing history now
+wake init --full         # Consent and import existing history now
 wake init -g ~/Developer # Consent every project under a directory
-wake ingest             # Re-scan consented history
-wake ingest --rebuild   # Rebuild the derived event store
-wake doctor             # Inspect collection and hook health
-wake update             # Install the newest release, verifying its checksum
-wake update --check     # Report whether a newer release exists; download nothing
-wake remove             # Remove the Claude Code integration; keep local data
-wake remove --purge     # ...and delete collected data; ~/.config/wake is kept
-wake uninstall          # Remove everything, including ~/.config/wake and the binary
+wake ingest              # Re-scan consented history
+wake ingest --rebuild    # Rebuild the derived event store
+wake doctor              # Inspect collection and hook health
+wake update              # Install the newest release, verifying its checksum
+wake update --check      # Report whether a newer release exists; download nothing
+wake remove              # Remove the Claude Code integration; keep local data
+wake remove --purge      # ...and delete collected data; ~/.config/wake is kept
+wake uninstall           # Remove everything, including ~/.config/wake and the binary
 ```
 
 | Command | Purpose |

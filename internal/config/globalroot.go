@@ -375,7 +375,11 @@ func strictlyEncloses(outer, inner string, fold bool) bool {
 		return false
 	}
 	if fold {
-		return !strings.EqualFold(strings.ToLower(inner), strings.ToLower(outer))
+		// Folded in the assignment, exactly as hasPathPrefix folds, and by ToLower
+		// rather than EqualFold: the two halves of one predicate have to fold by one
+		// rule, and EqualFold folds Unicode where hasPathPrefix folds ASCII. Two rules
+		// would let the pair disagree about whether two spellings are one directory.
+		inner, outer = strings.ToLower(inner), strings.ToLower(outer)
 	}
 	return inner != outer
 }
