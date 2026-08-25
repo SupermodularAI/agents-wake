@@ -1,12 +1,12 @@
 package config
 
-// The seven settings this build has. ADR-0014 keeps the surface deliberately
+// Seven of the eight settings this tool has; remote.min_interval is the eighth
+// and is registered by keys_remote.go. ADR-0014 keeps the surface deliberately
 // small: every key here is one a decision asked for, and a key with no decision
 // behind it is scope creep rather than a convenience.
 //
-// Registration happens here rather than in registry.go so that T090's remote.*
-// group can arrive as a build-tagged file without editing a shared list
-// (ADR-0012).
+// Registration happens here rather than in registry.go so that each key group
+// lives in its own file instead of a shared list.
 func init() {
 	register(
 		// Retention is configuration only: T002 records these and enforces

@@ -1,5 +1,5 @@
 // Package config owns every location and every setting this tool has, and it is
-// the only package that touches the two sensitive files behind them.
+// the only package that touches the three sensitive files behind them.
 //
 // It answers three questions and nothing else:
 //

@@ -64,7 +64,7 @@ func TestParseDurationRejectsEverythingElse(t *testing.T) {
 	}
 }
 
-// A negative window or timeout has no meaning for any of the seven keys, and
+// A negative window or timeout has no meaning for any of the eight keys, and
 // accepting one would produce nonsense numbers downstream rather than an error a
 // user can see.
 func TestParseDurationRejectsNegatives(t *testing.T) {
