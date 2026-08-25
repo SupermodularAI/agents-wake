@@ -102,9 +102,14 @@ func TestDoctorReportsARefusedBoundary(t *testing.T) {
 	}
 }
 
-// Acceptance item 7's second half: the two counters render, and the refused one moves
-// the integration state — which is the difference between the two, made visible where
-// a user can act on it.
+// Acceptance item 7's second half: the two counters render, each carrying its own
+// number, and neither of them moves the integration state.
+//
+// The refused one deliberately does not. Every scan re-observes the directory it could
+// not register, so a state word driven by that counter could never change again, and a
+// machine that is collecting normally would read as "collects nothing" for good. What
+// says collection was lost there is the counter, printed beside the boundary's own
+// state a few lines above.
 func TestDoctorReportsTheBoundaryCounters(t *testing.T) {
 	paths := isolate(t)
 	if err := health.New(paths.HealthFile).RecordScan(health.Scan{
@@ -124,7 +129,7 @@ func TestDoctorReportsTheBoundaryCounters(t *testing.T) {
 	for _, want := range []string{
 		"global boundary directories gone: 2",
 		"global boundary registrations refused: 1",
-		"integration: collects nothing",
+		"integration: collecting",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output is missing %q:\n%s", want, out)

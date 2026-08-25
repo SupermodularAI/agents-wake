@@ -69,17 +69,23 @@ type Diagnosis struct {
 // never finished (ADR-0015). Both are honest, and neither is a source nobody could
 // read.
 //
-// A boundary registration that was refused belongs in the first arm, and it is the
-// arm that catches the boundary's own failure mode: a directory the recorded global
-// root encloses whose repository could not be registered has no identity, so every
-// session in it counted as belonging to nothing, and the numbers are missing all of
-// it. Most often the discovered root nests with one already recorded (ADR-0019 §5),
-// and the remedy — consenting the inner root or the outer one, not both — is
-// undiscoverable if this is reported as a complete count of zero.
+// Neither boundary counter is in it, and the refused one is the interesting case.
 //
-// A boundary directory that is gone is deliberately not in it, for the reason Skipped
-// is not: there is nothing left there to read, so nothing was lost by not registering
-// it. Folding it in would put every machine that has ever deleted a project directory
+// A directory the recorded global root encloses whose repository could not be
+// registered did lose collection: it has no identity, so every session in it counted
+// as belonging to nothing. What keeps it out of this arm is that it is a standing fact
+// rather than something a scan found out — every scan re-observes the same directory
+// and refuses it again, nothing records that it was refused, and no command removes
+// the entry it nests with (ADR-0019 §5 is the usual refusal). A state word driven by
+// that counter could never change again, so a machine collecting normally would read
+// as "collects nothing" for good, and a diagnosis that cannot change is not one. This
+// is the same reason Skipped and an ambiguous skill run are excluded, and the counter
+// is what reports the loss: doctor prints it beside the boundary's own state, which is
+// where a fact about the boundary belongs rather than in the machine-wide word.
+//
+// A boundary directory that is gone is not in it either, for the reason Skipped is
+// not: there is nothing left there to read, so nothing was lost by not registering it.
+// Folding it in would put every machine that has ever deleted a project directory
 // permanently into "collects nothing", since nothing about that directory will ever
 // change.
 //
@@ -113,7 +119,7 @@ func Diagnose(report Report, countersErr, hooksErr error) Diagnosis {
 		diagnosis.State = StateHooksUnreadable
 	case report.Scan.At.IsZero():
 		diagnosis.State = StateNeverScanned
-	case report.Scan.Unreadable > 0 || report.Scan.ParseErrors > 0 || report.Scan.RefusedProjects > 0 || report.Scan.RefusedCalls > 0 || report.Scan.BoundaryRefused > 0:
+	case report.Scan.Unreadable > 0 || report.Scan.ParseErrors > 0 || report.Scan.RefusedProjects > 0 || report.Scan.RefusedCalls > 0:
 		diagnosis.State = StateCollectsNothing
 	case report.Scan.EventsWritten == 0:
 		diagnosis.State = StateCollectsZero

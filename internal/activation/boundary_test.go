@@ -356,13 +356,21 @@ func TestInitGlobalFullImportsHistoryAndStillRecordsTheRegistrationInstant(t *te
 	}
 }
 
-// A registration the table refuses is collection that was lost, and doctor is the only
-// surface that can say so (ADR-0016 keeps the hook-invoked scan silent).
+// A registration the table refuses is counted, and doctor is the only surface that can
+// say so (ADR-0016 keeps the hook-invoked scan silent).
 //
 // The refusal here is the realistic one: a discovered root that contains a repository
 // the user consented separately, which ADR-0019 §5 refuses in both directions so
 // longest-prefix resolution stays unique.
-func TestARefusedRegistrationUnderTheBoundaryIsCountedAndReportedAsCollectsNothing(t *testing.T) {
+//
+// It is counted on every scan, because every scan re-observes the same directory: no
+// entry matches it, nothing records that it was refused, and no command removes the
+// entry it nests with. Two scans are what this asserts, because a machine that is
+// collecting normally must not be pinned to "collects nothing" by a refusal that will
+// still be there on the next scan and the one after that — a state word that can never
+// change again is not a diagnosis. The number is the report; the state word is about
+// whether the numbers can be trusted.
+func TestARefusedRegistrationUnderTheBoundaryIsCountedAndDoesNotPinTheIntegrationState(t *testing.T) {
 	paths := testPaths(t)
 	claudeDir, base := boundaryFixture(t)
 	outer := filepath.Join(base, "a")
@@ -378,21 +386,34 @@ func TestARefusedRegistrationUnderTheBoundaryIsCountedAndReportedAsCollectsNothi
 		t.Fatalf("InitGlobal() error = %v", err)
 	}
 	transcriptAt(t, claudeDir, "session-a", outer, time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC))
+	// The consented repository, so the machine is collecting rather than merely not
+	// broken: the assertion below is about a refusal not blinding a working install.
+	transcriptAt(t, claudeDir, "session-b", inner, time.Date(2026, 8, 13, 12, 5, 0, 0, time.UTC))
 
-	if _, err := Ingest(paths, claudeDir); err != nil {
-		t.Fatalf("Ingest() error = %v", err)
-	}
-
-	counters := scanCounters(t, paths)
-	if counters.BoundaryRefused != 1 {
-		t.Errorf("BoundaryRefused = %d, want 1", counters.BoundaryRefused)
-	}
-	report, err := health.New(paths.HealthFile).Read()
-	if err != nil {
-		t.Fatalf("Read() error = %v", err)
-	}
-	if got := health.Diagnose(report, nil, nil); got.State != health.StateCollectsNothing {
-		t.Errorf("Diagnose().State = %q, want %q", got.State, health.StateCollectsNothing)
+	for i, scan := range []string{"the first scan", "the second scan"} {
+		// A new session for the second pass. Every id is derived from the source event
+		// (ADR-0004), so re-reading what is already in the spool writes nothing and
+		// EventsWritten counts the work done rather than the window — without a new
+		// session the second scan would report an honest zero and the state word below
+		// would be about that instead of about the refusal.
+		transcriptAt(t, claudeDir, "session-"+string(rune('c'+i)), inner, time.Date(2026, 8, 13, 13, 0, i, 0, time.UTC))
+		if _, err := Ingest(paths, claudeDir); err != nil {
+			t.Fatalf("Ingest() on %s error = %v", scan, err)
+		}
+		counters := scanCounters(t, paths)
+		if counters.BoundaryRefused != 1 {
+			t.Errorf("BoundaryRefused after %s = %d, want 1", scan, counters.BoundaryRefused)
+		}
+		if counters.EventsWritten == 0 {
+			t.Errorf("EventsWritten after %s = 0; the fixture is not collecting and the state assertion below means nothing", scan)
+		}
+		report, err := health.New(paths.HealthFile).Read()
+		if err != nil {
+			t.Fatalf("Read() error = %v", err)
+		}
+		if got := health.Diagnose(report, nil, nil); got.State != health.StateCollecting {
+			t.Errorf("Diagnose().State after %s = %q, want %q", scan, got.State, health.StateCollecting)
+		}
 	}
 }
 

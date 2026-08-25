@@ -163,16 +163,20 @@ func TestDiagnoseOnlyEverReturnsAKnownState(t *testing.T) {
 	}
 }
 
-// A registration the boundary could not complete is collection that was lost: the
-// sessions in that directory were readable, the repository it belongs to has no
-// identity, and no number carries them. Most often it is a discovered root that nests
-// with one already recorded (ADR-0019 §5), and the remedy — consenting the inner root
-// or the outer one, not both — is undiscoverable if doctor calls the situation a
-// complete count of zero.
-func TestDiagnoseCallsARefusedBoundaryRegistrationLostCollection(t *testing.T) {
+// A registration the boundary could not complete is reported as its own number and
+// does not blind the integration state.
+//
+// It is a standing fact about a directory rather than a source nobody could read: the
+// same directory is re-observed and re-refused by every scan, nothing records that it
+// was refused, and no command removes the entry it nests with. Folding it in would put
+// a machine that is collecting normally into "collects nothing" permanently, which is
+// the reason Skipped and an ambiguous skill run are not in it either. The counter is
+// what says collection was lost there, and doctor prints it beside the boundary's own
+// state.
+func TestDiagnoseDoesNotLetARefusedBoundaryRegistrationBlindTheIntegrationState(t *testing.T) {
 	got := Diagnose(Report{Scan: Scan{At: scannedAt, Transcripts: 2, EventsWritten: 4, BoundaryRefused: 1}}, nil, nil)
-	if got.State != StateCollectsNothing {
-		t.Errorf("State = %q, want %q", got.State, StateCollectsNothing)
+	if got.State != StateCollecting {
+		t.Errorf("State = %q, want %q", got.State, StateCollecting)
 	}
 }
 

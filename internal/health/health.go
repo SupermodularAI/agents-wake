@@ -123,9 +123,14 @@ type Scan struct {
 	BoundarySkipped int `json:"boundary_skipped"`
 	// BoundaryRefused counts directories a scan discovered under the recorded global
 	// root and could not register — most often a root that nests with one already
-	// recorded (ADR-0019 §5). The sessions in it were readable and no number carries
-	// them, so this is collection that was lost and it does join "collects nothing"
-	// (plan §3.3, §12).
+	// recorded (ADR-0019 §5), and otherwise a discovered root the boundary does not
+	// enclose. The sessions in it were readable and no number carries them, so this is
+	// collection that was lost and the counter is what reports it (plan §3.3, §12).
+	//
+	// It is deliberately not one of Diagnose's "collects nothing" reasons, and that
+	// exclusion is argued where the arm is: every scan re-observes the same directory
+	// and refuses it again, so a state word driven by this counter could never change
+	// again.
 	BoundaryRefused int `json:"boundary_refused"`
 }
 
