@@ -838,3 +838,37 @@ func TestRemoteEndpointHostReportsHostAndPortOnly(t *testing.T) {
 		})
 	}
 }
+
+// The one derivation of a printable host, shared by `remote status` (a stored
+// endpoint) and `remote set`'s interactive confirmation (one in flight) —
+// ADR-0031 revises ADR-0029's carve-out to those two consumers and no third, so
+// the rule is spelled once. An empty result means "not a destination this build
+// stores", which is what lets a caller refuse before anything is written.
+func TestEndpointHostIsHostAndPortOrNothing(t *testing.T) {
+	cases := map[string]struct {
+		raw  string
+		want string
+	}{
+		"userinfo, port and path": {"https://user:pw@api.example.com:4318/v1/traces", "api.example.com:4318"},
+		"query string":            {"https://api.example.com/otel?key=sk-lf-secret", "api.example.com"},
+		"plain http":              {"http://127.0.0.1:4318/v1/traces", "127.0.0.1:4318"},
+		"empty":                   {"", ""},
+		"not a URL at all":        {"pk-lf-dg74:sk-lf-dg74", ""},
+		"wrong scheme":            {"ftp://api.example.com/v1/traces", ""},
+		"scheme with no host":     {"https:///v1/traces", ""},
+		"control character":       {"http://a\x7f.example.com", ""},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			got := EndpointHost(tc.raw)
+			if got != tc.want {
+				t.Errorf("EndpointHost() = %q, want %q", got, tc.want)
+			}
+			for _, forbidden := range []string{"/", "pw", "user", "sk-lf-secret", "v1"} {
+				if got != "" && strings.Contains(got, forbidden) {
+					t.Errorf("EndpointHost() = %q, which carries %q", got, forbidden)
+				}
+			}
+		})
+	}
+}

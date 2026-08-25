@@ -316,8 +316,9 @@ func SetRemoteAuth(p Paths, a RemoteAuth) error {
 // the credential. An empty result means no endpoint is configured.
 //
 // It is what `remote status` prints, and ADR-0029 is the decision that lets it:
-// ADR-0028's "never echo what was read" is narrowed by exactly one carve-out —
-// a bare host, on stdout, in answer to a command a human just typed. The host is
+// ADR-0028's "never echo what was read" is narrowed by a carve-out ADR-0031
+// revises to exactly two consumers, of which this is one — a bare host, on
+// stdout, in answer to a command a human just typed. The host is
 // the part of a URL that is not a secret; the path, the query and the userinfo
 // are where one hides, which is why url.Host is the whole of what this returns.
 //
@@ -330,14 +331,29 @@ func RemoteEndpointHost(p Paths) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return endpointHost(auth.Endpoint), nil
+	return EndpointHost(auth.Endpoint), nil
 }
 
-// endpointHost is url.Host — host and port, with userinfo, the path and the
-// query deliberately dropped. url.Parse's error is discarded for the reason
-// isHTTPEndpoint discards it: it embeds the URL it failed on.
-func endpointHost(raw string) string {
-	if raw == "" {
+// EndpointHost reports the host and port of an endpoint and nothing else about
+// it — no scheme, no path, no query, no userinfo, and never a credential. An
+// empty result means there is no endpoint, or that the value is not one this
+// build would store.
+//
+// It is the one derivation of a printable host in this project. ADR-0029 carved
+// a bare host out of ADR-0028's never-echo rule for `remote status`; ADR-0031
+// revises that carve-out to exactly two consumers — `remote status`, reading a
+// stored endpoint through RemoteEndpointHost, and `remote set`'s interactive
+// confirmation, showing a value in flight before it is written. Both call this,
+// so the rule about what a host may carry is spelled once and cannot drift into
+// a third shape.
+//
+// The scheme is checked here as well as in validateRemoteAuth, so an empty
+// result is a usable refusal: a caller can decline a typed value before anything
+// reaches the store, rather than confirming a destination the write path will
+// reject. url.Parse's error is discarded for the reason isHTTPEndpoint discards
+// it — it embeds the URL it failed on.
+func EndpointHost(raw string) string {
+	if !isHTTPEndpoint(raw) {
 		return ""
 	}
 	u, err := url.Parse(raw)
