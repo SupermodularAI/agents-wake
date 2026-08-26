@@ -837,3 +837,135 @@ func TestScanCreditsASourceWhoseOnlyContributionWasADeferredChild(t *testing.T) 
 		t.Fatalf("builtin_tool records = %d, want 1", len(byKind(records, record.KindBuiltinTool)))
 	}
 }
+
+// splitGates is the configuration every real machine runs and no other fixture in
+// this file exercises: the two gates are separate keys with separate defaults —
+// scan.stale_call_timeout at 24h and session.idle_timeout at 30m
+// (internal/config/keys.go) — so between 30 minutes and 24 hours after a session's
+// last line its session_end is derived while its deferred children are still
+// buffered. closingStale/closingIdle close both at once, which is the one
+// configuration in which a deferred child's absence from the session grain's totals
+// is invisible.
+func splitGates() (Staleness, Idleness) {
+	now := callInstant.Add(2 * time.Hour)
+	return Staleness{Timeout: 24 * time.Hour, Now: now}, Idleness{Timeout: 30 * time.Minute, Now: now}
+}
+
+// toolCallTotals reads the two counters a session_end carries, failing rather than
+// dereferencing a nil: both are always present, including at zero (sessionEnd).
+func toolCallTotals(t *testing.T, end record.Record) (total, builtin int64) {
+	t.Helper()
+	if end.ToolCalls == nil || end.BuiltinToolCalls == nil {
+		t.Fatalf("session_end ToolCalls = %v, BuiltinToolCalls = %v, want both present",
+			end.ToolCalls, end.BuiltinToolCalls)
+	}
+	return *end.ToolCalls, *end.BuiltinToolCalls
+}
+
+// TestASessionEndCountsADeferredChildTheStalenessGateStillHolds is the regression
+// that a green suite closing both gates at once cannot see. A session_end is written
+// once per session id for life (ADR-0034 §3 first-write-wins, ADR-0015's rejected
+// upsert, ADR-0004's dedup), so a total taken while the session's deferred children
+// are still buffered is permanent — and every skill-attributed and every
+// subagent-derived call is deferred, which is the common case, not an edge.
+func TestASessionEndCountsADeferredChildTheStalenessGateStillHolds(t *testing.T) {
+	source := strings.Join([]string{
+		assistantLine("assistant-1", "session-1", "2026-08-13T12:00:00Z", "msg_1", realUsage),
+		attributedToolCall("call-entry", "session-1", "2026-08-13T12:00:00Z", "call-1", "Bash", "pr-review"),
+	}, "\n")
+	stale, idle := splitGates()
+
+	records, _ := twoSources(t, stale, idle, source)
+
+	if got := len(byKind(records, record.KindBuiltinTool)); got != 0 {
+		t.Fatalf("builtin_tool records = %d, want 0: the staleness gate still holds the child", got)
+	}
+	total, builtin := toolCallTotals(t, onlyOfKind(t, records, record.KindSessionEnd))
+	if total != 1 {
+		t.Errorf("session_end ToolCalls = %d, want 1: the deferred child is a call this session made", total)
+	}
+	if builtin != 1 {
+		t.Errorf("session_end BuiltinToolCalls = %d, want 1", builtin)
+	}
+}
+
+// TestASessionEndCountsADeferredChildExactlyOnceWhenBothGatesClose is the other
+// side of the same rule: when the staleness gate does open in the same pass, the
+// child is emitted *and* counted, once. A record is either emitted by the deferred
+// pass or still waiting in the buffer, never both.
+func TestASessionEndCountsADeferredChildExactlyOnceWhenBothGatesClose(t *testing.T) {
+	source := strings.Join([]string{
+		assistantLine("assistant-1", "session-1", "2026-08-13T12:00:00Z", "msg_1", realUsage),
+		attributedToolCall("call-entry", "session-1", "2026-08-13T12:00:00Z", "call-1", "Bash", "pr-review"),
+	}, "\n")
+
+	records, _ := twoSources(t, closingStale, closingIdle, source)
+
+	if got := len(byKind(records, record.KindBuiltinTool)); got != 1 {
+		t.Fatalf("builtin_tool records = %d, want 1", got)
+	}
+	total, builtin := toolCallTotals(t, onlyOfKind(t, records, record.KindSessionEnd))
+	if total != 1 {
+		t.Errorf("session_end ToolCalls = %d, want 1: counted once, not once per pass", total)
+	}
+	if builtin != 1 {
+		t.Errorf("session_end BuiltinToolCalls = %d, want 1", builtin)
+	}
+}
+
+// TestASessionEndCountsASubagentsChildTheStalenessGateStillHolds is the same rule
+// for case 1's class: a call derived inside a subagent transcript is deferred on the
+// agent id its entry declared, and it is as much one of its session's tool calls as
+// a call the parent transcript terminated.
+//
+// The subagent record itself is not among the totals here, and that is not this
+// rule's business: resolveSubagentRuns has been gated on the staleness threshold
+// since before parentage existed, so a run still buffered is not a record this walk
+// derived at all.
+func TestASessionEndCountsASubagentsChildTheStalenessGateStillHolds(t *testing.T) {
+	parent, subagent := threeLevelChain()
+	stale, idle := splitGates()
+
+	records, _ := twoSources(t, stale, idle, parent, subagent)
+
+	if got := len(byKind(records, record.KindMCPTool)); got != 0 {
+		t.Fatalf("mcp_tool records = %d, want 0: the staleness gate still holds the child", got)
+	}
+	total, builtin := toolCallTotals(t, onlyOfKind(t, records, record.KindSessionEnd))
+	// The Skill tool_use record, emitted during Read, plus the deferred mcp_tool call.
+	if total != 2 {
+		t.Errorf("session_end ToolCalls = %d, want 2: the skill record and the deferred MCP call", total)
+	}
+	if builtin != 0 {
+		t.Errorf("session_end BuiltinToolCalls = %d, want 0", builtin)
+	}
+}
+
+// TestASecondCloseDoesNotDoubleASessionsTotals pins the drain the fold above rests
+// on. Close's own contract is that calling it again resolves nothing further and
+// reports the same tallies; a deferred child counted from the buffer rather than
+// from the emitted slice would break that unless the buffer is drained.
+func TestASecondCloseDoesNotDoubleASessionsTotals(t *testing.T) {
+	source := strings.Join([]string{
+		assistantLine("assistant-1", "session-1", "2026-08-13T12:00:00Z", "msg_1", realUsage),
+		attributedToolCall("call-entry", "session-1", "2026-08-13T12:00:00Z", "call-1", "Bash", "pr-review"),
+	}, "\n")
+	stale, idle := splitGates()
+
+	scan := NewScan(resolver, names, installedPrimitives, stale, idle)
+	if _, err := scan.Read(strings.NewReader(source)); err != nil {
+		t.Fatalf("Scan.Read() error = %v", err)
+	}
+	first := scan.Close()
+	second := scan.Close()
+
+	firstTotal, firstBuiltin := toolCallTotals(t, onlyOfKind(t, first.Records, record.KindSessionEnd))
+	secondTotal, secondBuiltin := toolCallTotals(t, onlyOfKind(t, second.Records, record.KindSessionEnd))
+	if firstTotal != 1 || firstBuiltin != 1 {
+		t.Fatalf("first Close totals = (%d, %d), want (1, 1)", firstTotal, firstBuiltin)
+	}
+	if secondTotal != firstTotal || secondBuiltin != firstBuiltin {
+		t.Errorf("second Close totals = (%d, %d), want the first pass's (%d, %d)",
+			secondTotal, secondBuiltin, firstTotal, firstBuiltin)
+	}
+}

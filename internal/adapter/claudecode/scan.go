@@ -478,18 +478,44 @@ func (s *Scan) Close() Result {
 	// refused — which is what makes the precedence's "will this record ever exist"
 	// question answerable (ADR-0035 §6). s.subagents holds whatever the pass above did
 	// not resolve, so a child of a still-open run is deferred rather than reparented.
-	for _, derived := range resolveDeferredChildren(s.deferred, s.sessions, s.stale, parentage{
+	children := resolveDeferredChildren(s.deferred, s.sessions, s.stale, parentage{
 		subagents: emitted,
 		buffered:  s.subagents,
 		skills:    s.skills,
-	}) {
+	})
+	// Folded before the session grain reads the tally, so a call this resolution made
+	// terminal counts toward its session's totals exactly as a call terminated inside a
+	// source does (ADR-0034 §3).
+	//
+	// The two batches are disjoint and together they are everything this walk derived:
+	// result.Records holds no deferred child yet — the append below is what puts them
+	// there — and s.deferred holds every one of them, emitted by the pass above or not.
+	// So each record is counted exactly once.
+	//
+	// A child the pass above did not emit is counted anyway, and that is the point.
+	// The two thresholds are separate keys with separate defaults —
+	// scan.stale_call_timeout at 24h for the deferred pass, session.idle_timeout at 30m
+	// for the session grain (internal/config/keys.go) — so on a real machine the scan
+	// that derives a session's one and only session_end routinely runs while that
+	// session's children are still buffered. Counting only the emitted ones would write
+	// tool_calls: 0 for every session that used a skill or a subagent, which is the
+	// common case and not an edge, and it would be permanent: ADR-0034 §3 is
+	// first-write-wins, ADR-0015 rejects upsert and ADR-0004 deduplicates the correction
+	// away. ADR-0034 §3's snapshot excludes a call this scan has not derived; a deferred
+	// child is derived, and only its emission is waiting.
+	s.tally.observe(result.Records)
+	for _, child := range s.deferred {
+		s.tally.observeOne(child.event)
+	}
+	// Drained like every other buffer this pass resolves, so a second Close resolves
+	// nothing further and reports the same totals rather than counting these twice.
+	// Nothing changes between two Closes, so a child this pass left buffered would not
+	// have been emitted by the next one either.
+	s.deferred = nil
+	for _, derived := range children {
 		result.Records = append(result.Records, derived.event)
 		s.credit(derived.source)
 	}
-	// Folded before the session grain reads the tally and after the deferred pass, so a
-	// call this resolution made terminal counts toward its session's totals exactly as
-	// a call terminated inside a source does (ADR-0034 §3).
-	s.tally.observe(result.Records)
 	for _, end := range resolveSessionEnds(s.grains, s.sessions, s.idle, &s.tally) {
 		result.Records = append(result.Records, end)
 		// Credited to every source that fed the session, not to one: the record is the
