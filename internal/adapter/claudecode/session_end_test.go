@@ -781,3 +781,32 @@ func assertUnreportedTokens(t *testing.T, event record.Record) {
 		}
 	}
 }
+
+// D8's second intended side effect, pinned deliberately rather than left to surface as
+// a mystery diff. Modelling a plain-string message.content means such a line now yields
+// an entry, so it reaches observeSessionGrain and a session can date its end from a user
+// turn.
+//
+// That closes a latent inconsistency rather than opening one: SessionState.lastActivity
+// already folded those lines, because the observe call runs before the decode gate, so
+// the grain's own lastSeen was the value that disagreed with it. It is nonetheless a
+// change to the dimensions a session_end carries for an id that does not change, which
+// is exactly why this series bumps the schema version and rebuilds (ADR-0004, ADR-0015).
+func TestSessionEndDatesItselfFromATrailingUserTurn(t *testing.T) {
+	last := "2026-08-13T12:05:00Z"
+	input := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"` + last + `","type":"user","message":{"role":"user","content":"carry on"}}`,
+	}, "\n")
+
+	event := onlySessionEnd(t, mustRead(t, input, finished))
+
+	want, err := time.Parse(time.RFC3339, last)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if !event.Timestamp.Equal(want) {
+		t.Errorf("Timestamp = %v, want the trailing user turn's %v", event.Timestamp, want)
+	}
+}

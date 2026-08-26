@@ -468,3 +468,51 @@ func TestReadDerivesTwoRecordsForATypedAndAModelInvocation(t *testing.T) {
 		t.Errorf("the two records share an event id: %+v", result.Records)
 	}
 }
+
+// AC 7 — the adapter's hostile-payload run over the input shape this ticket added. A
+// plain-string message.content is a new way for a transcript string to reach a record,
+// and ADR-0007 requires a corpus run per input shape rather than one shared assertion.
+//
+// The value is embedded twice: once inside the command tag, where the name grammar has
+// to refuse it, and once as surrounding prose with a marker, where nothing may read it
+// at all. A second admissible tag in the same session keeps the read productive, so the
+// record count is a real assertion and not a vacuous zero.
+func TestReadRetainsNothingFromAStringShapedUserEntry(t *testing.T) {
+	for _, value := range hostileValues {
+		body := fmt.Sprintf("<command-name>%s</command-name> swordfish-%s", value, value)
+		input := strings.Join([]string{
+			fmt.Sprintf(
+				`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","type":"user","message":{"role":"user","content":%s}}`,
+				quoted(t, body)),
+			typedTurn("entry-2", "pr-review", "2026-08-13T12:00:01Z"),
+		}, "\n")
+
+		result, err := read(strings.NewReader(input), resolver, names, closedSession)
+		if err != nil {
+			t.Fatalf("Read() error = %v", err)
+		}
+		// Exactly the admissible one. The keyed scope digest in the corpus is a name the
+		// domain admits, so its tag survives the grammar — and is still not a primitive
+		// this machine has, which is what keeps this count at one for every value.
+		if len(result.Records) != 1 {
+			t.Fatalf("Read(tag=%q) records = %+v, want exactly the admissible one", value, result.Records)
+		}
+		if result.SkippedTypedInvocations != 1 {
+			t.Errorf("Read(tag=%q) SkippedTypedInvocations = %d, want 1", value, result.SkippedTypedInvocations)
+		}
+		if result.Refused != 0 {
+			t.Errorf("Read(tag=%q) Refused = %d, want 0 — a name this machine does not have is a skip", value, result.Refused)
+		}
+		for _, event := range result.Records {
+			encoded, err := record.Marshal(event)
+			if err != nil {
+				t.Fatalf("Marshal() error = %v", err)
+			}
+			for _, fragment := range []string{"swordfish", value} {
+				if strings.Contains(string(encoded), fragment) {
+					t.Fatalf("record retains %q from the string-shaped user entry: %s", fragment, encoded)
+				}
+			}
+		}
+	}
+}
