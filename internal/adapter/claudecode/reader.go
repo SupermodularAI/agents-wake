@@ -682,11 +682,11 @@ type call struct {
 	// the transcript declares, never a ViaAgent name and never a lookup (ADR-0035
 	// §1). It is consumed into a derived parent id and never persisted: no record
 	// field carries it (ADR-0007).
-	agentID record.Identifier
-	model       record.Identifier
-	invoker     record.Invoker
-	entrypoint  record.Entrypoint
-	repo        record.Hash
+	agentID    record.Identifier
+	model      record.Identifier
+	invoker    record.Invoker
+	entrypoint record.Entrypoint
+	repo       record.Hash
 }
 
 // callStatus separates an invocation a validated field refused from one Wake

@@ -161,13 +161,13 @@ type Record struct {
 	// not validated: the relation only ever points outward, toward a named
 	// primitive's own invocation or toward the session, so Validate stays per-record
 	// and pure (ADR-0035 §7).
-	ParentEventID Hash `json:"parent_event_id,omitempty"`
-	Model          Identifier `json:"model,omitempty"`
-	Effort         Identifier `json:"effort,omitempty"`
-	Invoker        Invoker    `json:"invoker"`
-	Entrypoint     Entrypoint `json:"entrypoint,omitempty"`
-	Outcome        *Outcome   `json:"outcome"`
-	DurationMS     *int64     `json:"duration_ms"`
+	ParentEventID Hash       `json:"parent_event_id,omitempty"`
+	Model         Identifier `json:"model,omitempty"`
+	Effort        Identifier `json:"effort,omitempty"`
+	Invoker       Invoker    `json:"invoker"`
+	Entrypoint    Entrypoint `json:"entrypoint,omitempty"`
+	Outcome       *Outcome   `json:"outcome"`
+	DurationMS    *int64     `json:"duration_ms"`
 
 	// The session grain's totals (ADR-0002, ADR-0034 §3). They are populated only
 	// on a session_end record and are nil on every invocation-grain record. All

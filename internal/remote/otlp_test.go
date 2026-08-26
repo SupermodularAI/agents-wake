@@ -244,6 +244,9 @@ func fullRecord() record.Record {
 	r.Source = ptr(record.SourceMarketplace)
 	r.ViaSkill = "commit-message"
 	r.ViaAgent = "sdlc-plan"
+	// The parent link ADR-0035 derives. validRecord stays parentless, so the minimal
+	// span keeps testing the absent case and this one the present case.
+	r.ParentEventID = record.DeriveEventID("claude-code", "source-event-parent")
 	r.Model = "claude-opus-5"
 	r.Effort = "high"
 	// Deliberately not the cli member: a defaulted or hard-coded "cli" anywhere in
@@ -1081,6 +1084,9 @@ var transcriptKeys = []string{
 // makes a newly added wire field fail this test rather than pass unnoticed.
 var frozenWireFieldNames = []string{
 	"attributes", "code", "endTimeUnixNano", "intValue", "key", "kind", "name",
+	// Conditional, and a span field rather than an attribute: the parent link is span
+	// structure, so it is frozen here and not in frozenSpanAttributeKeys (ADR-0035 §8).
+	"parentSpanId",
 	"resource", "resourceSpans", "scope", "scopeSpans", "spanId", "spans",
 	"startTimeUnixNano", "status", "stringValue", "traceId", "value", "version",
 }
@@ -1186,7 +1192,7 @@ func assertEveryStringIsAllowlisted(t *testing.T, payload []byte, r record.Recor
 		string(r.SessionID), string(r.Repo), string(r.Package), string(r.PackageVersion),
 		string(r.ViaSkill), string(r.ViaAgent), string(r.Model), string(r.Effort),
 		string(r.Invoker), string(r.Entrypoint), string(r.Kind) + ":" + string(r.Name),
-		traceID(r), spanID(r), start, end,
+		traceID(r), spanID(r), parentSpanID(r), start, end,
 		strconv.FormatUint(uint64(r.SchemaVersion), 10),
 	}
 	if r.Source != nil {
@@ -1401,5 +1407,146 @@ func TestEncodeDropsInvalidRecord(t *testing.T) {
 	}
 	if got := spansOf(t, payload); len(got) != 0 {
 		t.Fatalf("Encode() emitted %d spans, want 0", len(got))
+	}
+}
+
+// TestParentSpanIDIsTheParentsSpanID is the link itself: a child's parentSpanId is
+// byte-identical to its parent's spanId, so a receiver nests the two without a second
+// convention (ADR-0035 §8).
+func TestParentSpanIDIsTheParentsSpanID(t *testing.T) {
+	parent := validRecord()
+	child := validRecord()
+	child.EventID = record.DeriveEventID("claude-code", "source-event-child")
+	child.ParentEventID = parent.EventID
+	child.Kind = record.KindMCPTool
+	child.Name = "mcp__atlassian__search"
+
+	parentSpan := encodeOne(t, parent)
+	childSpan := encodeOne(t, child)
+
+	got, ok := childSpan["parentSpanId"].(string)
+	if !ok {
+		t.Fatalf("parentSpanId is %T, want a string", childSpan["parentSpanId"])
+	}
+	if want := parentSpan["spanId"]; got != want {
+		t.Errorf("parentSpanId = %q, want the parent's spanId %q", got, want)
+	}
+	if want := string(parent.EventID)[:16]; got != want {
+		t.Errorf("parentSpanId = %q, want the parent event id's first 16 hex chars %q", got, want)
+	}
+}
+
+// TestSpanWithNoParentEmitsNoParentSpanID is the absent half: absence is omission,
+// never an empty string and never the all-zero id.
+func TestSpanWithNoParentEmitsNoParentSpanID(t *testing.T) {
+	r := validRecord()
+	if r.ParentEventID != "" {
+		t.Fatalf("validRecord() presets ParentEventID = %q", r.ParentEventID)
+	}
+
+	span := encodeOne(t, r)
+
+	if value, present := span["parentSpanId"]; present {
+		t.Fatalf("span carries parentSpanId = %v, want the field absent", value)
+	}
+}
+
+// TestParentSpanIDIsNotAnAttribute is ADR-0035 §8 asserted rather than assumed: the
+// parent link is span structure, so ADR-0027's frozen attribute-key guarantee is not
+// stretched to cover it, and the attribute key set is unchanged by this field.
+func TestParentSpanIDIsNotAnAttribute(t *testing.T) {
+	r := fullRecord()
+	if r.ParentEventID == "" {
+		t.Fatal("fullRecord() carries no parent: this test would pass vacuously")
+	}
+
+	// Labelled, so the widest key set is the one compared: wake.repo_label is
+	// conditional on a label being resolved at flush time.
+	span := encodeOneLabelled(t, r, testLabels())
+	attributes := attributesOf(t, span, "attributes")
+
+	for _, key := range attributeKeys(attributes) {
+		if strings.Contains(key, "parent") {
+			t.Errorf("attribute key %q carries the parent link, which is span structure", key)
+		}
+	}
+	if got := attributeKeys(attributes); !slices.Equal(got, frozenSpanAttributeKeys) {
+		t.Errorf("attribute keys = %v, want the frozen set unchanged %v", got, frozenSpanAttributeKeys)
+	}
+	for _, key := range frozenSpanAttributeKeys {
+		if strings.Contains(key, "parent") {
+			t.Errorf("frozenSpanAttributeKeys contains %q: the parent link must not be an attribute", key)
+		}
+	}
+}
+
+// TestAllZeroParentSpanIDIsRefused extends the guard traceId and spanId already have.
+// A parent whose first 16 hex characters are all zero has no representation OTLP
+// accepts, so the span is dropped and counted rather than emitted under a fabricated
+// id — the treatment the existing guard already defines.
+func TestAllZeroParentSpanIDIsRefused(t *testing.T) {
+	r := validRecord()
+	// Valid as a SHA-256 by shape, so only the truncation is zero: record.Validate
+	// passes and the encoder's own guard is the thing being tested.
+	r.ParentEventID = record.Hash(strings.Repeat("0", 16) + strings.Repeat("a", 48))
+
+	payload, dropped, err := Encode([]record.Record{r}, nil)
+	if err != nil {
+		t.Fatalf("Encode() error = %v", err)
+	}
+	if dropped != 1 {
+		t.Fatalf("Encode() dropped = %d, want 1", dropped)
+	}
+	if spans := spansOf(t, payload); len(spans) != 0 {
+		t.Fatalf("Encode() emitted %d spans, want 0", len(spans))
+	}
+
+	// The control: the same record with a parent that does not truncate to zeros
+	// survives, so the test above is not passing for an unrelated reason.
+	r.ParentEventID = record.DeriveEventID("claude-code", "source-event-parent")
+	if span := encodeOne(t, r); span["parentSpanId"] == nil {
+		t.Fatal("a nonzero parent did not reach the wire")
+	}
+}
+
+// TestEncodeDropsAMalformedParentEventID is the fail-closed gate at encodeSpan's head
+// doing its job on the way out: the wire is subject to the same contract as the disk.
+func TestEncodeDropsAMalformedParentEventID(t *testing.T) {
+	r := validRecord()
+	r.ParentEventID = "not-hex"
+
+	payload, dropped, err := Encode([]record.Record{r}, nil)
+	if err != nil {
+		t.Fatalf("Encode() error = %v", err)
+	}
+	if dropped != 1 {
+		t.Fatalf("Encode() dropped = %d, want 1", dropped)
+	}
+	if spans := spansOf(t, payload); len(spans) != 0 {
+		t.Fatalf("Encode() emitted %d spans, want 0", len(spans))
+	}
+}
+
+// TestParentSpanIDIsDeterministic pins the parent link into the byte-determinism
+// contract the spool's replay safety rests on.
+func TestParentSpanIDIsDeterministic(t *testing.T) {
+	parent := validRecord()
+	child := validRecord()
+	child.EventID = record.DeriveEventID("claude-code", "source-event-child")
+	child.ParentEventID = parent.EventID
+	records := []record.Record{parent, child}
+
+	first, _, err := Encode(records, nil)
+	if err != nil {
+		t.Fatalf("Encode() first error = %v", err)
+	}
+	for i := range 32 {
+		next, _, err := Encode(records, nil)
+		if err != nil {
+			t.Fatalf("Encode() run %d error = %v", i, err)
+		}
+		if !bytes.Equal(first, next) {
+			t.Fatalf("Encode() run %d differs:\n%s\n%s", i, first, next)
+		}
 	}
 }
