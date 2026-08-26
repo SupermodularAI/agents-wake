@@ -894,6 +894,28 @@ func TestReadRetainsNothingFromAnEarlyResultLine(t *testing.T) {
 	}
 }
 
+// TestReadDoesNotPairAToolResultFromAnotherSession is constraint 4. The call
+// buffer is keyed by (session, block id) rather than by the block id alone: once
+// the buffer outlives one file, a tool_result in one session's transcript could
+// otherwise terminate a call belonging to another — a cross-session pairing
+// ADR-0002's invocation grain and ADR-0034's per-session delimitation both forbid.
+func TestReadDoesNotPairAToolResultFromAnotherSession(t *testing.T) {
+	transcript := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-2","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+	}, "\n")
+	result, err := read(strings.NewReader(transcript), resolver, names, Staleness{})
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 0 {
+		t.Fatalf("Read() records = %+v, want none: the result belongs to another session", result.Records)
+	}
+	if result.Pending != 1 {
+		t.Errorf("Pending = %d, want 1: the call stays buffered rather than terminated by a foreign result", result.Pending)
+	}
+}
+
 // reversedPairWith builds a reversed-order pair whose tool_result line carries
 // entryFields at the top level (each ending in a comma) and blockFields inside the
 // tool_result block (each starting with a comma), followed by the tool_use line

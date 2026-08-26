@@ -78,6 +78,14 @@ func sessionEndSourceEvent(sessionID record.Identifier) record.Identifier {
 // finished would be permanent. What the record is *dated* by is a different
 // quantity and comes from sessionGrain.lastSeen.
 //
+// A blind session is never finished. Some source carrying it held a line the reader
+// could not rule out as a terminator, so its last activity is known-understated and
+// its totals would be understated by whatever that line held. The taint is per
+// session and not per walk because after ADR-0036 a source's blindness bears on
+// every source of the sessions that source carried, and only on those: a global
+// switch would disable session_end derivation for every session on the machine over
+// one unreadable line.
+//
 // Sorted rather than map order: two scans of one transcript have to produce
 // byte-identical store contents (ADR-0004), and a session id is unique per entry
 // so the order is total.
@@ -87,6 +95,9 @@ func (s *SessionState) finishedSessions(idle Idleness) []record.Identifier {
 	}
 	sessions := make([]record.Identifier, 0, len(s.sessions))
 	for sessionID, activity := range s.sessions {
+		if activity.blind {
+			continue
+		}
 		if idle.Now.Sub(activity.lastActivity) > idle.Timeout {
 			sessions = append(sessions, sessionID)
 		}
@@ -217,12 +228,19 @@ type sessionAnchor struct {
 
 // sessionGrain is what one scan accumulates for one session id, from consented
 // entries only: the anchor, the last consented activity that dates the record, the
-// deduplicated message ids, and the usage totals ADR-0034 §3 calls a snapshot.
+// deduplicated message ids, the usage totals ADR-0034 §3 calls a snapshot, and the
+// sources whose lines fed any of them.
 type sessionGrain struct {
 	anchor   sessionAnchor
 	anchored bool
 	lastSeen time.Time
 	messages map[record.Identifier]struct{}
+	// sources is exactly the set of sources whose consented lines contributed to this
+	// session's totals or its anchor. It exists so the one session_end this grain
+	// yields can be credited back to every source that fed it, which is what keeps
+	// doctor's Skipped counter honest for a source whose only contribution resolved
+	// after the walk. It holds source ordinals, never paths (ADR-0007, plan §4.2).
+	sources map[int]struct{}
 
 	inputTokens         usageCounter
 	outputTokens        usageCounter
@@ -246,7 +264,10 @@ type sessionGrain struct {
 // derived at all — fail closed — and that same condition already refuses every
 // call on those entries into Result.Refused, so the blindness is reported rather
 // than silent.
-func observeSessionGrain(grains map[record.Identifier]*sessionGrain, entry transcriptEntry, resolve Resolver) {
+// source is the ordinal of the source this entry was read from, recorded for every
+// consented entry the grain folds — the sources this session's numbers actually
+// came from, and no more.
+func observeSessionGrain(grains map[record.Identifier]*sessionGrain, source int, entry transcriptEntry, resolve Resolver) {
 	sessionID, err := record.BoundedToken(entry.SessionID)
 	if err != nil {
 		return
@@ -258,9 +279,10 @@ func observeSessionGrain(grains map[record.Identifier]*sessionGrain, entry trans
 	}
 	grain, seen := grains[sessionID]
 	if !seen {
-		grain = &sessionGrain{}
+		grain = &sessionGrain{sources: map[int]struct{}{}}
 		grains[sessionID] = grain
 	}
+	grain.sources[source] = struct{}{}
 	if timestamp.After(grain.lastSeen) {
 		grain.lastSeen = timestamp
 	}
@@ -316,26 +338,43 @@ func (g *sessionGrain) addUsage(entry transcriptEntry) {
 	g.thinkingTokens.add(usage.thinkingTokens)
 }
 
-// invocationCounts totals, per session, the invocation-grain records this read
-// derived and the built-in tool calls among them.
+// invocationTally accumulates, per session, the invocation-grain records one scan
+// has derived and the built-in tool calls among them.
+//
+// It is folded as records are derived rather than computed from a retained slice:
+// after ADR-0036 the aggregate spans every source of a session, so the slice would
+// have to be every record of a whole machine's history held in memory until the
+// walk ended. It counts and holds no record — a session id and two integers
+// (ADR-0007).
 //
 // Every invocation-grain record counts toward the total, including an ADR-0023
 // Shape-A fallback: the count exists so a receiver can recover the denominator
 // encodeSpan's built-in-tool omission destroys (ADR-0006), and total minus builtin
 // has to stay the number of spans the session delivers.
-func invocationCounts(records []record.Record) (total, builtin map[record.Identifier]int64) {
-	total = map[record.Identifier]int64{}
-	builtin = map[record.Identifier]int64{}
+//
+// The zero value is ready to use.
+type invocationTally struct {
+	total   map[record.Identifier]int64
+	builtin map[record.Identifier]int64
+}
+
+// observe folds one batch of derived records into the tally. The predicate is the
+// one invocationCounts applied before it: a session-grain record is not an
+// invocation and counts toward neither number.
+func (t *invocationTally) observe(records []record.Record) {
 	for _, event := range records {
 		if record.IsSessionGrain(event.Kind) {
 			continue
 		}
-		total[event.SessionID]++
+		if t.total == nil {
+			t.total = map[record.Identifier]int64{}
+			t.builtin = map[record.Identifier]int64{}
+		}
+		t.total[event.SessionID]++
 		if event.Kind == record.KindBuiltinTool {
-			builtin[event.SessionID]++
+			t.builtin[event.SessionID]++
 		}
 	}
-	return total, builtin
 }
 
 // resolveSessionEnds derives the one session_end record for every session id this
@@ -349,17 +388,21 @@ func invocationCounts(records []record.Record) (total, builtin map[record.Identi
 // record is written (ADR-0034 §1-§3, ADR-0015's rejected upsert). Nothing here
 // compares payloads or prefers the more complete one.
 //
-// The aggregate is a snapshot: it sums the records this read has already derived,
+// The aggregate is a snapshot: it sums the records this scan has already derived,
 // so a call still buffered because scan.stale_call_timeout has not elapsed is
 // simply not in it, exactly as ADR-0034 §3 describes. There is no waiting, no
 // backfill and no reconciliation pass.
+//
+// The tally spans the whole walk rather than one source, which is what makes the
+// aggregate the union's: after ADR-0036 a session's invocations are spread over its
+// parent transcript and one file per subagent, and a per-file total would report
+// each partial view as if it were the session's (ADR-0036 §Consequences).
 func resolveSessionEnds(grains map[record.Identifier]*sessionGrain, sessions *SessionState,
-	idle Idleness, invocations []record.Record) []record.Record {
+	idle Idleness, tally *invocationTally) []record.Record {
 	finished := sessions.finishedSessions(idle)
 	if len(finished) == 0 {
 		return nil
 	}
-	total, builtin := invocationCounts(invocations)
 	records := make([]record.Record, 0, len(finished))
 	for _, sessionID := range finished {
 		grain, observed := grains[sessionID]
@@ -368,7 +411,7 @@ func resolveSessionEnds(grains map[record.Identifier]*sessionGrain, sessions *Se
 		if !observed || !grain.anchored || grain.lastSeen.IsZero() {
 			continue
 		}
-		records = append(records, grain.sessionEnd(sessionID, total[sessionID], builtin[sessionID]))
+		records = append(records, grain.sessionEnd(sessionID, tally.total[sessionID], tally.builtin[sessionID]))
 	}
 	return records
 }

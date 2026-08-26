@@ -705,7 +705,7 @@ func TestReadRetainsNothingFromASessionEnd(t *testing.T) {
 // answer the two differently.
 func TestSessionStateFinishedSessionsIsNotClosed(t *testing.T) {
 	sessions := &SessionState{}
-	sessions.Observe("session-1", callInstant, 0)
+	sessions.Observe(0, "session-1", callInstant, 0)
 
 	// Silent for an hour: past session.idle_timeout's 30m, well inside
 	// scan.stale_call_timeout's 24h.
@@ -722,6 +722,25 @@ func TestSessionStateFinishedSessionsIsNotClosed(t *testing.T) {
 	// reason: absence of evidence that a session is alive is not evidence it ended.
 	if got := (&SessionState{}).finishedSessions(idle); len(got) != 0 {
 		t.Errorf("finishedSessions() on an empty state = %v, want none", got)
+	}
+}
+
+// TestSessionStateNeverFinishesABlindSession is constraint 11 on the second
+// predicate. A source carrying this session held a line the reader could not rule
+// out as a terminator, so its last activity is known-understated and its totals
+// would be understated by whatever that line held — and a session_end is permanent
+// (ADR-0015 rejects upsert, ADR-0004 deduplicates the correction away).
+func TestSessionStateNeverFinishesABlindSession(t *testing.T) {
+	sessions := &SessionState{}
+	sessions.Observe(0, "session-blind", callInstant, 0)
+	sessions.Observe(0, "session-clear", callInstant, 100)
+	sessions.MarkBlind("session-blind")
+
+	idle := Idleness{Timeout: sessionIdleTimeout, Now: callInstant.Add(time.Hour)}
+
+	got := sessions.finishedSessions(idle)
+	if len(got) != 1 || got[0] != "session-clear" {
+		t.Fatalf("finishedSessions() = %v, want [session-clear]: one source's blindness is not every session's", got)
 	}
 }
 

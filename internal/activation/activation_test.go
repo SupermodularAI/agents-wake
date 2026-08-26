@@ -1154,3 +1154,170 @@ func TestIngestLeavesACurrentSpoolAlone(t *testing.T) {
 		t.Errorf("Scan.StaleRecords = %d, want 0", report.Scan.StaleRecords)
 	}
 }
+
+// splitSessionTranscripts writes the two files ADR-0036 is about: one session id
+// spread over the parent's transcript and a subagent's, in the real on-disk layout
+// (`<session>/subagents/<agent>.jsonl` beside `<session>.jsonl`). Each holds one
+// terminated call and one assistant usage block under its own message id.
+//
+// parentAt and agentAt date them, so a caller decides which side of the thresholds
+// each file falls on without either threshold being shortened.
+func splitSessionTranscripts(t *testing.T, claudeDir, root, parentAt, agentAt string) {
+	t.Helper()
+	line := func(uuid, at, messageID, callID string) string {
+		return `{"uuid":"` + uuid + `","sessionId":"session-1","cwd":"` + root +
+			`","timestamp":"` + at + `","entrypoint":"cli","message":{"model":"sonnet","id":"` + messageID +
+			`","usage":{"input_tokens":10,"output_tokens":20},"content":[{"type":"tool_use","id":"` + callID + `","name":"Bash"}]}}`
+	}
+	result := func(uuid, at, callID string) string {
+		return `{"uuid":"` + uuid + `","sessionId":"session-1","cwd":"` + root +
+			`","timestamp":"` + at + `","entrypoint":"cli","message":{"content":[{"type":"tool_result","tool_use_id":"` + callID + `","is_error":false}]}}`
+	}
+	writeFixture(t, filepath.Join(claudeDir, "projects", "project", "session.jsonl"),
+		strings.Join([]string{line("parent-1", parentAt, "msg_parent", "call-parent"), result("parent-2", parentAt, "call-parent")}, "\n"))
+	writeFixture(t, filepath.Join(claudeDir, "projects", "project", "session", "subagents", "agent-1.jsonl"),
+		strings.Join([]string{line("agent-1", agentAt, "msg_agent", "call-agent"), result("agent-2", agentAt, "call-agent")}, "\n"))
+}
+
+// spoolSessionEnds reads the session-grain records the spool holds after an Init.
+func spoolSessionEnds(t *testing.T, paths config.Paths) []record.Record {
+	t.Helper()
+	entries, err := store.New(filepath.Join(paths.DataDir, eventsFile)).Entries(0)
+	if err != nil {
+		t.Fatalf("Entries() error = %v", err)
+	}
+	ends := make([]record.Record, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Record.Kind == record.KindSessionEnd {
+			ends = append(ends, entry.Record)
+		}
+	}
+	return ends
+}
+
+// TestIngestResolvesOneSessionAcrossAParentAndASubagentTranscript is AC 1 through
+// the production walk: the two files are one session, so they yield one session_end
+// whose totals cover both.
+func TestIngestResolvesOneSessionAcrossAParentAndASubagentTranscript(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	claudeDir := filepath.Join(t.TempDir(), "claude")
+	writeFixture(t, filepath.Join(claudeDir, "settings.json"), `{}`)
+	// Both historical, so the provisional defaults close the session on any clock.
+	splitSessionTranscripts(t, claudeDir, root, "2020-01-01T00:00:00Z", "2020-01-01T00:00:01Z")
+	paths := testPaths(t)
+
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+
+	ends := spoolSessionEnds(t, paths)
+	if len(ends) != 1 {
+		t.Fatalf("the spool holds %d session_end records, want 1 — the two files are one session", len(ends))
+	}
+	if ends[0].ToolCalls == nil || *ends[0].ToolCalls != 2 {
+		t.Errorf("tool_calls = %v, want 2: one call from each transcript", ends[0].ToolCalls)
+	}
+	if ends[0].InputTokens == nil || *ends[0].InputTokens != 20 {
+		t.Errorf("input_tokens = %v, want 20: both transcripts' usage blocks", ends[0].InputTokens)
+	}
+}
+
+// TestIngestDoesNotCloseASessionAliveInASiblingTranscript is AC 2 through the
+// production walk. The parent transcript is stamped from time.Now, so it is inside
+// both windows by construction and neither threshold has to be shortened to make
+// the test easy — the pattern TestIngestSurfacesPendingAndInterruptedCalls uses.
+func TestIngestDoesNotCloseASessionAliveInASiblingTranscript(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	claudeDir := filepath.Join(t.TempDir(), "claude")
+	writeFixture(t, filepath.Join(claudeDir, "settings.json"), `{}`)
+	splitSessionTranscripts(t, claudeDir, root, time.Now().UTC().Format(time.RFC3339), "2020-01-01T00:00:00Z")
+	// And the subagent file leaves a call unterminated, so the staleness rule has
+	// something to decline: the call belongs to a session the parent shows running.
+	writeFixture(t, filepath.Join(claudeDir, "projects", "project", "session", "subagents", "agent-2.jsonl"),
+		`{"uuid":"agent-3","sessionId":"session-1","cwd":"`+root+
+			`","timestamp":"2020-01-01T00:00:02Z","entrypoint":"cli","message":{"model":"sonnet","id":"msg_open","content":[{"type":"tool_use","id":"call-open","name":"Bash"}]}}`)
+	paths := testPaths(t)
+
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+
+	if ends := spoolSessionEnds(t, paths); len(ends) != 0 {
+		t.Fatalf("the spool holds %d session_end records, want 0 — the parent transcript shows the session running", len(ends))
+	}
+	scan := scanCounters(t, paths)
+	if scan.PendingCalls != 1 {
+		t.Errorf("Scan.PendingCalls = %d, want 1 — the subagent's open call is buffered, not interrupted", scan.PendingCalls)
+	}
+	if scan.InterruptedCalls != 0 {
+		t.Errorf("Scan.InterruptedCalls = %d, want 0 — nothing may be given up on from a partial view", scan.InterruptedCalls)
+	}
+}
+
+// TestIngestIsIndependentOfWalkOrder is AC 4 asserted through the production walk
+// rather than a test harness: filepath.WalkDir visits lexically, so the two trees
+// below hold the same two logical sources under names whose lexical order is
+// reversed and the real walk therefore visits them in opposite orders.
+//
+// The comparison is over the record set. The walk persists each source as it visits
+// it — requirement 1 keeps one Read per file — so the spool's line order follows the
+// walk while the records themselves do not.
+func TestIngestIsIndependentOfWalkOrder(t *testing.T) {
+	sources := func(t *testing.T, root, first, second string) config.Paths {
+		t.Helper()
+		claudeDir := filepath.Join(t.TempDir(), "claude")
+		writeFixture(t, filepath.Join(claudeDir, "settings.json"), `{}`)
+		splitSessionTranscripts(t, claudeDir, root, "2020-01-01T00:00:00Z", "2020-01-01T00:00:01Z")
+		// Rename the two written transcripts so the lexical walk order is the caller's.
+		parent := filepath.Join(claudeDir, "projects", "project", "session.jsonl")
+		agent := filepath.Join(claudeDir, "projects", "project", "session", "subagents", "agent-1.jsonl")
+		for from, to := range map[string]string{parent: first, agent: second} {
+			target := filepath.Join(claudeDir, "projects", "project", to)
+			if err := os.Rename(from, target); err != nil {
+				t.Fatalf("Rename(%s) error = %v", from, err)
+			}
+		}
+		paths := testPaths(t)
+		if _, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil {
+			t.Fatalf("Init() error = %v", err)
+		}
+		return paths
+	}
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	forward := spoolEventIDs(t, sources(t, root, "a-parent.jsonl", "b-agent.jsonl"))
+	reverse := spoolEventIDs(t, sources(t, root, "b-parent.jsonl", "a-agent.jsonl"))
+
+	if len(forward) == 0 {
+		t.Fatal("the walk wrote nothing, so this asserts nothing")
+	}
+	if !slices.Equal(forward, reverse) {
+		t.Fatalf("the two walk orders wrote different records:\nforward  = %v\nreversed = %v", forward, reverse)
+	}
+}
+
+// spoolEventIDs reads a spool back as the sorted list of its event ids, so two
+// walks can be compared as sets. An event id identifies a record (ADR-0004), so the
+// order is total.
+func spoolEventIDs(t *testing.T, paths config.Paths) []string {
+	t.Helper()
+	entries, err := store.New(filepath.Join(paths.DataDir, eventsFile)).Entries(0)
+	if err != nil {
+		t.Fatalf("Entries() error = %v", err)
+	}
+	ids := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		ids = append(ids, string(entry.Record.EventID))
+	}
+	slices.Sort(ids)
+	return ids
+}
