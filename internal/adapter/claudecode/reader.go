@@ -267,6 +267,16 @@ type transcriptEntry struct {
 	AttributionAgent     string    `json:"attributionAgent"`
 	AttributionSkill     string    `json:"attributionSkill"`
 	ToolDenialKind       string    `json:"toolDenialKind"`
+	// AgentID is the id of the subagent whose transcript this entry belongs to.
+	// Claude Code writes it on every entry of a subagent's own file and on no entry
+	// of a parent transcript (measured: 32787/32787 and 0/39039), so its presence is
+	// what identifies a subagent transcript — from content, never from the path
+	// convention subagents/agent-<agentId>.jsonl, because derivation may not touch
+	// the filesystem (ADR-0019 §1, ADR-0036 §2 "keyed by the agent id it declares").
+	//
+	// It is consumed into a derived event id and never persisted: no record field
+	// carries it (ADR-0007).
+	AgentID string `json:"agentId"`
 	// Entrypoint is how the harness process was started ("cli", "sdk-py",
 	// "sdk-cli" on Claude Code today). It is mapped onto record.Entrypoint's own
 	// vocabulary and never persisted verbatim: an unmapped value refuses the event
