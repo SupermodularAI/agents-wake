@@ -206,8 +206,17 @@ func (r *subagentRun) declare(entry transcriptEntry, timestamp time.Time, names 
 // refusal can be credited to the source that carried it — what keeps doctor's Skipped
 // counter honest for a subagent file whose only contribution was a refusal. It holds
 // ordinals, never paths (ADR-0007, plan §4.2).
+//
+// The third return maps each resolved-and-declared agent id to the EventID of the
+// record this pass emitted for it. It is returned rather than re-derived by the
+// caller for two reasons: a child's case-1 link is then provably the same value
+// subagent() put on the parent record, and a run this pass *refused* becomes
+// distinguishable from one it has not reached — the distinction ADR-0035 §6 turns
+// on, since a refused run's record will never exist while an unreached one's will.
+// Nothing this function decides changes: same closed gate, same order, same refusal
+// rule, same records.
 func resolveSubagentRuns(runs map[record.Identifier]*subagentRun, sessions *SessionState,
-	stale Staleness) ([]derivation, []int) {
+	stale Staleness) ([]derivation, []int, map[record.Identifier]record.Hash) {
 	resolved := make([]record.Identifier, 0, len(runs))
 	for agentID, run := range runs {
 		if run.anchored && sessions.Closed(run.anchor.sessionID, stale) {
@@ -222,6 +231,7 @@ func resolveSubagentRuns(runs map[record.Identifier]*subagentRun, sessions *Sess
 	})
 	records := make([]derivation, 0, len(resolved))
 	refused := []int{}
+	emitted := map[record.Identifier]record.Hash{}
 	for _, agentID := range resolved {
 		run := runs[agentID]
 		delete(runs, agentID)
@@ -234,9 +244,11 @@ func resolveSubagentRuns(runs map[record.Identifier]*subagentRun, sessions *Sess
 			refused = append(refused, run.anchor.source)
 			continue
 		}
-		records = append(records, derivation{event: run.subagent(agentID), source: run.anchor.source})
+		event := run.subagent(agentID)
+		emitted[agentID] = event.EventID
+		records = append(records, derivation{event: event, source: run.anchor.source})
 	}
-	return records, refused
+	return records, refused, emitted
 }
 
 // subagent builds the record itself.
@@ -257,6 +269,12 @@ func resolveSubagentRuns(runs map[record.Identifier]*subagentRun, sessions *Sess
 // Invoker is model: a subagent run is entered by the model, never typed by the user.
 // ViaAgent is deliberately empty — it is the *child*'s attribution field (see call),
 // and a subagent is not attributed to itself.
+//
+// ParentEventID is therefore ADR-0035 §2's case 3, the session span: with both
+// ViaSkill and ViaAgent empty this record is attributed to nothing, and Close routes
+// it with an empty agent id deliberately. Nesting a subagent under its invoking skill
+// would mean resolving a parent from an attributionSkill this record does not carry,
+// which is a new decision and not an implementation detail — out of scope here.
 //
 // The agent id, the cwd, the attributionAgent, the slug and every other value read
 // from the file reach no record field, no error and no log line: the id is consumed

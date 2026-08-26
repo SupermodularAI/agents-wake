@@ -428,6 +428,12 @@ func resolveSessionEnds(grains map[record.Identifier]*sessionGrain, sessions *Se
 // the wire, never OK (ADR-0005). ToolCalls and BuiltinToolCalls are always
 // present, including at zero: this scan counted them, and a measured zero is the
 // plan §2.7 baseline.
+//
+// ParentEventID is deliberately unset, and it is the only record for which that is
+// deliberate rather than a failure to establish one. A session_end is the one record
+// ADR-0035 §2 leaves rootless: it is the trace root every other record of the session
+// reaches through case 3, whose id is this record's own — derived from
+// sessionEndSourceEvent whether or not this record has been written yet (§4).
 func (g *sessionGrain) sessionEnd(sessionID record.Identifier, toolCalls, builtinToolCalls int64) record.Record {
 	return record.Record{
 		SchemaVersion:       record.SchemaVersion,
