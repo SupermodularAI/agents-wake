@@ -1045,16 +1045,6 @@ func skillCallTranscript(t *testing.T, skill string) string {
 	}, "\n")
 }
 
-// subagentCallTranscript is a terminated Task call naming subagentType as its
-// primitive.
-func subagentCallTranscript(t *testing.T, subagentType string) string {
-	t.Helper()
-	return strings.Join([]string{
-		fmt.Sprintf(`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Task","input":{"subagent_type":%s}}]}}`, quoted(t, subagentType)),
-		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
-	}, "\n")
-}
-
 // ADR-0036 §2: the invoking tool_use and the subagent's own transcript are the same
 // logical event, and the transcript is the canonical source — so the invoking block
 // produces no primitive record of its own, neither a subagent record nor a
@@ -2124,9 +2114,14 @@ func TestReadRetainsNothingFromASkillFallback(t *testing.T) {
 }
 
 func TestMarshalledRecordsCarryNoSeparator(t *testing.T) {
-	inputs := []string{skillCallTranscript(t, "apps/web:deploy"), subagentCallTranscript(t, "apps/web:reviewer")}
+	inputs := []string{
+		skillCallTranscript(t, "apps/web:deploy"),
+		subagentTranscript(t, "agent-1", "session-1", "apps/web:reviewer"),
+	}
 	for _, value := range hostileValues {
-		inputs = append(inputs, skillCallTranscript(t, value), subagentCallTranscript(t, value))
+		inputs = append(inputs,
+			skillCallTranscript(t, value),
+			subagentTranscript(t, "agent-1", "session-1", value))
 	}
 	inputs = append(inputs, strings.Join([]string{
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","version":"../1.0.0","attributionSkill":"/etc/passwd","attributionAgent":"../secrets","attributionMcpServer":"plugin:../evil:tool","message":{"model":"~/.ssh/id_rsa","content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,

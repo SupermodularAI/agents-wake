@@ -319,6 +319,108 @@ func TestScanSkipsASubagentTranscriptInAnUnconsentedRepository(t *testing.T) {
 	}
 }
 
+// The adapter's hostile-payload assertion for the name a subagent transcript
+// declares. ADR-0007 requires one per adapter and per input shape, and this is a new
+// input shape: the name arrives as a free-form transcript field rather than as a tool
+// call's input, and the record is built from entries no tool_use and no tool_result
+// contributes to.
+//
+// It is refused and counted, never named: a value the grammar refuses is lost
+// collection, and the count is what stops the loss being silent (ADR-0036 §2).
+func TestScanRefusesASubagentTranscriptWithAHostileName(t *testing.T) {
+	for _, value := range hostileValues {
+		records, result := twoSources(t, closedSession, Idleness{},
+			subagentTranscript(t, "agent-1", "session-1", value))
+
+		if len(records) != 0 {
+			t.Errorf("attributionAgent = %q: records = %+v, want none", value, records)
+		}
+		if result.Refused != 1 || result.Malformed != 0 {
+			t.Errorf("attributionAgent = %q: result = %+v, want one refusal and no unusable line", value, result)
+		}
+	}
+}
+
+// A subagent can be directory-scoped, and only Namer may digest a scope: the record
+// carries the keyed digest and never the path fragment behind it (ADR-0020).
+func TestScanDerivesADirectoryScopedSubagentName(t *testing.T) {
+	records, result := twoSources(t, closedSession, Idleness{},
+		subagentTranscript(t, "agent-1", "session-1", "apps/web:reviewer"))
+
+	if len(records) != 1 {
+		t.Fatalf("records = %+v, want one (result = %+v)", records, result)
+	}
+	event := records[0]
+	name := string(event.Name)
+	if !strings.HasPrefix(name, "scope-") || !strings.HasSuffix(name, ":reviewer") {
+		t.Fatalf("record name = %q, want scope-<digest>:reviewer", name)
+	}
+	if strings.Contains(name, "apps") || strings.Contains(name, "web") {
+		t.Fatalf("record name retains a path fragment: %q", name)
+	}
+	if err := record.Validate(event); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+// A Namer with no key cannot digest a scope, so the run is refused rather than named
+// with an unkeyed digest of a repository path fragment (ADR-0020, fail closed).
+func TestScanRefusesAScopedSubagentNameWithoutAScopeKey(t *testing.T) {
+	scan := NewScan(resolver, record.Namer{}, closedSession, Idleness{})
+	if _, err := scan.Read(strings.NewReader(subagentTranscript(t, "agent-1", "session-1", "apps/web:reviewer"))); err != nil {
+		t.Fatalf("Scan.Read() error = %v", err)
+	}
+	result := scan.Close()
+
+	if len(result.Records) != 0 || result.Refused != 1 {
+		t.Fatalf("result = %+v, want the run refused and counted, never named unkeyed", result)
+	}
+}
+
+// The shape-specific retention run. Every hostile value goes into fields no record
+// field is derived from, so the record that must come out exists and the assertion is
+// about what the derivation carries rather than about what it refused.
+func TestScanRetainsNothingFromASubagentTranscript(t *testing.T) {
+	for _, value := range hostileValues {
+		for _, name := range []string{"explorer", value} {
+			// A hostile name is refused, so that case derives no record — which is itself
+			// the strongest retention result. The safe name is what guarantees a record
+			// exists for the fragments to be looked for in.
+			transcript := fmt.Sprintf(
+				`{"uuid":"agent-entry-1","sessionId":"session-1","cwd":%s,"timestamp":"2026-08-13T12:00:00Z",`+
+					`"version":"1.0.0","entrypoint":"cli","isSidechain":true,"agentId":"agent-1",`+
+					`"slug":%s,"toolDenialKind":%s,"description":%s,"parentUuid":%s,"gitBranch":%s,`+
+					`"toolUseResult":{"stdout":%s},"message":{"model":"sonnet","content":[]}}`+"\n"+
+					`{"uuid":"agent-entry-2","sessionId":"session-1","cwd":%s,"timestamp":"2026-08-13T12:00:01Z",`+
+					`"version":"1.0.0","entrypoint":"cli","isSidechain":true,"agentId":"agent-1",`+
+					`"attributionAgent":%s,"message":{"model":"sonnet","content":[]}}`,
+				quoted(t, consentedPath), quoted(t, value), quoted(t, value), quoted(t, "swordfish-"+value),
+				quoted(t, value), quoted(t, value), quoted(t, "swordfish-"+value),
+				quoted(t, consentedPath), quoted(t, name))
+
+			records, _ := twoSources(t, closedSession, finished, transcript)
+
+			if name == "explorer" && len(subagentRecords(records)) != 1 {
+				t.Fatalf("hostile value %q with a safe name derived %d subagent records, want 1", value, len(subagentRecords(records)))
+			}
+			for _, event := range records {
+				if validateErr := record.Validate(event); validateErr != nil {
+					t.Errorf("Validate(%+v) error = %v", event, validateErr)
+				}
+				encoded, err := record.Marshal(event)
+				if err != nil {
+					t.Fatalf("Marshal() error = %v", err)
+				}
+				for _, fragment := range []string{"swordfish", consentedPath, value, "agent-1", "/", `\`} {
+					if strings.Contains(string(encoded), fragment) {
+						t.Fatalf("subagent-derived record retains %q: %s", fragment, encoded)
+					}
+				}
+			}
+		}
+	}
+}
+
 // BC-3: the store now carries four event-id shapes and they must be structurally
 // disjoint. ADR-0035's Context records what a carelessly hashed fourth shape costs —
 // "a valid-looking hex id no record in the store has or ever will".
