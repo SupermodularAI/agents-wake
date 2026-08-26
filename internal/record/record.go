@@ -19,7 +19,8 @@ import (
 // it (ADR-0007), and a bump is a rebuild rather than a migration: the store is a
 // derived index, so a record of any other version is refused on read and the spool
 // that holds it is discarded and re-derived from the harness's own history
-// (ADR-0015). Version 2 added entrypoint.
+// (ADR-0015). Version 2 added entrypoint; version 3 added the session grain's
+// nullable totals.
 //
 // "Refused on read" is only half of that, and the half on its own is a silent
 // shrink: every consumer reads the spool through store.Entries, so a spool nobody
@@ -32,7 +33,7 @@ import (
 // delivery watermark, which stamps this number and starts over when it changes
 // (internal/remote). What a rebuild cannot recover is a period the harness has since
 // pruned: the store was the only surviving copy of it, and ADR-0014 accepts that.
-const SchemaVersion uint = 2
+const SchemaVersion uint = 3
 
 // ErrUnsupportedVersion is the one refusal from Validate a caller is meant to
 // recognise. Every other refusal means the record was never valid; this one means
@@ -140,6 +141,25 @@ type Record struct {
 	Entrypoint     Entrypoint `json:"entrypoint,omitempty"`
 	Outcome        *Outcome   `json:"outcome"`
 	DurationMS     *int64     `json:"duration_ms"`
+
+	// The session grain's totals (ADR-0002, ADR-0034 §3). They are populated only
+	// on a session_end record and are nil on every invocation-grain record. All
+	// nullable, and none carries omitempty: nil means the harness reported nothing,
+	// which is never 0 (ADR-0005 applied to counts), so an unreported total has to
+	// serialise as null rather than vanish. Bounded numerics only — a total cannot
+	// carry a secret (ADR-0007).
+	InputTokens         *int64 `json:"input_tokens"`
+	OutputTokens        *int64 `json:"output_tokens"`
+	CacheReadTokens     *int64 `json:"cache_read_tokens"`
+	CacheCreationTokens *int64 `json:"cache_creation_tokens"`
+	// ThinkingTokens is the session's reasoning-token total under whatever the
+	// harness calls it: Claude Code reports it as usage.output_tokens_details
+	// .thinking_tokens, opencode as tokens_reasoning. The field is named after the
+	// quantity so a second adapter maps onto it rather than adding a field named
+	// after one harness.
+	ThinkingTokens   *int64 `json:"thinking_tokens"`
+	ToolCalls        *int64 `json:"tool_calls"`
+	BuiltinToolCalls *int64 `json:"builtin_tool_calls"`
 }
 
 // DeriveEventID derives a stable identifier from the harness and its source
@@ -184,8 +204,16 @@ func Validate(r Record) error {
 	if r.Outcome != nil && !validOutcome(*r.Outcome) {
 		return errors.New("invalid outcome")
 	}
-	if r.DurationMS != nil && *r.DurationMS < 0 {
-		return errors.New("invalid duration")
+	// One loop over every nullable count, message deliberately valueless (plan
+	// §4.2). A count below zero measures nothing, so the record is dropped rather
+	// than written (fail closed).
+	for _, count := range []*int64{
+		r.DurationMS, r.InputTokens, r.OutputTokens, r.CacheReadTokens,
+		r.CacheCreationTokens, r.ThinkingTokens, r.ToolCalls, r.BuiltinToolCalls,
+	} {
+		if count != nil && *count < 0 {
+			return errors.New("invalid count")
+		}
 	}
 	return nil
 }
@@ -249,6 +277,15 @@ func IsFailure(outcome Outcome) bool {
 // IsTerminal reports whether a record is suitable for the invocation store.
 func IsTerminal(r Record) bool {
 	return r.Kind != KindSessionStart
+}
+
+// IsSessionGrain reports whether a kind describes a whole session rather than one
+// invocation inside it (ADR-0002's session grain). A session-grain record belongs
+// in the store and on the wire, but never in an invocation count: counting one
+// would put a phantom primitive in every report and add a row to every rate's
+// denominator that nobody invoked (ADR-0006).
+func IsSessionGrain(kind Kind) bool {
+	return kind == KindSessionStart || kind == KindSessionEnd
 }
 
 // NormalizedTimestamp strips monotonic clock data before persistence.
