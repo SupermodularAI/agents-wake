@@ -472,3 +472,201 @@ func TestClaudeCodeWritesAnInterruptedCallExactlyOnce(t *testing.T) {
 		t.Fatalf("Outcome = %v, want interrupted", outcome)
 	}
 }
+
+// sessionInstant is the transcript instant the session-grain tests below build
+// their two clocks around.
+var sessionInstant = time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+
+// sessionFixture opens a spool and a resolver consenting to /repo, which is what
+// every session-grain test below needs and nothing more.
+func sessionFixture(t *testing.T) (string, *store.Store, claudecode.Resolver) {
+	t.Helper()
+	spool := filepath.Join(t.TempDir(), "events.ndjson")
+	repo := record.Hash("0123456789abcdef0123456789abcdef")
+	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
+	return spool, store.New(spool), resolve
+}
+
+// sessionEndsInSpool reads back every session-grain record the spool holds. The
+// count is the assertion in every test below: one per session id, ever.
+func sessionEndsInSpool(t *testing.T, spool string) []record.Record {
+	t.Helper()
+	entries, err := store.New(spool).Entries(0)
+	if err != nil {
+		t.Fatalf("Entries() error = %v", err)
+	}
+	ends := make([]record.Record, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Record.Kind == record.KindSessionEnd {
+			ends = append(ends, entry.Record)
+		}
+	}
+	return ends
+}
+
+// TestClaudeCodeWritesOneSessionEndAcrossTwoScans is the store half of ADR-0034
+// §1: the id is derived from (harness, session id, kind), so the second scan
+// re-derives it and the store recognises it rather than appending a second copy.
+func TestClaudeCodeWritesOneSessionEndAcrossTwoScans(t *testing.T) {
+	input := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"model":"sonnet","id":"msg_1","usage":{"input_tokens":10,"output_tokens":20},"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+	}, "\n")
+	spool, destination, resolve := sessionFixture(t)
+	idle := claudecode.Idleness{Timeout: 30 * time.Minute, Now: sessionInstant.Add(2 * time.Hour)}
+
+	first, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, idle, destination)
+	if err != nil {
+		t.Fatalf("first ClaudeCode() error = %v", err)
+	}
+	if first.Written != 2 {
+		t.Fatalf("first ClaudeCode() = %+v, want the call and the session_end", first)
+	}
+	before, err := os.ReadFile(spool)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+
+	second, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, idle, destination)
+	if err != nil {
+		t.Fatalf("second ClaudeCode() error = %v", err)
+	}
+	if second.Written != 0 || second.Duplicate != 2 {
+		t.Fatalf("second ClaudeCode() = %+v, want both recognised as duplicates", second)
+	}
+	after, err := os.ReadFile(spool)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("re-ingest changed the spool:\nbefore %s\nafter  %s", before, after)
+	}
+	if ends := sessionEndsInSpool(t, spool); len(ends) != 1 {
+		t.Fatalf("the spool holds %d session_end records, want 1", len(ends))
+	}
+}
+
+// TestClaudeCodeNeverCorrectsAWrittenSessionEnd is ADR-0034 §3's acceptance
+// criterion verbatim, and the one only a store can prove.
+//
+// A session_end is written while one of its calls is still buffered, so its
+// tool_calls is 0. A later scan resolves that call as interrupted and re-derives
+// the same session_end with a tool_calls of 1. The store recognises the id and
+// keeps the first: first write wins, whatever the recomputed totals say, because
+// ADR-0015 rejected upsert and a comparison of payloads is what a dedup on
+// event_id deliberately is not.
+func TestClaudeCodeNeverCorrectsAWrittenSessionEnd(t *testing.T) {
+	// One session, one unterminated tool_use.
+	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`
+	spool, destination, resolve := sessionFixture(t)
+
+	// Scan 1: the session is finished under a 30m idle threshold, and the call is
+	// nowhere near stale under a 24h one.
+	first, err := ClaudeCode(strings.NewReader(input), resolve, names,
+		claudecode.Staleness{Timeout: 24 * time.Hour, Now: sessionInstant.Add(time.Hour)},
+		claudecode.Idleness{Timeout: 30 * time.Minute, Now: sessionInstant.Add(time.Hour)},
+		destination)
+	if err != nil {
+		t.Fatalf("first ClaudeCode() error = %v", err)
+	}
+	if first.Written != 1 {
+		t.Fatalf("first ClaudeCode() = %+v, want only the session_end", first)
+	}
+	ends := sessionEndsInSpool(t, spool)
+	if len(ends) != 1 || ends[0].ToolCalls == nil || *ends[0].ToolCalls != 0 {
+		t.Fatalf("session_end records = %+v, want one with tool_calls 0", ends)
+	}
+	writtenTimestamp := ends[0].Timestamp
+
+	// Scan 2: the call is now stale too, so it resolves as interrupted and the
+	// re-derived session_end would carry tool_calls 1.
+	second, err := ClaudeCode(strings.NewReader(input), resolve, names,
+		claudecode.Staleness{Timeout: 24 * time.Hour, Now: sessionInstant.Add(48 * time.Hour)},
+		claudecode.Idleness{Timeout: 30 * time.Minute, Now: sessionInstant.Add(48 * time.Hour)},
+		destination)
+	if err != nil {
+		t.Fatalf("second ClaudeCode() error = %v", err)
+	}
+	if second.Written != 1 || second.Duplicate != 1 {
+		t.Fatalf("second ClaudeCode() = %+v, want the interrupted call written and the session_end a duplicate", second)
+	}
+
+	ends = sessionEndsInSpool(t, spool)
+	if len(ends) != 1 {
+		t.Fatalf("the spool holds %d session_end records, want 1 — no upsert, no correction", len(ends))
+	}
+	if ends[0].ToolCalls == nil || *ends[0].ToolCalls != 0 {
+		t.Errorf("tool_calls = %v, want the first scan's 0 — the record is never corrected", ends[0].ToolCalls)
+	}
+	if !ends[0].Timestamp.Equal(writtenTimestamp) {
+		t.Errorf("Timestamp = %v, want the first scan's %v", ends[0].Timestamp, writtenTimestamp)
+	}
+	// The invocation record the second scan did write is there, so the undercount in
+	// the session's totals is a stale snapshot and not lost collection.
+	entries, err := store.New(spool).Entries(0)
+	if err != nil {
+		t.Fatalf("Entries() error = %v", err)
+	}
+	interrupted := 0
+	for _, entry := range entries {
+		if entry.Record.Outcome != nil && *entry.Record.Outcome == record.OutcomeInterrupted {
+			interrupted++
+		}
+	}
+	if interrupted != 1 {
+		t.Errorf("interrupted records = %d, want 1", interrupted)
+	}
+}
+
+// TestClaudeCodeWritesNoSecondSessionEndAfterResumedActivity is ADR-0034 §2: a
+// session id is delimited once for its whole life. Activity resuming after the
+// record was written yields its own invocation records and no second session_end,
+// and does not move the first one's timestamp or totals.
+func TestClaudeCodeWritesNoSecondSessionEndAfterResumedActivity(t *testing.T) {
+	quiet := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"model":"sonnet","id":"msg_1","usage":{"input_tokens":10,"output_tokens":20},"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+	}, "\n")
+	// The same transcript with later activity appended under the same session id.
+	resumed := strings.Join([]string{
+		quiet,
+		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T16:00:00Z","message":{"model":"sonnet","id":"msg_2","usage":{"input_tokens":70,"output_tokens":80},"content":[{"type":"tool_use","id":"call-2","name":"Read"}]}}`,
+		`{"uuid":"entry-4","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T16:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}`,
+	}, "\n")
+	spool, destination, resolve := sessionFixture(t)
+
+	if _, err := ClaudeCode(strings.NewReader(quiet), resolve, names, claudecode.Staleness{},
+		claudecode.Idleness{Timeout: 30 * time.Minute, Now: sessionInstant.Add(2 * time.Hour)},
+		destination); err != nil {
+		t.Fatalf("first ClaudeCode() error = %v", err)
+	}
+	ends := sessionEndsInSpool(t, spool)
+	if len(ends) != 1 {
+		t.Fatalf("session_end records = %d after the first scan, want 1", len(ends))
+	}
+	written := ends[0]
+
+	// Finished again, on a clock past the resumed activity.
+	second, err := ClaudeCode(strings.NewReader(resumed), resolve, names, claudecode.Staleness{},
+		claudecode.Idleness{Timeout: 30 * time.Minute, Now: sessionInstant.Add(8 * time.Hour)},
+		destination)
+	if err != nil {
+		t.Fatalf("second ClaudeCode() error = %v", err)
+	}
+	// The resumed activity's own invocation record is written; the re-derived
+	// session_end is not.
+	if second.Written != 1 || second.Duplicate != 2 {
+		t.Fatalf("second ClaudeCode() = %+v, want the new call written and the rest duplicates", second)
+	}
+
+	ends = sessionEndsInSpool(t, spool)
+	if len(ends) != 1 {
+		t.Fatalf("the spool holds %d session_end records, want 1 — a session id yields one, ever", len(ends))
+	}
+	if !ends[0].Timestamp.Equal(written.Timestamp) {
+		t.Errorf("Timestamp = %v, want the first scan's %v", ends[0].Timestamp, written.Timestamp)
+	}
+	if ends[0].InputTokens == nil || *ends[0].InputTokens != *written.InputTokens {
+		t.Errorf("input_tokens = %v, want the first scan's %d", ends[0].InputTokens, *written.InputTokens)
+	}
+}
