@@ -504,6 +504,24 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 	if closeErr != nil {
 		return written, scan, closeErr
 	}
+	// A subagent transcript that declares no usable name is refused at the closure
+	// boundary, not while its own lines are read (ADR-0036 §2, ADR-0015), so leaving it
+	// unfolded would report lost collection as a clean zero — the silence plan §3.3 and
+	// §12 exist to prevent.
+	//
+	// Assigned, not added: only the closure boundary judges a subagent run, so there is
+	// no per-source half to add to — the shape Pending and Interrupted below already
+	// have.
+	//
+	// Its own counter rather than RefusedCalls, because doctor reads the two
+	// differently. RefusedCalls is what a source's own line could not be used for, and a
+	// harness renaming the field a primitive's identity lives in is exactly that, so it
+	// blinds the integration state. This one is a standing fact about a transcript that
+	// no scan will ever see differently — ADR-0036 §2 refuses to name those runs and
+	// there is no incremental cursor, so every scan refuses the same ones again — and
+	// folding it into that arm would put every machine that runs subagents permanently
+	// into "collects nothing" while thousands of records are written (health.Diagnose).
+	scan.RefusedSubagentRuns = final.RefusedSubagentRuns
 	// Two different facts, deliberately two counters. Pending is a call whose session
 	// may still be running — transient, and not a fault. Interrupted is a call whose
 	// session went quiet past the threshold, so the invocation is now in the store

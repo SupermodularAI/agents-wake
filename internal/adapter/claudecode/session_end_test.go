@@ -311,10 +311,9 @@ func TestReadCountsToolCallsAndBuiltinToolCallsForASession(t *testing.T) {
 	// per transcript.
 	input := strings.Join([]string{
 		toolCallLines("a1", "session-a", "2026-08-13T12:00:00Z", "call-1", "Bash", `{}`),
-		toolCallLines("a2", "session-a", "2026-08-13T12:00:01Z", "call-2", "Task", `{"subagent_type":"reviewer"}`),
-		toolCallLines("a3", "session-a", "2026-08-13T12:00:02Z", "call-3", "Skill", `{"skill":"pr-review"}`),
-		toolCallLines("a4", "session-a", "2026-08-13T12:00:03Z", "call-4", "mcp__atlassian__search", `{}`),
-		toolCallLines("b1", "session-b", "2026-08-13T12:00:04Z", "call-5", "Bash", `{}`),
+		toolCallLines("a2", "session-a", "2026-08-13T12:00:02Z", "call-2", "Skill", `{"skill":"pr-review"}`),
+		toolCallLines("a3", "session-a", "2026-08-13T12:00:03Z", "call-3", "mcp__atlassian__search", `{}`),
+		toolCallLines("b1", "session-b", "2026-08-13T12:00:04Z", "call-4", "Bash", `{}`),
 	}, "\n")
 
 	result, err := Read(strings.NewReader(input), resolver, names, Staleness{}, finished)
@@ -326,7 +325,7 @@ func TestReadCountsToolCallsAndBuiltinToolCallsForASession(t *testing.T) {
 		t.Fatalf("session_end records = %d, want 2 (%+v)", len(ends), result)
 	}
 	want := map[record.Identifier][2]int64{
-		"session-a": {4, 1},
+		"session-a": {3, 1},
 		"session-b": {1, 1},
 	}
 	for _, event := range ends {

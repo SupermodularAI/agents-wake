@@ -59,7 +59,12 @@ import (
 // report 0 and false for two facts nobody measured, and together they are the only
 // lines saying whether the store still holds records this build cannot read. Same
 // failure, same remedy, same cost.
-const reportVersion = 5
+//
+// Bumped to 6 when the scan gained the refused-subagent-run counter (DG-84): a
+// version-5 file read as this format would report 0 for a counter nobody measured, and
+// it is the only line that says a subagent run happened and no number carries it. Same
+// failure, same remedy, same cost.
+const reportVersion = 6
 
 // reportFileMode is the mode the counter file is written with. It holds no path and
 // no label, but it is state about this user's machine and the rest of the local
@@ -102,7 +107,26 @@ type Scan struct {
 	// ParseErrors, which counts lines that were unusable, and from Skipped, which is
 	// an honest zero — this one is collection that was lost, and it is what a
 	// harness renaming the field a primitive's identity lives in looks like.
+	//
+	// A subagent run refused for want of a name is deliberately not in it, and has a
+	// counter of its own: that refusal is a standing fact about a transcript rather than
+	// something a scan found out, and this counter is the one Diagnose reads as drift.
 	RefusedCalls int `json:"refused_calls"`
+	// RefusedSubagentRuns counts subagent runs a scan resolved and could not name —
+	// the transcript declared no name at all (2% of real ones, ADR-0036 §2), declared
+	// one the name grammar refuses, or declared a directory-scoped one this build has
+	// no scope key to digest (ADR-0020). The run happened and no number carries it, so
+	// this is collection that was lost and the counter is what reports it (plan §3.3,
+	// §12). Fail closed: nothing is written and no name is inferred from the harness's
+	// documented default.
+	//
+	// It is separate from RefusedCalls, which counts what one source's own lines
+	// refused, for the reason Diagnose acts on: this one is a standing fact about a
+	// transcript. Every scan re-reads the whole history — there is no incremental cursor
+	// yet (T020, T102) — re-resolves the same runs and refuses them again, and no Wake
+	// release will ever name them. So it is deliberately not one of Diagnose's "collects
+	// nothing" reasons: a state word driven by this counter could never change again.
+	RefusedSubagentRuns int `json:"refused_subagent_runs"`
 	// PendingCalls counts tool calls the last scan found unterminated whose session is
 	// still inside the staleness window: a number that is not final yet, not collection
 	// that was lost (ADR-0015). It is deliberately not one of Diagnose's

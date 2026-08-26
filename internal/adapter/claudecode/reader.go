@@ -67,17 +67,41 @@ type Result struct {
 	// one, and a Scan caller reads SessionState.SourceFloor for each source instead.
 	CursorFloor int64
 	// Refused counts invocations dropped because a validated field refused its
-	// source value: the primitive's own name — a Task block naming no subagent, or
-	// a name the name/scope grammar refuses — or an entrypoint outside Wake's
-	// vocabulary. Both derivations feed it, a tool call and an attributed skill run,
-	// because both are an invocation that happened and that no number will carry
-	// otherwise. Fail closed (ADR-0007): nothing is written and no
-	// placeholder name is substituted. It is deliberately not Malformed, which
+	// source value: a name the name/scope grammar refuses, or an entrypoint outside
+	// Wake's vocabulary. Two derivations feed it — a tool call and an attributed
+	// skill run — because each is an invocation that happened and that no number
+	// will carry otherwise. Fail closed (ADR-0007): nothing is written and no
+	// placeholder name is substituted.
+	//
+	// It is what a line of this source could not be used for, so it is reported by
+	// Read. A subagent run has RefusedSubagentRuns instead, for the reason stated
+	// there.
+	//
+	// It is deliberately not Malformed, which
 	// means "a line that is unusable" and feeds doctor's drift signal, and
 	// deliberately not the store's Dropped, which counts records refused at write
 	// time. The value that was refused is never carried — only the count (plan
 	// §4.2).
 	Refused int
+	// RefusedSubagentRuns counts subagent runs the post-walk resolution could not name:
+	// the transcript declared no name at all, declared one the name/scope grammar
+	// refuses, or declared a directory-scoped one with no scope key to digest it under
+	// (ADR-0036 §2, ADR-0020). Same fail-closed rule as Refused, and the same silence it
+	// exists to prevent — the run happened and no number carries it.
+	//
+	// It is its own counter rather than a second half of Refused, because the two are
+	// different kinds of loss and doctor treats them differently. Refused is what a
+	// source's own line could not be used for, and a harness renaming the field a
+	// primitive's identity lives in is exactly that — which is why it blinds the
+	// integration state. A run refused here is a standing fact about a transcript
+	// instead: ADR-0036 §2 measured 2% of real ones declaring no name and refuses to
+	// name them from the harness's documented default, so no release makes the count
+	// fall, and with no incremental cursor every scan refuses the same runs again. A
+	// state word driven by it could never change back (see health.Diagnose).
+	//
+	// Only Close reports it. A subagent run can be judged only once its session has
+	// closed, so a Read of one source has no answer at all and leaves it zero.
+	RefusedSubagentRuns int
 	// AmbiguousSkillRuns counts attributed skill runs this scan collapsed into an
 	// already-emitted fallback record for the same (session, skill name) pair.
 	// ADR-0023 names that collapse an accepted limitation: no transcript signal
@@ -160,7 +184,12 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 	// exactly, so one transcript serialises character-for-character as it did before.
 	final.Records = append(first.Records, final.Records...)
 	final.Malformed = first.Malformed
-	final.Refused = first.Refused
+	// Summed rather than assigned, though Close derives no tool-call or skill-run
+	// refusal of its own today: a future one added there would otherwise be silently
+	// dropped, which is exactly the lost collection this counter exists to make visible.
+	// A refused subagent run arrives on Close's own RefusedSubagentRuns and passes
+	// through untouched.
+	final.Refused += first.Refused
 	return final, nil
 }
 
@@ -267,6 +296,16 @@ type transcriptEntry struct {
 	AttributionAgent     string    `json:"attributionAgent"`
 	AttributionSkill     string    `json:"attributionSkill"`
 	ToolDenialKind       string    `json:"toolDenialKind"`
+	// AgentID is the id of the subagent whose transcript this entry belongs to.
+	// Claude Code writes it on every entry of a subagent's own file and on no entry
+	// of a parent transcript (measured: 32787/32787 and 0/39039), so its presence is
+	// what identifies a subagent transcript — from content, never from the path
+	// convention subagents/agent-<agentId>.jsonl, because derivation may not touch
+	// the filesystem (ADR-0019 §1, ADR-0036 §2 "keyed by the agent id it declares").
+	//
+	// It is consumed into a derived event id and never persisted: no record field
+	// carries it (ADR-0007).
+	AgentID string `json:"agentId"`
 	// Entrypoint is how the harness process was started ("cli", "sdk-py",
 	// "sdk-cli" on Claude Code today). It is mapped onto record.Entrypoint's own
 	// vocabulary and never persisted verbatim: an unmapped value refuses the event
@@ -553,6 +592,12 @@ const (
 )
 
 func (entry transcriptEntry) call(source int, block contentBlock, resolve Resolver, names record.Namer) (call, callStatus) {
+	if subagentInvocation(block.Name) {
+		// Skipped, not refused: this block was never Wake's to collect, so counting it
+		// as lost collection would report a permanent fault for a rule working as
+		// designed (ADR-0036 §2, and call's own ordering rule below).
+		return call{}, callSkipped
+	}
 	id, err := record.BoundedToken(block.ID)
 	if err != nil {
 		return call{}, callSkipped
@@ -634,19 +679,18 @@ func (entry transcriptEntry) call(source int, block contentBlock, resolve Resolv
 // and its Context). Nothing about such a turn is uncertain, so it is dropped on
 // sight rather than deferred.
 //
-// It deliberately derives nothing from attributionAgent, which Claude Code stamps
-// on a subagent's entries the same way. A subagent is entered through the Task
-// tool, so the parent's tool_use/tool_result pair already describes that same run —
-// and describes it better: bounded by a start and an end rather than inferred from
-// a stop reason (ADR-0015), and carrying an outcome, which an end_turn entry never
-// does (ADR-0005). Deriving a record from both would make one run two invocations
-// of one primitive: same name, same kind, same invoker, so they merge on one
-// aggregation key. That is what the store's collapse guarantee ("two sources
+// It deliberately derives no *skill* candidate from attributionAgent, which Claude
+// Code stamps on a subagent's entries the same way. A subagent run has its own
+// canonical source event — the subagent's own transcript, resolved at session close
+// and keyed by the agentId that transcript declares (ADR-0036 §2, subagent.go) — so
+// deriving a skill record from an attributed entry as well would make one run two
+// invocations of one primitive: same name, same kind, same invoker, so they merge on
+// one aggregation key. That is what the store's collapse guarantee ("two sources
 // producing the same logical event collapse to one record") and ADR-0002's
 // invocation grain forbid, and the event ids are legitimately distinct (ADR-0004),
-// so the collapse has to happen here rather than at write time. plan §5.1 names
-// the Task call as the subagent primitive's source; attributionAgent's own role is
-// via_agent attribution on the calls a subagent makes (see call).
+// so the collapse has to happen here rather than at write time. attributionAgent's
+// own role on this path is via_agent attribution on the calls a subagent makes (see
+// call).
 func (entry transcriptEntry) attributedSkillCandidate(resolve Resolver, names record.Namer) (record.Record, callStatus) {
 	if entry.Message.StopReason != "end_turn" || entry.AttributionSkill == "" || entry.IsSidechain {
 		return record.Record{}, callSkipped
@@ -697,24 +741,27 @@ func (entry transcriptEntry) attributedSkillCandidate(resolve Resolver, names re
 	return event, callAccepted
 }
 
+// primitiveName derives the primitive name one tool_use block stands for.
+//
+// No branch names "Agent" or "Task": call excludes a subagent invocation before
+// reaching here, because the subagent's own transcript is that invocation's
+// canonical source and the invoking block is the same logical event seen from the
+// other side (ADR-0036 §2). A naming branch for either name would be unreachable.
 func primitiveName(block contentBlock, names record.Namer) (record.Identifier, error) {
-	switch block.Name {
-	case "Skill":
-		if block.Input.Skill != "" {
-			return names.DerivedName(block.Input.Skill)
-		}
-	case "Task":
-		// Every subagent invocation carries the same tool name, so the tool name is
-		// not the primitive: input.subagent_type is. It is derived, not bounded,
-		// because a subagent can be directory-scoped ("apps/web:reviewer") and only
-		// Namer may digest a scope (ADR-0020). There is no fall-through: a Task call
-		// naming no subagent is refused rather than collected as "Task", which would
-		// merge every distinct subagent into one primitive (ADR-0002) — and
-		// DerivedName already refuses the empty value, so this needs no extra check.
-		return names.DerivedName(block.Input.SubagentType)
+	if block.Name == "Skill" && block.Input.Skill != "" {
+		return names.DerivedName(block.Input.Skill)
 	}
 	return record.BoundedIdentifier(block.Name)
 }
+
+// subagentInvocation reports whether a tool_use block is a subagent invocation.
+// Both names are recognised, and both are recognised here rather than in
+// primitiveName or kindFor, because the only thing this reader does with such a
+// block is decline to record it: the subagent's own transcript is the canonical
+// source event and the invoking block is the same logical event seen from the other
+// side (ADR-0036 §1-§2). "Agent" is what real transcripts carry; "Task" is retained
+// for one written by an older harness.
+func subagentInvocation(name string) bool { return name == "Agent" || name == "Task" }
 
 // complete pairs an accepted call with the result that terminated it. It takes the
 // already-derived callResult rather than the source entry and block, so every
@@ -781,12 +828,14 @@ func entrypointFor(value string) (record.Entrypoint, bool) {
 	return "", false
 }
 
+// kindFor classifies one tool_use block's primitive kind.
+//
+// No branch names "Agent" or "Task", for primitiveName's reason: call excludes a
+// subagent invocation before reaching here (ADR-0036 §2). The KindSubagent records
+// this adapter emits are built in subagent.go, which sets the kind directly.
 func kindFor(name record.Identifier) record.Kind {
-	switch name {
-	case "Skill":
+	if name == "Skill" {
 		return record.KindSkill
-	case "Task":
-		return record.KindSubagent
 	}
 	if len(name) > 5 && string(name[:5]) == "mcp__" {
 		return record.KindMCPTool

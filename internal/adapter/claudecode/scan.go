@@ -48,8 +48,14 @@ type Scan struct {
 	skillsInvoked   map[skillRun]struct{}
 	skillCandidates map[skillRun]skillCandidate
 	grains          map[record.Identifier]*sessionGrain
-	tally           invocationTally
-	sources         []sourceTally
+	// subagents holds one unresolved run per agent id a subagent transcript declared,
+	// keyed by that id alone (ADR-0036 §2). It is walk-scoped for the same reason as
+	// the buffers above and one more: a subagent's transcript is a source of its own,
+	// so a per-file buffer would have to resolve it without knowing whether the
+	// session its parent transcript carries is still running.
+	subagents map[record.Identifier]*subagentRun
+	tally     invocationTally
+	sources   []sourceTally
 }
 
 // sourceTally is what one scan knows about one source it read: what that source
@@ -94,6 +100,7 @@ func NewScan(resolve Resolver, names record.Namer, stale Staleness, idle Idlenes
 		skillsInvoked:   map[skillRun]struct{}{},
 		skillCandidates: map[skillRun]skillCandidate{},
 		grains:          map[record.Identifier]*sessionGrain{},
+		subagents:       map[record.Identifier]*subagentRun{},
 	}
 }
 
@@ -106,6 +113,11 @@ func NewScan(resolve Resolver, names record.Namer, stale Staleness, idle Idlenes
 // ends, which is the whole point: a call unterminated in this source may be
 // terminated in the next, and a session quiet in this source may be running in the
 // next. Close answers all six. A caller must not read a zero here as an answer.
+//
+// Refused is this source's own lines' refusals, and it is complete here: a subagent
+// run is judged only after the walk, and Close reports those on RefusedSubagentRuns —
+// a counter of its own rather than a second half of this one, because doctor's state
+// word may follow one and not the other (see Result.RefusedSubagentRuns).
 //
 // A read that fails part-way costs its own records and nothing else: they are
 // dropped with the error, and every session the source carried is marked blind so
@@ -175,6 +187,9 @@ func (s *Scan) Read(reader io.Reader) (Result, error) {
 			return
 		}
 		observeSessionGrain(s.grains, source, entry, s.resolve)
+		// Inside the same post-valid() block, so the uuid both of the run's min-folds
+		// order by is already bounded to the token domain.
+		observeSubagentRun(s.subagents, source, entry, s.resolve, s.names)
 		switch event, status := entry.attributedSkillCandidate(s.resolve, s.names); status {
 		case callAccepted:
 			deferSkillCandidate(s.skillCandidates, skillRun{session: event.SessionID, name: event.Name}, source, event)
@@ -339,6 +354,13 @@ func (s *Scan) Read(reader io.Reader) (Result, error) {
 // source it read, and returns the records that resolution derived plus the counters
 // that are only knowable now.
 //
+// RefusedSubagentRuns is among them, and only here: a subagent transcript that
+// declares no usable name can be judged only once its session has closed (ADR-0036 §2,
+// ADR-0015). It is separate from Refused — which stays what a source's own lines
+// refused — because doctor reads the two differently, and folding them would put every
+// machine that runs subagents permanently into "collects nothing"
+// (see Result.RefusedSubagentRuns, health.Diagnose).
+//
 // This is the one place the session-close determination is resolved for a walk, and
 // resolveSessionSkills is called exactly once from it: ADR-0035 §3's parent-id
 // resolution consumes that single determination rather than forking a second one.
@@ -370,6 +392,19 @@ func (s *Scan) Close() Result {
 		result.Records = append(result.Records, derived.event)
 		s.credit(derived.source)
 	}
+	// After the two existing groups, so those two serialise in exactly today's order
+	// and a walk carrying no subagent run is byte-for-byte unchanged — and before the
+	// tally below, so a subagent record counts toward its session's ToolCalls exactly
+	// as a call terminated inside a source does.
+	subagents, refusedSources := resolveSubagentRuns(s.subagents, s.sessions, s.stale)
+	for _, derived := range subagents {
+		result.Records = append(result.Records, derived.event)
+		s.credit(derived.source)
+	}
+	for _, source := range refusedSources {
+		s.refuse(source)
+	}
+	result.RefusedSubagentRuns = len(refusedSources)
 	// Folded before the session grain reads the tally, so a call this resolution made
 	// terminal counts toward its session's totals exactly as a call terminated inside
 	// a source does.
@@ -414,4 +449,15 @@ func (s *Scan) credit(source int) {
 		return
 	}
 	s.sources[source].resolved++
+}
+
+// refuse records that the post-walk resolution refused an invocation this source
+// carried, so a source whose only contribution was a counted refusal is not also
+// reported as having produced nothing. Read assigns this field for its own lines
+// before Close increments it, so the two halves add rather than overwrite.
+func (s *Scan) refuse(source int) {
+	if source < 0 || source >= len(s.sources) {
+		return
+	}
+	s.sources[source].refused++
 }
