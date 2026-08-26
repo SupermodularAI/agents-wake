@@ -67,19 +67,15 @@ type Result struct {
 	// one, and a Scan caller reads SessionState.SourceFloor for each source instead.
 	CursorFloor int64
 	// Refused counts invocations dropped because a validated field refused its
-	// source value: a name the name/scope grammar refuses, an entrypoint outside
-	// Wake's vocabulary, or a subagent transcript that declares no usable name at
-	// all. Three derivations feed it — a tool call, an attributed skill run and a
-	// subagent run — because each is an invocation that happened and that no number
+	// source value: a name the name/scope grammar refuses, or an entrypoint outside
+	// Wake's vocabulary. Two derivations feed it — a tool call and an attributed
+	// skill run — because each is an invocation that happened and that no number
 	// will carry otherwise. Fail closed (ADR-0007): nothing is written and no
 	// placeholder name is substituted.
 	//
-	// It has two halves, and a caller sums them. Read reports the refusals this
-	// source's own lines produced; Close reports the ones the post-walk resolution
-	// produced, which is the only place a subagent run can be judged at all
-	// (ADR-0036 §2, ADR-0015). Assigning one over the other silently drops a
-	// counted refusal, which is exactly the lost collection this counter exists to
-	// make visible.
+	// It is what a line of this source could not be used for, so it is reported by
+	// Read. A subagent run has RefusedSubagentRuns instead, for the reason stated
+	// there.
 	//
 	// It is deliberately not Malformed, which
 	// means "a line that is unusable" and feeds doctor's drift signal, and
@@ -87,6 +83,25 @@ type Result struct {
 	// time. The value that was refused is never carried — only the count (plan
 	// §4.2).
 	Refused int
+	// RefusedSubagentRuns counts subagent runs the post-walk resolution could not name:
+	// the transcript declared no name at all, declared one the name/scope grammar
+	// refuses, or declared a directory-scoped one with no scope key to digest it under
+	// (ADR-0036 §2, ADR-0020). Same fail-closed rule as Refused, and the same silence it
+	// exists to prevent — the run happened and no number carries it.
+	//
+	// It is its own counter rather than a second half of Refused, because the two are
+	// different kinds of loss and doctor treats them differently. Refused is what a
+	// source's own line could not be used for, and a harness renaming the field a
+	// primitive's identity lives in is exactly that — which is why it blinds the
+	// integration state. A run refused here is a standing fact about a transcript
+	// instead: ADR-0036 §2 measured 2% of real ones declaring no name and refuses to
+	// name them from the harness's documented default, so no release makes the count
+	// fall, and with no incremental cursor every scan refuses the same runs again. A
+	// state word driven by it could never change back (see health.Diagnose).
+	//
+	// Only Close reports it. A subagent run can be judged only once its session has
+	// closed, so a Read of one source has no answer at all and leaves it zero.
+	RefusedSubagentRuns int
 	// AmbiguousSkillRuns counts attributed skill runs this scan collapsed into an
 	// already-emitted fallback record for the same (session, skill name) pair.
 	// ADR-0023 names that collapse an accepted limitation: no transcript signal
@@ -169,10 +184,11 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 	// exactly, so one transcript serialises character-for-character as it did before.
 	final.Records = append(first.Records, final.Records...)
 	final.Malformed = first.Malformed
-	// Summed, not assigned: the two halves are the refusals this source's own lines
-	// produced and the ones closure produced, and closure is the only place a subagent
-	// transcript declaring no name is judged at all (see Result.Refused). Assigning
-	// would silently drop that half — lost collection reported as a clean zero.
+	// Summed rather than assigned, though Close derives no tool-call or skill-run
+	// refusal of its own today: a future one added there would otherwise be silently
+	// dropped, which is exactly the lost collection this counter exists to make visible.
+	// A refused subagent run arrives on Close's own RefusedSubagentRuns and passes
+	// through untouched.
 	final.Refused += first.Refused
 	return final, nil
 }

@@ -206,6 +206,7 @@ func TestDiagnoseOnlyEverReturnsAKnownState(t *testing.T) {
 		{Scan: Scan{At: scannedAt, EventsWritten: 1, PendingCalls: 5, InterruptedCalls: 3}},
 		{Scan: Scan{At: scannedAt, EventsWritten: 1, BoundarySkipped: 2}},
 		{Scan: Scan{At: scannedAt, EventsWritten: 1, BoundaryRefused: 2}},
+		{Scan: Scan{At: scannedAt, EventsWritten: 1, RefusedSubagentRuns: 2}},
 	}
 	failures := []error{nil, errors.New("refused")}
 
@@ -232,6 +233,28 @@ func TestDiagnoseOnlyEverReturnsAKnownState(t *testing.T) {
 // state.
 func TestDiagnoseDoesNotLetARefusedBoundaryRegistrationBlindTheIntegrationState(t *testing.T) {
 	got := Diagnose(Report{Scan: Scan{At: scannedAt, Transcripts: 2, EventsWritten: 4, BoundaryRefused: 1}}, nil, nil)
+	if got.State != StateCollecting {
+		t.Errorf("State = %q, want %q", got.State, StateCollecting)
+	}
+}
+
+// A subagent run refused for want of a name is reported as its own number and does
+// not blind the integration state.
+//
+// It is the same shape as a refused boundary registration and as an ambiguous skill
+// run: the transcript was read completely, the refusal is a documented decision
+// (ADR-0036 §2 measured 2% of real subagent transcripts declaring no name at all, and
+// refuses to name them from the harness's documented default), and no scan will ever
+// see that transcript differently. With no incremental cursor every scan re-reads the
+// whole history and re-refuses the same runs, so folding it into "collects nothing"
+// would pin a machine writing thousands of records to that word for good — and a state
+// word that can never change again is not a diagnosis.
+//
+// The counter is what reports the loss, and doctor prints it whatever the state word
+// says. RefusedCalls keeps its own arm below, so the drift signal that arm exists for
+// is unaffected.
+func TestDiagnoseDoesNotLetARefusedSubagentRunBlindTheIntegrationState(t *testing.T) {
+	got := Diagnose(Report{Scan: Scan{At: scannedAt, Transcripts: 2, EventsWritten: 4, RefusedSubagentRuns: 1}}, nil, nil)
 	if got.State != StateCollecting {
 		t.Errorf("State = %q, want %q", got.State, StateCollecting)
 	}

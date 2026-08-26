@@ -632,32 +632,84 @@ func inventoryFixture(t *testing.T) (claudeDir, root string) {
 // to prevent: doctor would say "collecting" while an invocation nobody counts goes
 // missing.
 //
-// The transcript's date is deliberately historical, so the session is closed under
-// the staleness default on any clock this test runs on.
-func TestIngestCountsASubagentRefusedAtSessionClose(t *testing.T) {
+// It is counted on its own counter, and it does not move the integration state. Every
+// scan re-reads the whole history — there is no incremental cursor yet (T020, T102) —
+// re-resolves the same run and refuses it again, and ADR-0036 §2 refuses to ever name
+// it, so a state word driven by that count could never change back: a machine that runs
+// subagents would read as "collects nothing" for good. Two scans are what asserts it,
+// because one scan cannot witness a pin. The number is the report; the state word is
+// about whether the numbers can be trusted.
+//
+// Every transcript's date is deliberately historical, so each session is closed and
+// idle under the defaults on any clock this test runs on.
+func TestIngestCountsASubagentRefusedAtSessionCloseAndDoesNotPinTheIntegrationState(t *testing.T) {
 	paths := testPaths(t)
 	claudeDir, root := inventoryFixture(t)
 	// Three entries sharing one agentId and declaring no attributionAgent anywhere:
 	// the 2% shape ADR-0036 §2 measured, which is refused and counted rather than
 	// named from the harness's documented default.
+	//
+	// Its own source, beside the fixture's consented session rather than over it, so the
+	// machine is collecting rather than merely not broken: the state assertion below is
+	// about a refusal not blinding a working install.
 	lines := make([]string, 0, 3)
 	for index, at := range []string{"2026-08-13T12:00:00Z", "2026-08-13T12:00:01Z", "2026-08-13T12:00:02Z"} {
 		lines = append(lines, `{"uuid":"agent-entry-`+strconv.Itoa(index)+`","sessionId":"session-1","cwd":"`+root+
 			`","timestamp":"`+at+`","version":"1.0.0","entrypoint":"cli","isSidechain":true,"agentId":"agent-1",`+
 			`"message":{"model":"sonnet","content":[]}}`)
 	}
-	writeFixture(t, filepath.Join(claudeDir, "projects", "project", "session.jsonl"), strings.Join(lines, "\n"))
+	writeFixture(t, filepath.Join(claudeDir, "projects", "project", "agent.jsonl"), strings.Join(lines, "\n"))
 	if _, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
 
-	scan := scanCounters(t, paths)
-	if scan.RefusedCalls != 1 {
-		t.Errorf("RefusedCalls = %d, want 1 — a subagent run this build could not name is collection it lost", scan.RefusedCalls)
+	for index, pass := range []string{"the first scan", "the second scan"} {
+		// A new session for each pass. Every id is derived from the source event
+		// (ADR-0004), so re-reading what is already in the spool writes nothing and
+		// EventsWritten counts the work done rather than the window — without a new
+		// session the second scan would report an honest zero and the state word below
+		// would be about that instead of about the refusal.
+		transcriptAt(t, claudeDir, "session-later-"+strconv.Itoa(index), root,
+			time.Date(2026, 8, 13, 13, 0, index, 0, time.UTC))
+		if _, err := Ingest(paths, claudeDir); err != nil {
+			t.Fatalf("Ingest() on %s error = %v", pass, err)
+		}
+
+		scan := scanCounters(t, paths)
+		if scan.RefusedSubagentRuns != 1 {
+			t.Errorf("RefusedSubagentRuns after %s = %d, want 1 — a subagent run this build could not name is collection it lost",
+				pass, scan.RefusedSubagentRuns)
+		}
+		// Its own counter, not the drift one: RefusedCalls is what a harness renaming
+		// the field a primitive's identity lives in looks like, and it is the counter
+		// that still blinds the state word.
+		if scan.RefusedCalls != 0 {
+			t.Errorf("RefusedCalls after %s = %d, want 0 — a refused subagent run has a counter of its own", pass, scan.RefusedCalls)
+		}
+		if scan.EventsWritten == 0 {
+			t.Errorf("EventsWritten after %s = 0; the fixture is not collecting and the state assertion below means nothing", pass)
+		}
+		report, err := health.New(paths.HealthFile).Read()
+		if err != nil {
+			t.Fatalf("Read() on %s error = %v", pass, err)
+		}
+		if got := health.Diagnose(report, nil, nil); got.State != health.StateCollecting {
+			t.Errorf("Diagnose().State after %s = %q, want %q", pass, got.State, health.StateCollecting)
+		}
+		// Not an honest zero either: the subagent source's one contribution was a counted
+		// refusal, which is the opposite of the clean zero doctor reports as Skipped.
+		if scan.Skipped != 0 {
+			t.Errorf("Skipped after %s = %d, want 0 — an all-refused transcript is not an honest zero", pass, scan.Skipped)
+		}
+		if scan.ParseErrors != 0 || scan.Unreadable != 0 {
+			t.Errorf("ParseErrors = %d, Unreadable = %d after %s; want 0 and 0 — every line was readable",
+				scan.ParseErrors, scan.Unreadable, pass)
+		}
 	}
-	// The session grain still derives its one record — the session was observed and
-	// went idle — but the run itself produces none: nothing names it, and fail closed
-	// means no placeholder name is substituted (ADR-0007).
+
+	// The session grain still derives its records — the sessions were observed and went
+	// idle — but the run itself produces none: nothing names it, and fail closed means
+	// no placeholder name is substituted (ADR-0007).
 	entries, err := store.New(filepath.Join(paths.DataDir, eventsFile)).Entries(0)
 	if err != nil {
 		t.Fatalf("Entries() error = %v", err)
@@ -666,14 +718,6 @@ func TestIngestCountsASubagentRefusedAtSessionClose(t *testing.T) {
 		if event.Record.Kind == record.KindSubagent {
 			t.Errorf("a subagent record was written for a run nothing names: %+v", event.Record)
 		}
-	}
-	// Not an honest zero either: the source's one contribution was a counted refusal,
-	// which is the opposite of the clean zero doctor reports as Skipped.
-	if scan.Skipped != 0 {
-		t.Errorf("Skipped = %d, want 0 — an all-refused transcript is not an honest zero", scan.Skipped)
-	}
-	if scan.ParseErrors != 0 || scan.Unreadable != 0 {
-		t.Errorf("ParseErrors = %d, Unreadable = %d; want 0 and 0 — every line was readable", scan.ParseErrors, scan.Unreadable)
 	}
 }
 

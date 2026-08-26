@@ -80,6 +80,20 @@ type Diagnosis struct {
 // drop honest — a harness renaming the field a primitive's identity lives in stops
 // collection for that whole kind, and this is the only line that says so.
 //
+// A subagent run refused for want of a name is not in it, and it is the counter that
+// is closest to being. The run happened, nothing names it and no number carries it, so
+// it is lost collection in exactly the sense a refused call is — but it is a standing
+// fact about a transcript rather than something a scan found out. ADR-0036 §2 measures
+// 2% of real subagent transcripts declaring no name at all and refuses to name them
+// from the harness's documented default, so no Wake release makes that count fall; with
+// no incremental cursor (T020, T102) every scan re-reads the whole history and refuses
+// the same runs again. Folding it in would pin a machine writing thousands of records
+// to "collects nothing" for good, which is the same reason a refused boundary
+// registration and an ambiguous skill run are excluded. RefusedCalls keeps the arm, so
+// what that arm exists to catch — a harness renaming the field a primitive's identity
+// lives in — is unaffected, and doctor prints this counter on its own line whatever the
+// state word says.
+//
 // Skipped is deliberately not in it. A transcript whose working directory belongs to
 // no consented repository was read completely and collected nothing because consent
 // says so, and an unterminated call is a number that is not final yet rather than

@@ -114,11 +114,10 @@ func NewScan(resolve Resolver, names record.Namer, stale Staleness, idle Idlenes
 // terminated in the next, and a session quiet in this source may be running in the
 // next. Close answers all six. A caller must not read a zero here as an answer.
 //
-// Refused is the one counter that arrives on both. This is the half this source's own
-// lines produced; Close reports the half the post-walk resolution produced, which is
-// where a subagent run is judged at all. A caller sums them — assigning one over the
-// other silently drops a counted refusal, which is the lost collection the counter
-// exists to make visible (see Result.Refused).
+// Refused is this source's own lines' refusals, and it is complete here: a subagent
+// run is judged only after the walk, and Close reports those on RefusedSubagentRuns —
+// a counter of its own rather than a second half of this one, because doctor's state
+// word may follow one and not the other (see Result.RefusedSubagentRuns).
 //
 // A read that fails part-way costs its own records and nothing else: they are
 // dropped with the error, and every session the source carried is marked blind so
@@ -355,10 +354,12 @@ func (s *Scan) Read(reader io.Reader) (Result, error) {
 // source it read, and returns the records that resolution derived plus the counters
 // that are only knowable now.
 //
-// Refused is among them, and it is the second half of a number Read also reports: a
-// subagent transcript that declares no name can only be judged once its session has
-// closed (ADR-0036 §2, ADR-0015), so this half exists and a caller adds the two
-// rather than overwriting one with the other.
+// RefusedSubagentRuns is among them, and only here: a subagent transcript that
+// declares no usable name can be judged only once its session has closed (ADR-0036 §2,
+// ADR-0015). It is separate from Refused — which stays what a source's own lines
+// refused — because doctor reads the two differently, and folding them would put every
+// machine that runs subagents permanently into "collects nothing"
+// (see Result.RefusedSubagentRuns, health.Diagnose).
 //
 // This is the one place the session-close determination is resolved for a walk, and
 // resolveSessionSkills is called exactly once from it: ADR-0035 §3's parent-id
@@ -403,7 +404,7 @@ func (s *Scan) Close() Result {
 	for _, source := range refusedSources {
 		s.refuse(source)
 	}
-	result.Refused = len(refusedSources)
+	result.RefusedSubagentRuns = len(refusedSources)
 	// Folded before the session grain reads the tally, so a call this resolution made
 	// terminal counts toward its session's totals exactly as a call terminated inside
 	// a source does.

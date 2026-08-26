@@ -126,8 +126,13 @@ func TestScanRefusesAndCountsASubagentTranscriptDeclaringNoName(t *testing.T) {
 	if len(records) != 0 {
 		t.Fatalf("records = %+v, want none: nothing names this run", records)
 	}
-	if result.Refused != 1 {
-		t.Errorf("Refused = %d, want 1: an unnamed subagent is collection Wake lost", result.Refused)
+	// Its own counter, not the per-source Refused: a run nothing names is lost
+	// collection all the same, but it is a standing fact about a transcript rather than
+	// the drift signal Refused carries, so doctor's state word follows one and not the
+	// other (see Result.RefusedSubagentRuns, health.Diagnose).
+	if result.RefusedSubagentRuns != 1 || result.Refused != 0 {
+		t.Errorf("RefusedSubagentRuns = %d, Refused = %d; want 1 and 0: an unnamed subagent is collection Wake lost, on its own counter",
+			result.RefusedSubagentRuns, result.Refused)
 	}
 	if result.Malformed != 0 || result.Pending != 0 {
 		t.Errorf("result = %+v, want no unusable line and nothing buffered", result)
@@ -213,7 +218,7 @@ func TestScanDefersASubagentUntilItsSessionCloses(t *testing.T) {
 	if len(records) != 0 {
 		t.Fatalf("records = %+v, want none while the session is open", records)
 	}
-	if result.OpenSessions != 1 || result.Pending != 0 || result.Refused != 0 {
+	if result.OpenSessions != 1 || result.Pending != 0 || result.RefusedSubagentRuns != 0 {
 		t.Errorf("result = %+v, want one open session, nothing pending and no refusal", result)
 	}
 
@@ -233,8 +238,8 @@ func TestScanDoesNotRefuseASubagentWhoseNameArrivesLater(t *testing.T) {
 	if len(records) != 1 || records[0].Name != "explorer" {
 		t.Fatalf("records = %+v, want the explorer record (result = %+v)", records, result)
 	}
-	if result.Refused != 0 {
-		t.Errorf("Refused = %d, want 0: the name arrived, just not on the first entry", result.Refused)
+	if result.RefusedSubagentRuns != 0 {
+		t.Errorf("RefusedSubagentRuns = %d, want 0: the name arrived, just not on the first entry", result.RefusedSubagentRuns)
 	}
 }
 
@@ -298,8 +303,9 @@ func TestScanSkipsASubagentTranscriptWhoseAgentIDIsOutsideTheTokenDomain(t *test
 		records, result := twoSources(t, closedSession, Idleness{},
 			subagentTranscript(t, value, "session-1", "explorer"))
 
-		if len(records) != 0 || result.Refused != 0 {
-			t.Errorf("agentId = %q: records = %+v, Refused = %d; want a clean zero", value, records, result.Refused)
+		if len(records) != 0 || result.RefusedSubagentRuns != 0 {
+			t.Errorf("agentId = %q: records = %+v, RefusedSubagentRuns = %d; want a clean zero",
+				value, records, result.RefusedSubagentRuns)
 		}
 	}
 }
@@ -314,7 +320,7 @@ func TestScanSkipsASubagentTranscriptInAnUnconsentedRepository(t *testing.T) {
 	}
 	result := scan.Close()
 
-	if len(result.Records) != 0 || result.Refused != 0 {
+	if len(result.Records) != 0 || result.RefusedSubagentRuns != 0 {
 		t.Errorf("result = %+v, want no record and no refusal", result)
 	}
 }
@@ -335,8 +341,8 @@ func TestScanRefusesASubagentTranscriptWithAHostileName(t *testing.T) {
 		if len(records) != 0 {
 			t.Errorf("attributionAgent = %q: records = %+v, want none", value, records)
 		}
-		if result.Refused != 1 || result.Malformed != 0 {
-			t.Errorf("attributionAgent = %q: result = %+v, want one refusal and no unusable line", value, result)
+		if result.RefusedSubagentRuns != 1 || result.Malformed != 0 {
+			t.Errorf("attributionAgent = %q: result = %+v, want one refused run and no unusable line", value, result)
 		}
 	}
 }
@@ -372,7 +378,7 @@ func TestScanRefusesAScopedSubagentNameWithoutAScopeKey(t *testing.T) {
 	}
 	result := scan.Close()
 
-	if len(result.Records) != 0 || result.Refused != 1 {
+	if len(result.Records) != 0 || result.RefusedSubagentRuns != 1 {
 		t.Fatalf("result = %+v, want the run refused and counted, never named unkeyed", result)
 	}
 }

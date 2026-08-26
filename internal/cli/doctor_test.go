@@ -88,6 +88,30 @@ func TestDoctorReportsRefusedCalls(t *testing.T) {
 	}
 }
 
+// A subagent run nothing names is lost collection and gets its own line — and that
+// line is what reports it, because the state word deliberately does not follow this
+// counter. Every scan re-reads the whole history and refuses the same runs again, and
+// ADR-0036 §2 refuses to name them at all, so a machine that runs subagents would
+// otherwise read as "collects nothing" for good while it writes thousands of records.
+func TestDoctorReportsRefusedSubagentRunsWithoutBlindingTheState(t *testing.T) {
+	paths := isolate(t)
+	if err := health.New(paths.HealthFile).RecordScan(health.Scan{
+		At: time.Now().UTC(), Transcripts: 2, EventsWritten: 6, RefusedSubagentRuns: 2,
+	}); err != nil {
+		t.Fatalf("RecordScan() error = %v", err)
+	}
+
+	out, _, err := runSplit(t, "doctor")
+	if err != nil {
+		t.Fatalf("doctor error = %v", err)
+	}
+	for _, want := range []string{"refused subagent runs: 2", "integration: collecting"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output is missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestDoctorReportsPendingAndInterruptedCallsSeparately(t *testing.T) {
 	// Two lines, not one. "Buffered, may still finish" and "resolved as never
 	// finishing" are different facts, and one number would conflate them — which is

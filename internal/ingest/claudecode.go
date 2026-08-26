@@ -18,8 +18,7 @@ type Result struct {
 	Pending   int
 	// Refused is the reader's count of invocations a validated field refused — the
 	// primitive's own name, or an entrypoint outside Wake's vocabulary — whether the
-	// invocation was a tool call, an attributed skill run, or a subagent run whose own
-	// transcript declares no usable name at all.
+	// invocation was a tool call or an attributed skill run.
 	// It stays separate from Dropped, which is the store's count of
 	// records refused at write time: the two are different fail-closed points and
 	// merging them would invent the reason taxonomy doctor (T029) owns.
@@ -28,12 +27,21 @@ type Result struct {
 	// health.Scan.RefusedCalls, which doctor renders and which puts integration
 	// state in "collects nothing". A dropped call nobody counts is how format drift
 	// stops collection while doctor still says "collecting" (plan §3.3, §12).
-	//
-	// It arrives on both ClaudeCodeScan.Read and ClaudeCodeScan.Close, and the caller
-	// sums the two: a subagent run is judged only once its session has closed
-	// (ADR-0036 §2, ADR-0015), so the closure half exists and assigning one over the
-	// other would drop exactly the refusal this counter exists to surface.
 	Refused int
+	// RefusedSubagentRuns is the reader's count of subagent runs it could not name: the
+	// transcript declared no name, one the grammar refuses, or a directory-scoped one
+	// with no scope key (ADR-0036 §2, ADR-0020). Lost collection on the same fail-closed
+	// terms as Refused, and reported for the same reason.
+	//
+	// It is its own counter because doctor treats it differently: activation folds it
+	// into health.Scan.RefusedSubagentRuns, which doctor renders as its own line but
+	// which does not put integration state in "collects nothing" — the refusal is a
+	// standing fact about a transcript, so a state word following it could never change
+	// back (see claudecode.Result.RefusedSubagentRuns, health.Diagnose).
+	//
+	// It arrives on ClaudeCodeScan.Close only, never on Read: a subagent run is judged
+	// once its session has closed, and one source's read has no answer to give.
+	RefusedSubagentRuns int
 	// Interrupted is the reader's count of calls that resolved to outcome interrupted
 	// because their session went quiet past the staleness threshold (ADR-0015). Those
 	// records are terminal and are also counted by Parsed and Written; this counter
@@ -121,12 +129,12 @@ func NewClaudeCodeScan(resolve claudecode.Resolver, names record.Namer, stale cl
 // Everything a session's resolution owes to the walk's other transcripts is
 // resolved by Close, so the counters this returns are the per-source ones only —
 // Parsed, Malformed, Refused and the write result. Pending, Interrupted,
-// AmbiguousSkillRuns and SkippedSources are zero here and are answered by Close; a
-// caller must not fold a zero from this call into a health counter.
+// AmbiguousSkillRuns, RefusedSubagentRuns and SkippedSources are zero here and are
+// answered by Close; a caller must not fold a zero from this call into a health
+// counter.
 //
-// Refused is the one counter reported by both, and the caller adds the two halves:
-// this one is the refusals this transcript's own lines produced, and Close's is the
-// refusals the post-walk resolution produced (see Result.Refused).
+// Refused is complete here rather than half an answer: a subagent run's refusal has
+// its own counter on Close (see Result.RefusedSubagentRuns).
 func (s *ClaudeCodeScan) Read(reader io.Reader) (Result, error) {
 	derived, err := s.scan.Read(reader)
 	if err != nil {
@@ -144,10 +152,10 @@ func (s *ClaudeCodeScan) Read(reader io.Reader) (Result, error) {
 // AmbiguousSkillRuns, SkippedSources — are the walk's, not any one source's, and
 // the caller folds these rather than the per-source zeros.
 //
-// Refused is the exception in the other direction: it arrives here *as well as* on
-// Read, because a subagent transcript declaring no name can only be judged at this
-// boundary, and the caller sums the two halves rather than overwriting one with the
-// other (see Result.Refused).
+// RefusedSubagentRuns is among them and arrives here only: a subagent transcript
+// declaring no usable name can be judged at this boundary and nowhere else, and it is
+// its own counter rather than a second half of Refused because doctor's state word
+// follows Refused and deliberately not this one (see Result.RefusedSubagentRuns).
 //
 // A walk that read no source derives nothing, and Append on an empty slice creates
 // no spool, so calling Close after an empty walk is a clean zero rather than a
@@ -165,15 +173,16 @@ func persist(derived claudecode.Result, destination *store.Store) (Result, error
 		return Result{}, err
 	}
 	return Result{
-		Parsed:             len(derived.Records),
-		Malformed:          derived.Malformed,
-		Pending:            derived.Pending,
-		Refused:            derived.Refused,
-		Interrupted:        derived.Interrupted,
-		AmbiguousSkillRuns: derived.AmbiguousSkillRuns,
-		SkippedSources:     derived.SkippedSources,
-		Written:            written.Written,
-		Duplicate:          written.Duplicate,
-		Dropped:            written.Dropped,
+		Parsed:              len(derived.Records),
+		Malformed:           derived.Malformed,
+		Pending:             derived.Pending,
+		Refused:             derived.Refused,
+		RefusedSubagentRuns: derived.RefusedSubagentRuns,
+		Interrupted:         derived.Interrupted,
+		AmbiguousSkillRuns:  derived.AmbiguousSkillRuns,
+		SkippedSources:      derived.SkippedSources,
+		Written:             written.Written,
+		Duplicate:           written.Duplicate,
+		Dropped:             written.Dropped,
 	}, nil
 }

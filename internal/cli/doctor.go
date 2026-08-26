@@ -72,6 +72,16 @@ func newDoctorCmd() *cobra.Command {
 // change back. These lines are what report the loss, which is why they are printed
 // whatever the state word says.
 //
+// The refused-subagent-run line sits beside the refused-call count for the same
+// family reason, and it is a second line rather than part of that count because the two
+// are read differently below: a call refused while a source was read is what a harness
+// renaming a primitive's identity field looks like, and it moves the state word. A
+// subagent run refused for want of a name is lost collection too, but it is a standing
+// fact about a transcript — ADR-0036 §2 refuses to name those runs, and every scan
+// re-reads the whole history and refuses the same ones — so it deliberately does not,
+// for the reason Diagnose argues. This line is what reports the loss, which is why it
+// prints whatever the state word says.
+//
 // The stale-record count and the store-rebuild word are two lines for the same reason:
 // the count says how many records the store holds that this build cannot read, and the
 // word says whether anything has re-derived them. The scan that found them may not have
@@ -138,6 +148,7 @@ func writeDiagnosis(out io.Writer, paths config.Paths, claudeDir string) error {
 		{"global boundary directories gone", report.Scan.BoundarySkipped},
 		{"global boundary registrations refused", report.Scan.BoundaryRefused},
 		{"refused calls", report.Scan.RefusedCalls},
+		{"refused subagent runs", report.Scan.RefusedSubagentRuns},
 		{"pending calls", report.Scan.PendingCalls},
 		{"interrupted calls", report.Scan.InterruptedCalls},
 		{"ambiguous skill runs", report.Scan.AmbiguousSkillRuns},
