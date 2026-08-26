@@ -115,14 +115,31 @@ const (
 
 	// maxSpanAttributes is the size of the frozen span attribute key set. It
 	// only sizes an allocation, but keeping it beside the constants makes a
-	// change to the key set visible in the same review.
-	maxSpanAttributes = 21
+	// change to the key set visible in the same review. wake.repo_label is the
+	// twenty-second and is conditional, so this sizes the allocation for the
+	// widest span rather than for every span.
+	maxSpanAttributes = 22
 )
 
 // errEncode is deliberately valueless. A diagnostic that quoted the record it
 // failed on would be the one place derived data could leak back into free text
 // (plan §4.2), the same reason record.errUnsafeIdentifier names no value.
 var errEncode = errors.New("encoding otlp payload")
+
+// RepoLabels maps a repository id to the readable label recorded for it on this
+// machine. It is resolved at flush time and handed in, because the encoder may
+// not read the file it comes from: internal/config is absent from
+// frozenPackageImports["otlp.go"] in this package's test, and so is every
+// filesystem import, which is what makes "the encoder is pure" checkable rather
+// than merely stated (ADR-0033 §2).
+//
+// Keyed by the id's string form rather than by record.Hash so the caller can
+// convert internal/config's answer with a single type conversion instead of
+// rebuilding the map — one fewer place for the real flush and the dry run to
+// diverge (ADR-0030's byte-identity clause).
+//
+// A nil map is a valid argument and means no repository has a label to send.
+type RepoLabels map[string]string
 
 // Encode returns the OTLP/HTTP JSON payload for records and the number of
 // records omitted from it.
@@ -133,11 +150,14 @@ var errEncode = errors.New("encoding otlp payload")
 // they are implementation noise rather than useful remote observations. Omission
 // is never silent — the count is returned so a caller can report it rather than
 // treating it as an empty delivery (plan §12).
-func Encode(records []record.Record) ([]byte, int, error) {
+//
+// labels is a flush-time projection and not part of the record: a label that does
+// not pass on the way out is omitted whole and never drops the span it belongs to.
+func Encode(records []record.Record, labels RepoLabels) ([]byte, int, error) {
 	spans := make([]span, 0, len(records))
 	dropped := 0
 	for _, r := range records {
-		encoded, ok := encodeSpan(r)
+		encoded, ok := encodeSpan(r, labels)
 		if !ok {
 			dropped++
 			continue
@@ -165,7 +185,7 @@ func Encode(records []record.Record) ([]byte, int, error) {
 // a lookup this pure package must not perform. Emitting a fabricated parent id
 // would be worse than emitting none, so the span tree stays flat until a record
 // carries a real parent id — an ADR conversation, not an implementation detail.
-func encodeSpan(r record.Record) (span, bool) {
+func encodeSpan(r record.Record, labels RepoLabels) (span, bool) {
 	// Validate on the way out as well as on the way in: the wire is subject to
 	// the same contract as the disk (ADR-0030), and this is the last point at
 	// which a malformed record can still be stopped.
@@ -196,7 +216,7 @@ func encodeSpan(r record.Record) (span, bool) {
 		Kind:      kindInternal,
 		StartTime: start,
 		EndTime:   end,
-		Attrs:     spanAttributes(r),
+		Attrs:     spanAttributes(r, labels),
 		Status:    status{Code: statusCode(r.Outcome)},
 	}, true
 }
@@ -211,7 +231,7 @@ func encodeSpan(r record.Record) (span, bool) {
 // no branch that copies free text — because Record has no free text to copy
 // (ADR-0007). A test asserts this key set by equality against an independent
 // literal, so adding a key here without adding it there fails the build.
-func spanAttributes(r record.Record) []keyValue {
+func spanAttributes(r record.Record, labels RepoLabels) []keyValue {
 	attrs := make([]keyValue, 0, maxSpanAttributes)
 
 	// wake.schema_version is on every span, not only on the resource, and it is
@@ -234,12 +254,19 @@ func spanAttributes(r record.Record) []keyValue {
 	// langfuse.session.id duplicates wake.session_id under the key Langfuse
 	// groups traces by. It is the same already-bounded token, not a second value.
 	attrs = appendString(attrs, "langfuse.session.id", string(r.SessionID))
-	// wake.repo is the hashed id and only the hashed id. The repository label
-	// and path never leave the local store; this package could not read them if
-	// it wanted to, because it has no filesystem access at all. The local
-	// hash-to-label map is internal/config's business and is named nowhere else
-	// in the module, by test (plan §3.4, §9).
+	// wake.repo is the hashed id, and it is the join key: unconditional, and
+	// derived exactly as ADR-0019 §3 specifies. wake.repo_label rides beside it
+	// under the same gate and no second one — ADR-0033 narrows ADR-0007,
+	// ADR-0019 and ADR-0030 for the label field alone, so the label may travel
+	// once delivery is on for an endpoint while the repository *path* still
+	// never leaves the machine under any condition (ADR-0033 §4, plan §3.4, §9).
+	//
+	// This package still cannot read either one. The label arrives as an
+	// argument resolved at flush time, and frozenPackageImports["otlp.go"] in
+	// this package's test keeps internal/config — and every filesystem import —
+	// out of this file, which is what makes that claim checkable.
 	attrs = appendString(attrs, "wake.repo", string(r.Repo))
+	attrs = appendString(attrs, "wake.repo_label", labelFor(labels, r.Repo))
 	attrs = appendString(attrs, "wake.package", string(r.Package))
 	attrs = appendString(attrs, "wake.package_version", string(r.PackageVersion))
 	if r.Source != nil {
@@ -273,6 +300,40 @@ func spanAttributes(r record.Record) []keyValue {
 	attrs = appendString(attrs, "langfuse.observation.type", observationType(r.Kind))
 
 	return attrs
+}
+
+// labelFor returns the readable label to emit for a repository id, or "" when
+// there is none this encoder is willing to put on the wire.
+//
+// The check is re-run here rather than trusted from the caller for the reason
+// encodeSpan re-runs record.Validate: the wire is subject to the same contract as
+// the disk, and this is the last point at which a value can still be stopped
+// (ADR-0030). record.BoundedToken is the check — the same bounded-token domain a
+// session id lives in, so the grammar is defined once in the codebase rather than
+// restated here (ADR-0033 §3).
+//
+// Three different facts produce the same output, deliberately: no recorded label,
+// a label this build will not represent, and a label that would have to be
+// normalised to pass. All three emit no attribute at all — never a truncated,
+// escaped, or sanitised value — because an approximation of a repository name is a
+// wrong answer that looks like a right one, and an empty stringValue is
+// indistinguishable at the receiver from a real value (ADR-0027: unknown is
+// signalled by absence). appendString turns "" into no attribute.
+//
+// The equality against the untrimmed value is not redundant: BoundedToken trims
+// surrounding whitespace, and emitting the trimmed form would be repairing a value
+// that failed rather than refusing it — the same reason config.validRoot rejects an
+// uncleaned path instead of cleaning it.
+func labelFor(labels RepoLabels, repo record.Hash) string {
+	raw, recorded := labels[string(repo)]
+	if !recorded {
+		return ""
+	}
+	label, err := record.BoundedToken(raw)
+	if err != nil || string(label) != raw {
+		return ""
+	}
+	return raw
 }
 
 // observationType maps a wake Kind onto the Langfuse observation taxonomy.

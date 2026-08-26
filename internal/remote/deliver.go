@@ -201,6 +201,13 @@ func flushLocked(p config.Paths, auth config.RemoteAuth, minInterval time.Durati
 		return Report{Suppressed: true}, nil
 	}
 
+	// Resolved once for the run, not once per batch, and after the throttle gate:
+	// a suppressed run reads nothing at all. A batch spans repositories, so what is
+	// handed down is the whole hash → label map rather than one label — a single
+	// scalar would attribute one repository's spans to another repository's name,
+	// on the exact field this exists to make readable (ADR-0019 §1).
+	labels := RepoLabels(config.ProjectLabels(p))
+
 	events := store.New(eventsPath(p))
 	head, err := events.Head()
 	if err != nil {
@@ -257,7 +264,7 @@ func flushLocked(p config.Paths, auth config.RemoteAuth, minInterval time.Durati
 		// but a user who ran `remote flush` deliberately is someone this can be
 		// told, which is what Report exists for. The hook-invoked path still
 		// discards it, because it may not print at all (ADR-0016).
-		payload, dropped, encodeErr := Encode(recordsOf(batch))
+		payload, dropped, encodeErr := Encode(recordsOf(batch), labels)
 		if encodeErr != nil {
 			deliveryErr = encodeErr
 			break
