@@ -586,3 +586,93 @@ func TestIsSessionGrain(t *testing.T) {
 		t.Fatal("the Kind enum changed size; add the new member to one of the two lists")
 	}
 }
+
+// TestValidateAcceptsAnAbsentParentEventID pins the nullable half of ADR-0035 §2:
+// a record derivation could establish no parent for validates, and so does the one
+// record that is deliberately rootless (a session_end, the trace root).
+func TestValidateAcceptsAnAbsentParentEventID(t *testing.T) {
+	candidate := validRecord()
+	if candidate.ParentEventID != "" {
+		t.Fatalf("validRecord() presets ParentEventID = %q", candidate.ParentEventID)
+	}
+	if err := Validate(candidate); err != nil {
+		t.Fatalf("Validate() rejected an absent parent event id: %v", err)
+	}
+}
+
+func TestValidateAcceptsADerivedParentEventID(t *testing.T) {
+	candidate := validRecord()
+	candidate.ParentEventID = DeriveEventID("claude-code", "parent-source")
+	if err := Validate(candidate); err != nil {
+		t.Fatalf("Validate() rejected a derived parent event id: %v", err)
+	}
+}
+
+// TestValidateRejectsAMalformedParentEventID is the fail-closed half: the parent is
+// an id, so it gets the same validSHA256 gate event_id gets, and a record that fails
+// it is dropped rather than written (ADR-0007, C12).
+func TestValidateRejectsAMalformedParentEventID(t *testing.T) {
+	values := []string{
+		"deadbeef",
+		strings.Repeat("A", 64),
+		strings.Repeat("f", 63),
+		strings.Repeat("f", 65),
+		strings.Repeat("g", 64),
+	}
+	for _, value := range hostileIdentifiers {
+		if value == "" {
+			// The empty value is absence, which the test above asserts is accepted.
+			continue
+		}
+		values = append(values, value)
+	}
+	for _, value := range values {
+		candidate := validRecord()
+		candidate.ParentEventID = Hash(value)
+		err := Validate(candidate)
+		if err == nil {
+			t.Errorf("Validate() accepted ParentEventID = %q", value)
+			continue
+		}
+		if errors.Is(err, ErrUnsupportedVersion) {
+			t.Errorf("Validate() refused ParentEventID = %q as a version problem: %v", value, err)
+		}
+		if _, err := Marshal(candidate); err == nil {
+			t.Errorf("Marshal() wrote a record with ParentEventID = %q", value)
+		}
+	}
+}
+
+func TestMarshalOmitsAnAbsentParentEventID(t *testing.T) {
+	candidate := validRecord()
+	encoded, err := Marshal(candidate)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if strings.Contains(string(encoded), "parent_event_id") {
+		t.Fatalf("Marshal() emitted an absent parent event id: %s", encoded)
+	}
+
+	parent := DeriveEventID("claude-code", "parent-source")
+	candidate.ParentEventID = parent
+	encoded, err = Marshal(candidate)
+	if err != nil {
+		t.Fatalf("Marshal() with a parent error = %v", err)
+	}
+	if want := `"parent_event_id":"` + string(parent) + `"`; !strings.Contains(string(encoded), want) {
+		t.Fatalf("Marshal() = %s, want it to contain %s", encoded, want)
+	}
+}
+
+// TestValidateDoesNotRejectASelfParent pins ADR-0035 §7 the right way round.
+// Cycle-freedom is structural, established by the adapter's pure comparison against
+// the child's own EventID; Validate stays per-record and pure and must not grow an
+// ancestor rule, which would drop a whole invocation rather than fall through to the
+// session span.
+func TestValidateDoesNotRejectASelfParent(t *testing.T) {
+	candidate := validRecord()
+	candidate.ParentEventID = candidate.EventID
+	if err := Validate(candidate); err != nil {
+		t.Fatalf("Validate() rejected a self-parent: %v", err)
+	}
+}
