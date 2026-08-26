@@ -383,3 +383,25 @@ func TestDoctorSucceedsWhenTheCounterFileIsCorrupt(t *testing.T) {
 		t.Errorf("output is missing the unreadable-counters state:\n%s", out)
 	}
 }
+
+// The skip gets its own line, and the line is the whole of how it is reported: ADR-0036
+// §3 keeps it off the state word, because a typed CLI built-in is not lost collection
+// and every scan re-skips the same ones.
+func TestDoctorReportsSkippedTypedInvocationsWithoutBlindingTheState(t *testing.T) {
+	paths := isolate(t)
+	if err := health.New(paths.HealthFile).RecordScan(health.Scan{
+		At: time.Now().UTC(), Transcripts: 2, EventsWritten: 6, SkippedTypedInvocations: 3,
+	}); err != nil {
+		t.Fatalf("RecordScan() error = %v", err)
+	}
+
+	out, _, err := runSplit(t, "doctor")
+	if err != nil {
+		t.Fatalf("doctor error = %v", err)
+	}
+	for _, want := range []string{"skipped typed invocations: 3", "integration: collecting"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output is missing %q:\n%s", want, out)
+		}
+	}
+}

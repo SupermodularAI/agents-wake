@@ -140,6 +140,17 @@ type Diagnosis struct {
 // trace. Folding it in would put every session carrying a repeated slash command into
 // "collects nothing", permanently, since nothing about that session will ever change.
 //
+// A skipped typed invocation is not in it, and it is the clearest case of the rule
+// rather than a borderline one. A tag naming something this machine has no primitive
+// for is not lost collection at all — a typed CLI built-in was never Wake's to collect,
+// so nothing was lost — which is why ADR-0036 §3 settles it as a skip on a counter of
+// its own rather than on RefusedCalls. On top of that it is the common case, roughly
+// 101 of 136 observed occurrences, and every scan re-reads the whole history and
+// re-skips the same built-ins: folding it in would pin every machine to "collects
+// nothing" permanently while it writes thousands of records. RefusedCalls keeps its own
+// arm, so the drift signal that arm exists for — a harness renaming the field a
+// primitive's identity lives in — is unaffected.
+//
 // An input this build cannot read is its own state rather than an error: a
 // diagnostic that failed in the situation it exists for is worse than one that says
 // what it could not determine. Both unreadable states come first, because a number

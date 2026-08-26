@@ -270,3 +270,16 @@ func TestDiagnoseDoesNotCallAVanishedBoundaryDirectoryLostCollection(t *testing.
 		t.Errorf("State = %q, want %q", got.State, StateCollecting)
 	}
 }
+
+// A typed invocation naming something this machine has no primitive for is not lost
+// collection at all — a typed CLI built-in was never Wake's to collect — so it is one
+// step weaker than the refused subagent run above and excluded for the same reason on
+// top of that: every scan re-reads the whole history and re-skips the same built-ins,
+// and roughly 101 of 136 observed occurrences are built-ins, so a state word following
+// this counter could never change again (ADR-0036 §3).
+func TestDiagnoseDoesNotBlindTheStateOnASkippedTypedInvocation(t *testing.T) {
+	got := Diagnose(Report{Scan: Scan{At: scannedAt, Transcripts: 2, EventsWritten: 4, SkippedTypedInvocations: 99}}, nil, nil)
+	if got.State != StateCollecting {
+		t.Errorf("State = %q, want %q", got.State, StateCollecting)
+	}
+}

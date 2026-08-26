@@ -64,7 +64,12 @@ import (
 // version-5 file read as this format would report 0 for a counter nobody measured, and
 // it is the only line that says a subagent run happened and no number carries it. Same
 // failure, same remedy, same cost.
-const reportVersion = 6
+//
+// Bumped to 7 when the scan gained the skipped-typed-invocation counter (DG-85): a
+// version-6 file read as this format would report 0 for a counter nobody measured, and
+// it is the only line that says a typed invocation named something this machine has no
+// primitive for. Same failure, same remedy, same cost.
+const reportVersion = 7
 
 // reportFileMode is the mode the counter file is written with. It holds no path and
 // no label, but it is state about this user's machine and the rest of the local
@@ -150,6 +155,26 @@ type Scan struct {
 	// nothing" reasons: the transcript was read completely and the collapse is a
 	// documented decision, not a source nobody could read.
 	AmbiguousSkillRuns int `json:"ambiguous_skill_runs"`
+	// SkippedTypedInvocations counts typed invocations the last scan read the command tag
+	// of and derived no record from, because the name it declared is not a primitive this
+	// machine has: the installed-primitive set the reader was handed does not hold it,
+	// holds it under a kind ADR-0036 §1's precedence row does not cover, or the
+	// name/scope grammar refuses it.
+	//
+	// It is a skip and not lost collection. A typed CLI built-in like /clear was never
+	// Wake's to collect, so nothing was lost. It is reported all the same because that
+	// set is injected and therefore fallible: a name absent from it may be a built-in, or
+	// may be a primitive since uninstalled or renamed, and nothing in the transcript
+	// tells the two apart.
+	//
+	// It is deliberately not one of integrationState's "collects nothing" reasons, and
+	// this is the strongest case of that exclusion rather than the weakest. Every scan
+	// re-reads the whole history and re-skips the same built-ins — roughly 101 of 136
+	// observed occurrences are built-ins — so a state word following it would be pinned
+	// to "collects nothing" on every machine forever while thousands of records are
+	// written, and a state word that can never change again is not a diagnosis (ADR-0036
+	// §3, plan §3.3, §12). See claudecode.Result.SkippedTypedInvocations and Diagnose.
+	SkippedTypedInvocations int `json:"skipped_typed_invocations"`
 	// BoundarySkipped counts directories a scan discovered under the recorded global
 	// root and did not register because the directory no longer exists (ADR-0032
 	// Consequences). It is an honest zero, not lost collection: there is nothing left
