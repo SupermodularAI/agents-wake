@@ -191,7 +191,7 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 		// an entry — so no call is buffered for a session this cannot judge. Observe
 		// ignores a zero timestamp, which is most of what these lines carry.
 		if sessionID, tokenErr := record.BoundedToken(entry.SessionID); tokenErr == nil {
-			sessions.Observe(sessionID, record.NormalizedTimestamp(entry.Timestamp), offset)
+			sessions.Observe(0, sessionID, record.NormalizedTimestamp(entry.Timestamp), offset)
 		}
 		if unmarshalErr != nil || !entry.valid() {
 			// This read has no entry for the line, whether its JSON did not fit the struct or
@@ -325,7 +325,10 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 	fallbacks, ambiguous := resolveSessionSkills(skillCandidates, skillsInvoked, sessions, judged)
 	result.Records = append(result.Records, fallbacks...)
 	result.AmbiguousSkillRuns = ambiguous
-	result.OpenSessions, result.CursorFloor = sessions.CursorFloor(judged)
+	result.OpenSessions = sessions.OpenSessions(judged)
+	if open, offset := sessions.SourceFloor(0, judged); open {
+		result.CursorFloor = offset
+	}
 	// judgedIdle, not idle, for the reason judged is not stale: a read that could not
 	// rule out one of its lines may not conclude any session went silent, and a
 	// session_end is permanent (ADR-0015 rejects upsert, ADR-0004 deduplicates the

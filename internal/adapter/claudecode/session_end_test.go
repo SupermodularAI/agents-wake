@@ -705,7 +705,7 @@ func TestReadRetainsNothingFromASessionEnd(t *testing.T) {
 // answer the two differently.
 func TestSessionStateFinishedSessionsIsNotClosed(t *testing.T) {
 	sessions := &SessionState{}
-	sessions.Observe("session-1", callInstant, 0)
+	sessions.Observe(0, "session-1", callInstant, 0)
 
 	// Silent for an hour: past session.idle_timeout's 30m, well inside
 	// scan.stale_call_timeout's 24h.
