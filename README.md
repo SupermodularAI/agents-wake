@@ -147,7 +147,9 @@ review. Its default design keeps the sensitive path local:
 - Records are structurally limited to identifiers, hashes, timestamps, enums,
   and counters. Invalid or path-shaped values are dropped rather than stored.
 - Repository identity is a salted, per-machine HMAC. The readable project map
-  stays local with restrictive permissions.
+  stays local with restrictive permissions. When you turn remote delivery on, a
+  payload carries that hash and the repository's readable name; the repository
+  path never leaves the machine.
 - Every binary ships the remote-delivery capability and it is off until you run
   `wake remote set [url]` and `wake remote on`. Until you do, no endpoint is
   configured, nothing is sent, and `wake remote status` and `wake doctor` both

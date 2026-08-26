@@ -66,8 +66,14 @@ type projectsFile struct {
 type projectEntry struct {
 	// ID is the salted hash of Root: idHexLen lowercase hex characters.
 	ID string `json:"id"`
-	// Label is the readable name, for display only. It never leaves this
-	// package.
+	// Label is the readable name. It is display-only locally, and it is the one
+	// field of this file whose *value* may leave the machine: once remote delivery
+	// is enabled for an endpoint it is projected onto the OTLP wire as
+	// wake.repo_label, beside the hashed id (ADR-0033, plan §3.4, §9). The file
+	// never travels, and the root, the aliases and the boundary never travel in any
+	// form. The separator rejection in valid() below is the floor; the encoder
+	// re-validates the value as a bounded token on the way out and omits it whole
+	// when it fails.
 	Label string `json:"label"`
 	// Root is the canonical consented root — absolute, clean, and with symlinks
 	// already resolved at registration.
