@@ -152,7 +152,7 @@ func spansOf(t *testing.T, payload []byte) []map[string]any {
 // about a span's contents cannot silently pass against a dropped record.
 func encodeOne(t *testing.T, r record.Record) map[string]any {
 	t.Helper()
-	payload, dropped, err := Encode([]record.Record{r})
+	payload, dropped, err := Encode([]record.Record{r}, nil)
 	if err != nil {
 		t.Fatalf("Encode() error = %v", err)
 	}
@@ -165,6 +165,31 @@ func encodeOne(t *testing.T, r record.Record) map[string]any {
 	}
 	return spans[0]
 }
+
+// encodeOneLabelled is encodeOne for a record whose repository has a label. It is
+// separate rather than a parameter on encodeOne so the tests that are not about
+// labels keep reading as tests of the record alone.
+func encodeOneLabelled(t *testing.T, r record.Record, labels RepoLabels) map[string]any {
+	t.Helper()
+	payload, dropped, err := Encode([]record.Record{r}, labels)
+	if err != nil {
+		t.Fatalf("Encode() error = %v", err)
+	}
+	if dropped != 0 {
+		t.Fatalf("Encode() dropped = %d, want 0", dropped)
+	}
+	spans := spansOf(t, payload)
+	if len(spans) != 1 {
+		t.Fatalf("Encode() emitted %d spans, want 1", len(spans))
+	}
+	return spans[0]
+}
+
+// testLabel and testLabels are the label side of validRecord/fullRecord: the
+// label recorded for the repository every fixture record belongs to.
+const testLabel = "agents-wake"
+
+func testLabels() RepoLabels { return RepoLabels{string(validRecord().Repo): testLabel} }
 
 // attributesOf flattens an OTLP attribute array into key -> value object.
 func attributesOf(t *testing.T, owner map[string]any, key string) map[string]map[string]any {
@@ -324,7 +349,7 @@ func TestPackageImportsAreFrozen(t *testing.T) {
 }
 
 func TestEncodeEmptyInputProducesEmptySpanArray(t *testing.T) {
-	payload, dropped, err := Encode(nil)
+	payload, dropped, err := Encode(nil, nil)
 	if err != nil {
 		t.Fatalf("Encode() error = %v", err)
 	}
@@ -470,7 +495,7 @@ func TestEncodeDropsUnrepresentableTimestamps(t *testing.T) {
 			if err := record.Validate(r); err != nil {
 				t.Fatalf("fixture is not a valid record, so the drop would prove nothing: %v", err)
 			}
-			payload, dropped, err := Encode([]record.Record{r})
+			payload, dropped, err := Encode([]record.Record{r}, nil)
 			if err != nil {
 				t.Fatalf("Encode() error = %v", err)
 			}
@@ -576,6 +601,11 @@ var frozenSpanAttributeKeys = []string{
 	"wake.package",
 	"wake.package_version",
 	"wake.repo",
+	// Conditional, and belongs in this list only: a repository with no recorded
+	// label, or one whose label this build will not represent, sends the hash
+	// alone (ADR-0033 §3). It is deliberately absent from
+	// frozenAlwaysPresentKeys below.
+	"wake.repo_label",
 	"wake.schema_version",
 	"wake.session_id",
 	"wake.source",
@@ -600,8 +630,12 @@ var frozenAlwaysPresentKeys = []string{
 // frozenResourceAttributeKeys is the resource-level equivalent.
 var frozenResourceAttributeKeys = []string{"service.name", "service.version"}
 
+// TestFullRecordEmitsFrozenKeySet asserts the encoder's complete output shape.
+// That shape now includes the conditional wake.repo_label, so the fixture has to
+// carry a label as well as a fully populated record — a record alone can no longer
+// produce every key the encoder can emit (ADR-0033 §3).
 func TestFullRecordEmitsFrozenKeySet(t *testing.T) {
-	got := attributeKeys(attributesOf(t, encodeOne(t, fullRecord()), "attributes"))
+	got := attributeKeys(attributesOf(t, encodeOneLabelled(t, fullRecord(), testLabels()), "attributes"))
 	if !slices.Equal(got, frozenSpanAttributeKeys) {
 		t.Fatalf("span attribute keys = %v, frozen set = %v", got, frozenSpanAttributeKeys)
 	}
@@ -646,7 +680,7 @@ func TestEncodeOmitsBuiltinTools(t *testing.T) {
 	builtin.Kind = record.KindBuiltinTool
 	builtin.Name = "Bash"
 
-	payload, dropped, err := Encode([]record.Record{builtin, fullRecord()})
+	payload, dropped, err := Encode([]record.Record{builtin, fullRecord()}, nil)
 	if err != nil {
 		t.Fatalf("Encode() error = %v", err)
 	}
@@ -756,7 +790,7 @@ func TestSchemaVersionOnEverySpan(t *testing.T) {
 	denied.Outcome = ptr(record.OutcomeDeniedUser)
 	denied.DurationMS = nil
 
-	payload, dropped, err := Encode([]record.Record{validRecord(), fullRecord(), denied})
+	payload, dropped, err := Encode([]record.Record{validRecord(), fullRecord(), denied}, nil)
 	if err != nil {
 		t.Fatalf("Encode() error = %v", err)
 	}
@@ -809,7 +843,7 @@ func TestOutcomeStringSurvivesDenial(t *testing.T) {
 }
 
 func TestResourceAttributesAreFrozen(t *testing.T) {
-	payload, _, err := Encode([]record.Record{fullRecord()})
+	payload, _, err := Encode([]record.Record{fullRecord()}, nil)
 	if err != nil {
 		t.Fatalf("Encode() error = %v", err)
 	}
@@ -832,7 +866,7 @@ func TestEnvelopeShape(t *testing.T) {
 	invalid.SchemaVersion = 99
 	records := []record.Record{validRecord(), invalid, fullRecord()}
 
-	payload, dropped, err := Encode(records)
+	payload, dropped, err := Encode(records, nil)
 	if err != nil {
 		t.Fatalf("Encode() error = %v", err)
 	}
@@ -946,7 +980,7 @@ func TestHostileIdentifiersNeverReachTheWire(t *testing.T) {
 					t.Fatalf("a path-shaped value was accepted into %s", field.name)
 				}
 
-				payload, dropped, err := Encode([]record.Record{r})
+				payload, dropped, err := Encode([]record.Record{r}, nil)
 				if err != nil {
 					t.Fatalf("Encode() error = %v", err)
 				}
@@ -1052,7 +1086,7 @@ func walkStrings(t *testing.T, payload []byte) []string {
 func TestEveryEmittedStringIsAllowlisted(t *testing.T) {
 	for name, r := range map[string]record.Record{"fullRecord": fullRecord(), "validRecord": validRecord()} {
 		t.Run(name, func(t *testing.T) {
-			payload, dropped, err := Encode([]record.Record{r})
+			payload, dropped, err := Encode([]record.Record{r}, nil)
 			if err != nil {
 				t.Fatalf("Encode() error = %v", err)
 			}
@@ -1072,7 +1106,7 @@ func TestTranscriptKeysAreAbsent(t *testing.T) {
 	}
 	for name, batch := range batches {
 		t.Run(name, func(t *testing.T) {
-			payload, _, err := Encode(batch)
+			payload, _, err := Encode(batch, nil)
 			if err != nil {
 				t.Fatalf("Encode() error = %v", err)
 			}
@@ -1102,7 +1136,7 @@ func TestPayloadHasNoPathSeparator(t *testing.T) {
 	}
 	for name, batch := range batches {
 		t.Run(name, func(t *testing.T) {
-			payload, _, err := Encode(batch)
+			payload, _, err := Encode(batch, nil)
 			if err != nil {
 				t.Fatalf("Encode() error = %v", err)
 			}
@@ -1143,12 +1177,12 @@ func goldenBatch() []record.Record {
 // intermittently, which is the worst way for it to break.
 func TestEncodeIsDeterministic(t *testing.T) {
 	records := goldenBatch()
-	first, _, err := Encode(records)
+	first, _, err := Encode(records, nil)
 	if err != nil {
 		t.Fatalf("Encode() first error = %v", err)
 	}
 	for i := range 32 {
-		next, _, err := Encode(records)
+		next, _, err := Encode(records, nil)
 		if err != nil {
 			t.Fatalf("Encode() run %d error = %v", i, err)
 		}
@@ -1165,7 +1199,7 @@ func TestEncodeIsDeterministic(t *testing.T) {
 // own testdata/ — not the repo-root testdata/, which AGENTS.md reserves for
 // harness fixtures captured through the redaction tooling.
 func TestGoldenPayload(t *testing.T) {
-	payload, dropped, err := Encode(goldenBatch())
+	payload, dropped, err := Encode(goldenBatch(), testLabels())
 	if err != nil {
 		t.Fatalf("Encode() error = %v", err)
 	}
@@ -1202,7 +1236,7 @@ func TestEncodeDropsInvalidRecord(t *testing.T) {
 	invalid := validRecord()
 	invalid.SchemaVersion = 99
 
-	payload, dropped, err := Encode([]record.Record{invalid})
+	payload, dropped, err := Encode([]record.Record{invalid}, nil)
 	if err != nil {
 		t.Fatalf("Encode() error = %v", err)
 	}

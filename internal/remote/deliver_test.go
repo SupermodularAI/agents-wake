@@ -613,7 +613,7 @@ func TestRequestCarriesTheRequiredHeadersAndGzippedBody(t *testing.T) {
 	// The body is the encoder's output for exactly these records and nothing
 	// else: one serialiser, no second projection built at delivery time
 	// (ADR-0027).
-	expected, dropped, err := Encode(testRecords(0, 3))
+	expected, dropped, err := Encode(testRecords(0, 3), nil)
 	if err != nil {
 		t.Fatalf("Encode() error = %v", err)
 	}

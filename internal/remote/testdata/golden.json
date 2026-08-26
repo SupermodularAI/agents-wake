@@ -81,6 +81,12 @@
                   }
                 },
                 {
+                  "key": "wake.repo_label",
+                  "value": {
+                    "stringValue": "agents-wake"
+                  }
+                },
+                {
                   "key": "wake.package",
                   "value": {
                     "stringValue": "atlassian"
@@ -214,6 +220,12 @@
                   }
                 },
                 {
+                  "key": "wake.repo_label",
+                  "value": {
+                    "stringValue": "agents-wake"
+                  }
+                },
+                {
                   "key": "wake.invoker",
                   "value": {
                     "stringValue": "model"
@@ -284,6 +296,12 @@
                   "key": "wake.repo",
                   "value": {
                     "stringValue": "0123456789abcdef0123456789abcdef"
+                  }
+                },
+                {
+                  "key": "wake.repo_label",
+                  "value": {
+                    "stringValue": "agents-wake"
                   }
                 },
                 {

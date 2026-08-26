@@ -66,9 +66,19 @@ func PreviewFlush(p config.Paths) (Payloads, error) {
 		return Payloads{}, err
 	}
 
+	// The same resolution the real flush performs, through the same exported
+	// function, because "--dry-run prints the exact bytes a flush would send"
+	// (ADR-0030) is only true if the labels are resolved identically. Deliberately
+	// not duplicated logic: config.ProjectLabels is the single answer, and
+	// TestPreviewAndFlushAgreeOnTheRepoLabel pins the two callers together
+	// behaviourally, as TestPreviewFlushMatchesWhatFlushPosts already does for the
+	// watermark view. It reads and writes nothing, which is what keeps this
+	// function's "It never writes" true.
+	labels := RepoLabels(config.ProjectLabels(p))
+
 	var preview Payloads
 	for _, batch := range batches(entries) {
-		payload, dropped, encodeErr := Encode(recordsOf(batch))
+		payload, dropped, encodeErr := Encode(recordsOf(batch), labels)
 		if encodeErr != nil {
 			return Payloads{}, encodeErr
 		}
