@@ -349,7 +349,48 @@ type message struct {
 	// iterations, server_tool_use, service_tier, inference_geo, speed on a real
 	// transcript — reach nothing. Reading a payload is not persisting one.
 	Usage   json.RawMessage `json:"usage"`
-	Content []contentBlock  `json:"content"`
+	Content messageContent  `json:"content"`
+}
+
+// messageContent decodes message.content in both shapes real Claude Code writes: an
+// array of content blocks on an assistant turn, and a plain string on a user turn —
+// which is where a typed invocation's delimited command tag lives (plan §5.1,
+// ADR-0023's Context, ADR-0036 §3). A typed field for the array alone made the string
+// case a *json.UnmarshalTypeError, which cost the whole entry, so nothing could be
+// derived from the line the tag is on.
+//
+// The string is read and not retained: UnmarshalJSON keeps only the bounded name
+// commandTag extracted from it and discards the body, which is the discipline the Skill
+// tool_use path already applies to its args field (ADR-0007, reading is not
+// persisting). It reaches no record field, no error and no log line (plan §4.2).
+type messageContent struct {
+	blocks  []contentBlock
+	command string
+}
+
+// UnmarshalJSON reads whichever of the two shapes this content is.
+//
+// The default branch delegates to the block decode rather than returning an error of
+// its own, and that is load-bearing: it reproduces today's exact behaviour for every
+// shape except the string one — null succeeds with a nil slice, an object, a number and
+// a bool each produce the same *json.UnmarshalTypeError they did before — so
+// inspectable() and Result.Malformed are unchanged for all of them.
+func (c *messageContent) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return nil
+	}
+	if trimmed[0] == '"' {
+		var text string
+		if err := json.Unmarshal(trimmed, &text); err != nil {
+			return err
+		}
+		// Only the bounded name survives the decode. The body it came from is not
+		// assigned anywhere and goes out of scope with this call.
+		c.command = commandTag(text)
+		return nil
+	}
+	return json.Unmarshal(trimmed, &c.blocks)
 }
 
 type contentBlock struct {
@@ -425,14 +466,20 @@ func (entry transcriptEntry) valid() bool {
 
 // inspectable reports whether a decode that ended in err still left the entry worth
 // looking at. A type mismatch does: encoding/json records it and carries on with the
-// remaining keys, so a field this reader does not model arriving as some other type —
-// a message's content as a plain string, ordinary in real transcripts — costs the entry
-// but not the reader's view of the line. Anything else, a syntax error above all, leaves
-// nothing to look at.
+// remaining keys, so a field this reader does not model arriving as some other type
+// costs the entry but not the reader's view of the line. Anything else, a syntax error
+// above all, leaves nothing to look at.
+//
+// A message's content as a plain string used to be this comment's example and is no
+// longer a mismatch at all: messageContent models that shape, because it is the one a
+// typed invocation's command tag arrives on (ADR-0036 §3). What still reaches here is a
+// content at a type the reader models neither of — an object, a number, a bool — which
+// messageContent.UnmarshalJSON deliberately keeps costing the entry rather than
+// guessing at.
 //
 // Whether such an entry should be salvaged rather than rejected is a separate
-// question, and a bigger one than the staleness rule: today the reader derives nothing
-// from it. This only decides whether it may still conclude a session went silent.
+// question, and a bigger one than the staleness rule: the reader derives nothing from
+// one. This only decides whether it may still conclude a session went silent.
 func inspectable(err error) bool {
 	if err == nil {
 		return true
@@ -451,7 +498,7 @@ func inspectable(err error) bool {
 // rejects on a real transcript: bookkeeping lines carrying a title, a queued
 // operation or the last prompt's leaf, none of them a transcript entry at all.
 func (entry transcriptEntry) carriesToolResult() bool {
-	return slices.ContainsFunc(entry.Message.Content, func(block contentBlock) bool {
+	return slices.ContainsFunc(entry.Message.Content.blocks, func(block contentBlock) bool {
 		return block.Type == "tool_result"
 	})
 }

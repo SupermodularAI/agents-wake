@@ -208,7 +208,7 @@ func (s *Scan) Read(reader io.Reader) (Result, error) {
 			// reports for them (callSkipped), not a refusal.
 			return
 		}
-		for _, block := range entry.Message.Content {
+		for _, block := range entry.Message.Content.blocks {
 			switch block.Type {
 			case "tool_use":
 				// Every branch below runs after the full entry.call gate, so an early
