@@ -125,7 +125,7 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 	}
 
 	result := Result{}
-	pending := map[string]call{}
+	pending := map[callKey]call{}
 	sessions := &SessionState{}
 	// earlyResults holds a tool_result whose tool_use line has not been read yet.
 	// Claude Code writes the pair out of order in a small fraction of transcripts,
@@ -140,7 +140,11 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 	// started. It carries no consent-bearing and no free-text value (see
 	// callResult), so buffering one before the call's repository consent is known
 	// retains nothing.
-	earlyResults := map[string]callResult{}
+	//
+	// Keyed by the same (session, block id) pair pending is, for the same reason: a
+	// buffer that outlives one file must not let one session's result be matched
+	// against another session's call (ADR-0036, see callKey).
+	earlyResults := map[callKey]callResult{}
 	// skillsInvoked and skillCandidates are the session-grain extension of pending that
 	// ADR-0023 §2 asks for: which skills a session invoked through a Skill tool_use, and
 	// the attributed end_turn runs this read has not yet proved are duplicates of one.
@@ -190,7 +194,14 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 		// An id outside the token domain is not observed, matching call, which skips such
 		// an entry — so no call is buffered for a session this cannot judge. Observe
 		// ignores a zero timestamp, which is most of what these lines carry.
-		if sessionID, tokenErr := record.BoundedToken(entry.SessionID); tokenErr == nil {
+		//
+		// The bounded id is computed once here and reused for every buffer key below.
+		// An entry whose sessionId is outside the token domain buffers nothing at all —
+		// neither a call nor an early result — because there is no session to key it
+		// under. That loses nothing: such a tool_use is callSkipped for the same reason,
+		// and the skipped branch already discarded its early result unread.
+		sessionID, tokenErr := record.BoundedToken(entry.SessionID)
+		if tokenErr == nil {
 			sessions.Observe(0, sessionID, record.NormalizedTimestamp(entry.Timestamp), offset)
 		}
 		if unmarshalErr != nil || !entry.valid() {
@@ -206,7 +217,7 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 		observeSessionGrain(grains, entry, resolve)
 		switch event, status := entry.attributedSkillCandidate(resolve, names); status {
 		case callAccepted:
-			deferSkillCandidate(skillCandidates, skillRun{session: event.SessionID, name: event.Name}, event)
+			deferSkillCandidate(skillCandidates, skillRun{session: event.SessionID, name: event.Name}, 0, event)
 		case callRefused:
 			// Counted per refused run rather than per entry that would have collapsed
 			// into one: the collapse is a deduplication of records that do exist, and a
@@ -216,6 +227,12 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 			result.Refused++
 		case callSkipped:
 		}
+		if tokenErr != nil {
+			// No session to key a buffer under, so nothing from this entry can be
+			// buffered or matched. Its blocks are the same clean zero call already
+			// reports for them (callSkipped), not a refusal.
+			return
+		}
 		for _, block := range entry.Message.Content {
 			switch block.Type {
 			case "tool_use":
@@ -224,7 +241,7 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 				// refused and skipped branches discard the buffered result instead of
 				// leaving it to be matched by anything. They key the discard by the raw
 				// block id because pendingCall.id is empty on those paths.
-				pendingCall, status := entry.call(block, resolve, names)
+				pendingCall, status := entry.call(0, block, resolve, names)
 				switch status {
 				case callAccepted:
 					if pendingCall.kind == record.KindSkill {
@@ -239,20 +256,22 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 						// exists for that name either.
 						skillsInvoked[skillRun{session: pendingCall.sessionID, name: pendingCall.name}] = struct{}{}
 					}
-					if early, terminated := earlyResults[pendingCall.id]; terminated {
-						delete(earlyResults, pendingCall.id)
+					key := callKey{session: pendingCall.sessionID, id: pendingCall.id}
+					if early, terminated := earlyResults[key]; terminated {
+						delete(earlyResults, key)
 						result.Records = append(result.Records, pendingCall.complete(early))
 					} else {
-						pending[pendingCall.id] = pendingCall
+						pending[key] = pendingCall
 					}
 				case callRefused:
 					result.Refused++
-					delete(earlyResults, block.ID)
+					delete(earlyResults, callKey{session: sessionID, id: block.ID})
 				case callSkipped:
-					delete(earlyResults, block.ID)
+					delete(earlyResults, callKey{session: sessionID, id: block.ID})
 				}
 			case "tool_result":
-				pendingCall, open := pending[block.ToolUseID]
+				key := callKey{session: sessionID, id: block.ToolUseID}
+				pendingCall, open := pending[key]
 				if !open {
 					// The tool_use line has not been read yet, or this id was already
 					// completed, skipped or refused. Retain the first result per id and
@@ -261,12 +280,12 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 					// record at all — there is no name, kind, invoker or consented repo to
 					// build one from, and only a terminal event may be emitted (ADR-0015,
 					// ADR-0007).
-					if _, seen := earlyResults[block.ToolUseID]; !seen {
-						earlyResults[block.ToolUseID] = resultOf(entry, block)
+					if _, seen := earlyResults[key]; !seen {
+						earlyResults[key] = resultOf(entry, block)
 					}
 					continue
 				}
-				delete(pending, block.ToolUseID)
+				delete(pending, key)
 				result.Records = append(result.Records, pendingCall.complete(resultOf(entry, block)))
 			}
 		}
@@ -314,7 +333,9 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 		judged = Staleness{}
 	}
 	interrupted := resolveStaleCalls(pending, sessions, judged)
-	result.Records = append(result.Records, interrupted...)
+	for _, derived := range interrupted {
+		result.Records = append(result.Records, derived.event)
+	}
 	result.Interrupted = len(interrupted)
 	result.Pending = len(pending)
 	// judged, not stale: a read that could not rule out one of its lines may not
@@ -323,7 +344,9 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 	// away). The cost is deferral to a later scan, which ADR-0023's Consequences
 	// already name as this record's latency profile.
 	fallbacks, ambiguous := resolveSessionSkills(skillCandidates, skillsInvoked, sessions, judged)
-	result.Records = append(result.Records, fallbacks...)
+	for _, derived := range fallbacks {
+		result.Records = append(result.Records, derived.event)
+	}
 	result.AmbiguousSkillRuns = ambiguous
 	result.OpenSessions = sessions.OpenSessions(judged)
 	if open, offset := sessions.SourceFloor(0, judged); open {
@@ -366,7 +389,12 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 // iteration order is randomised and two scans of one transcript have to produce
 // byte-identical store contents. The key is the chosen candidate's own (timestamp,
 // event id), a total order because one transcript entry yields at most one candidate.
-func resolveSessionSkills(buffer map[skillRun]skillCandidate, invoked map[skillRun]struct{}, sessions *SessionState, stale Staleness) ([]record.Record, int) {
+//
+// It returns derivations rather than bare records so each can be credited to the
+// source it came from. What the function decides is unchanged: the closed gate, the
+// order, the matched-drop and the extra accounting are the same as before ADR-0036
+// widened the buffer from one file to one walk (ADR-0036 §4).
+func resolveSessionSkills(buffer map[skillRun]skillCandidate, invoked map[skillRun]struct{}, sessions *SessionState, stale Staleness) ([]derivation, int) {
 	resolved := make([]skillRun, 0, len(buffer))
 	for key := range buffer {
 		if sessions.Closed(key.session, stale) {
@@ -377,7 +405,7 @@ func resolveSessionSkills(buffer map[skillRun]skillCandidate, invoked map[skillR
 		left, right := buffer[a].chosen, buffer[b].chosen
 		return cmp.Or(left.Timestamp.Compare(right.Timestamp), cmp.Compare(string(left.EventID), string(right.EventID)))
 	})
-	records := make([]record.Record, 0, len(resolved))
+	records := make([]derivation, 0, len(resolved))
 	ambiguous := 0
 	for _, key := range resolved {
 		candidate := buffer[key]
@@ -385,7 +413,7 @@ func resolveSessionSkills(buffer map[skillRun]skillCandidate, invoked map[skillR
 		if _, matched := invoked[key]; matched {
 			continue
 		}
-		records = append(records, candidate.chosen)
+		records = append(records, derivation{event: candidate.chosen, source: candidate.source})
 		ambiguous += candidate.extra
 	}
 	return records, ambiguous
@@ -403,23 +431,31 @@ func resolveSessionSkills(buffer map[skillRun]skillCandidate, invoked map[skillR
 //
 // The order is sorted rather than the map's: iteration order is randomised, and two
 // scans of one transcript have to produce byte-identical store contents. The key is
-// the call's own tool_use timestamp, with the block id breaking a tie — not the
-// line's position in the file, which the buffer does not retain. That is a total
-// order, because the block id is unique per call: pending is keyed by it.
-func resolveStaleCalls(pending map[string]call, sessions *SessionState, stale Staleness) []record.Record {
-	resolved := make([]string, 0, len(pending))
-	for id, buffered := range pending {
+// the call's own tool_use timestamp, with the session id and then the block id
+// breaking a tie — not the line's position in the file, which the buffer does not
+// retain. The tie-break is the buffer's whole key, which is what keeps the order
+// total now that the buffer is keyed by (session, block id): a block id alone is
+// unique per call inside one file but not across a walk. That is ADR-0004
+// determinism under a wider key, not a change to what this function decides.
+func resolveStaleCalls(pending map[callKey]call, sessions *SessionState, stale Staleness) []derivation {
+	resolved := make([]callKey, 0, len(pending))
+	for key, buffered := range pending {
 		if sessions.Closed(buffered.sessionID, stale) {
-			resolved = append(resolved, id)
+			resolved = append(resolved, key)
 		}
 	}
-	slices.SortFunc(resolved, func(a, b string) int {
-		return cmp.Or(pending[a].timestamp.Compare(pending[b].timestamp), cmp.Compare(a, b))
+	slices.SortFunc(resolved, func(a, b callKey) int {
+		return cmp.Or(
+			pending[a].timestamp.Compare(pending[b].timestamp),
+			cmp.Compare(a.session, b.session),
+			cmp.Compare(a.id, b.id),
+		)
 	})
-	records := make([]record.Record, 0, len(resolved))
-	for _, id := range resolved {
-		records = append(records, pending[id].interrupted())
-		delete(pending, id)
+	records := make([]derivation, 0, len(resolved))
+	for _, key := range resolved {
+		buffered := pending[key]
+		records = append(records, derivation{event: buffered.interrupted(), source: buffered.source})
+		delete(pending, key)
 	}
 	return records
 }
@@ -624,11 +660,16 @@ type skillRun struct {
 // allowlisted fields — the record type is the allowlist (ADR-0007).
 type skillCandidate struct {
 	chosen record.Record
+	// source is the ordinal of the source chosen was read from. It moves with chosen
+	// so the credited source is as order-independent as the record itself; it is
+	// never persisted.
+	source int
 	extra  int
 }
 
 // deferSkillCandidate folds one candidate into the buffer for its skillRun, keeping
-// the earliest by (timestamp, event id) and counting the rest.
+// the earliest by (timestamp, event id) and counting the rest. source is the ordinal
+// of the source the candidate was read from and travels with the chosen record.
 //
 // Earliest by a total order over values the source event supplies, never by arrival:
 // nothing in the transcript format promises the entries are ordered — the reason
@@ -636,22 +677,54 @@ type skillCandidate struct {
 // fold would let line order decide which id and timestamp the one emitted record
 // carries, while two scans of one transcript have to produce byte-identical store
 // contents (ADR-0004). The order is total because one entry yields at most one
-// candidate, so no two candidates share an event id.
-func deferSkillCandidate(buffer map[skillRun]skillCandidate, key skillRun, event record.Record) {
+// candidate, so no two candidates share an event id. After ADR-0036 the buffer spans
+// a walk, so that same fold is now what makes the result independent of the order the
+// walk visited the sources in.
+func deferSkillCandidate(buffer map[skillRun]skillCandidate, key skillRun, source int, event record.Record) {
 	current, seen := buffer[key]
 	if !seen {
-		buffer[key] = skillCandidate{chosen: event}
+		buffer[key] = skillCandidate{chosen: event, source: source}
 		return
 	}
 	current.extra++
 	if cmp.Or(event.Timestamp.Compare(current.chosen.Timestamp), cmp.Compare(string(event.EventID), string(current.chosen.EventID))) < 0 {
 		current.chosen = event
+		current.source = source
 	}
 	buffer[key] = current
 }
 
+// callKey identifies one buffered call by the session it belongs to and its
+// tool_use block id.
+//
+// The session half is not decoration. Keyed on the block id alone, a tool_result
+// in one session's source could terminate a call from another's — a cross-session
+// pairing ADR-0002's invocation grain and ADR-0034's per-session-id delimitation
+// both forbid. That was safe only while one buffer's lifetime was one file; after
+// ADR-0036 the buffer spans a walk, and block ids are unique per call and not per
+// machine.
+type callKey struct {
+	session record.Identifier
+	id      string
+}
+
+// derivation is one record the post-walk resolution produced and the ordinal of
+// the source whose lines it came from.
+//
+// The ordinal exists only so a scan can tell a source that produced nothing from
+// one whose contribution resolved after the walk ended — the distinction doctor's
+// Skipped counter rests on. It is an ordinal, never a path (ADR-0007, plan §4.2).
+type derivation struct {
+	event  record.Record
+	source int
+}
+
 type call struct {
-	id          string
+	id string
+	// source is the ordinal of the source this call's tool_use line was read from.
+	// It exists so a record the post-walk resolution derives can be credited back to
+	// the source that fed it; it is never persisted.
+	source      int
 	eventID     record.Hash
 	sessionID   record.Identifier
 	timestamp   time.Time
@@ -683,7 +756,7 @@ const (
 	callRefused
 )
 
-func (entry transcriptEntry) call(block contentBlock, resolve Resolver, names record.Namer) (call, callStatus) {
+func (entry transcriptEntry) call(source int, block contentBlock, resolve Resolver, names record.Namer) (call, callStatus) {
 	id, err := record.BoundedToken(block.ID)
 	if err != nil {
 		return call{}, callSkipped
@@ -718,6 +791,7 @@ func (entry transcriptEntry) call(block contentBlock, resolve Resolver, names re
 
 	derived := call{
 		id:         string(id),
+		source:     source,
 		eventID:    record.DeriveEventID(harness, callSourceEvent(entry.UUID, id)),
 		sessionID:  sessionID,
 		timestamp:  timestamp,
