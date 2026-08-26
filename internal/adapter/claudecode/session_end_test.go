@@ -86,7 +86,7 @@ func onlySessionEnd(t *testing.T, result Result) record.Record {
 func TestReadDerivesOneSessionEndForAFinishedSession(t *testing.T) {
 	input := assistantLine("entry-1", "session-1", "2026-08-13T12:00:00Z", "msg_1", realUsage)
 
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{}, finished)
+	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, Staleness{}, finished)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -141,7 +141,7 @@ func TestReadDerivesNoSessionEndForAnOpenSession(t *testing.T) {
 
 	for name, idle := range cases {
 		t.Run(name, func(t *testing.T) {
-			result, err := Read(strings.NewReader(input), resolver, names, Staleness{}, idle)
+			result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, Staleness{}, idle)
 			if err != nil {
 				t.Fatalf("Read() error = %v", err)
 			}
@@ -167,7 +167,7 @@ func TestReadDerivesNoSessionEndWithoutAThreshold(t *testing.T) {
 
 	for name, idle := range cases {
 		t.Run(name, func(t *testing.T) {
-			result, err := Read(strings.NewReader(input), resolver, names, Staleness{}, idle)
+			result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, Staleness{}, idle)
 			if err != nil {
 				t.Fatalf("Read() error = %v", err)
 			}
@@ -187,7 +187,7 @@ func TestReadDerivesASessionEndForASessionWithNoInvocations(t *testing.T) {
 		assistantLine("entry-2", "session-1", "2026-08-13T12:00:05Z", "msg_1", realUsage),
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{}, finished)
+	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, Staleness{}, finished)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -211,7 +211,7 @@ func TestSessionEndTimestampIsLastConsentedActivity(t *testing.T) {
 		assistantLine("entry-3", "session-1", "2026-08-13T12:02:00Z", "msg_3", "null"),
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{}, finished)
+	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, Staleness{}, finished)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -290,7 +290,7 @@ func TestSessionEndIDDoesNotCollideWithACallOrATerminalRun(t *testing.T) {
 		`{"uuid":"session-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","entrypoint":"cli","attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, closedSession, finished)
+	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, closedSession, finished)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -316,7 +316,7 @@ func TestReadCountsToolCallsAndBuiltinToolCallsForASession(t *testing.T) {
 		toolCallLines("b1", "session-b", "2026-08-13T12:00:04Z", "call-4", "Bash", `{}`),
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{}, finished)
+	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, Staleness{}, finished)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -345,7 +345,7 @@ func TestReadCountsToolCallsAndBuiltinToolCallsForASession(t *testing.T) {
 func TestReadCountsAShapeAFallbackAsAToolCall(t *testing.T) {
 	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","entrypoint":"cli","attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`
 
-	result, err := Read(strings.NewReader(input), resolver, names, closedSession, finished)
+	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, closedSession, finished)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -359,7 +359,7 @@ func TestReadCountsAShapeAFallbackAsAToolCall(t *testing.T) {
 // scan.stale_call_timeout has not elapsed is simply not in it. There is no
 // waiting, no backfill and no reconciliation pass.
 func TestReadExcludesAPendingCallFromTheAggregate(t *testing.T) {
-	result, err := Read(strings.NewReader(unterminatedCall), resolver, names, Staleness{}, finished)
+	result, err := Read(strings.NewReader(unterminatedCall), resolver, names, installedPrimitives, Staleness{}, finished)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -526,7 +526,7 @@ func TestReadDerivesNoSessionEndOutsideConsent(t *testing.T) {
 
 	for name, resolve := range cases {
 		t.Run(name, func(t *testing.T) {
-			result, err := Read(strings.NewReader(input), resolve, names, Staleness{}, finished)
+			result, err := Read(strings.NewReader(input), resolve, names, installedPrimitives, Staleness{}, finished)
 			if err != nil {
 				t.Fatalf("Read() error = %v", err)
 			}
@@ -550,7 +550,7 @@ func TestSessionEndUsesOnlyConsentedActivity(t *testing.T) {
 	}, "\n")
 
 	stillWriting := Idleness{Timeout: sessionIdleTimeout, Now: callInstant.Add(2 * time.Hour)}
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{}, stillWriting)
+	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, Staleness{}, stillWriting)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -582,7 +582,7 @@ func TestReadDerivesNoSessionEndWhenALineWasUnreadable(t *testing.T) {
 			input := assistantLine("entry-1", "session-1", "2026-08-13T12:00:00Z", "msg_1", realUsage) +
 				"\n" + unreadable + "\n"
 
-			result, err := Read(strings.NewReader(input), resolver, names, closedSession, finished)
+			result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, closedSession, finished)
 			if err != nil {
 				t.Fatalf("Read() error = %v", err)
 			}
@@ -599,7 +599,7 @@ func TestReadDerivesNoSessionEndWhenALineWasUnreadable(t *testing.T) {
 func TestReadDerivesNoSessionEndWithNoMappableEntrypoint(t *testing.T) {
 	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","entrypoint":"sdk-ts","message":{"model":"sonnet","id":"msg_1","usage":` + realUsage + `,"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`
 
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{}, finished)
+	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, Staleness{}, finished)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -677,7 +677,7 @@ func TestReadRetainsNothingFromASessionEnd(t *testing.T) {
 			quoted(t, consentedPath), quoted(t, value), quoted(t, "swordfish-"+value),
 			quoted(t, value), hostileUsage)
 
-		result, err := Read(strings.NewReader(transcript), resolver, names, closedSession, finished)
+		result, err := Read(strings.NewReader(transcript), resolver, names, installedPrimitives, closedSession, finished)
 		if err != nil {
 			t.Fatalf("Read() error = %v", err)
 		}
@@ -747,7 +747,7 @@ func TestSessionStateNeverFinishesABlindSession(t *testing.T) {
 // staleness rule unless a test asks for one.
 func mustRead(t *testing.T, input string, idle Idleness) Result {
 	t.Helper()
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{}, idle)
+	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, Staleness{}, idle)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}

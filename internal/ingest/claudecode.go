@@ -42,6 +42,23 @@ type Result struct {
 	// It arrives on ClaudeCodeScan.Close only, never on Read: a subagent run is judged
 	// once its session has closed, and one source's read has no answer to give.
 	RefusedSubagentRuns int
+	// SkippedTypedInvocations is the reader's count of typed invocations whose command
+	// tag named something this machine has no primitive for: the injected known-name set
+	// does not hold it, holds it under a kind ADR-0036 §1's precedence row does not
+	// cover, or the name/scope grammar refuses it.
+	//
+	// It is a skip and not lost collection. A typed CLI built-in like /clear was never
+	// Wake's to collect, so nothing was lost, and ADR-0036 §3 settles it on a counter of
+	// its own for that reason. Activation folds it into
+	// health.Scan.SkippedTypedInvocations, which doctor renders as its own line and
+	// which deliberately does not put integration state in "collects nothing" — every
+	// scan re-reads the whole history and re-skips the same built-ins, so a state word
+	// following it could never change again (see claudecode.Result, health.Diagnose).
+	//
+	// It is a per-source counter, so Read reports it complete and Close leaves it zero —
+	// the opposite shape from RefusedSubagentRuns. A tag is judged entirely within the
+	// line it is on, so the walk has no second half to contribute.
+	SkippedTypedInvocations int
 	// Interrupted is the reader's count of calls that resolved to outcome interrupted
 	// because their session went quiet past the staleness threshold (ADR-0015). Those
 	// records are terminal and are also counted by Parsed and Written; this counter
@@ -77,6 +94,12 @@ type Result struct {
 // names is the key a scoped primitive reference is digested under, and travels
 // with the resolver because both come from the same consent boundary (ADR-0020).
 //
+// installed is the set of primitive names this machine has. ADR-0036 §3 admits a
+// name read from a command tag only if the machine has a primitive under it; that
+// check needs the installed inventory, and derivation may not touch the filesystem
+// (ADR-0019 §1), so the answer is injected as data. This package does not read it
+// either — it only forwards it.
+//
 // stale carries ADR-0015's staleness threshold and idle carries ADR-0034's
 // session-end inference threshold, both from the caller that owns config; this
 // package does not read config (plan §6.2). They are two thresholds answering two
@@ -87,8 +110,8 @@ type Result struct {
 // reading a set of transcripts that may share a session id must drive a
 // ClaudeCodeScan instead, or each file's resolution will judge that session from a
 // partial view (ADR-0036 §Consequences).
-func ClaudeCode(reader io.Reader, resolve claudecode.Resolver, names record.Namer, stale claudecode.Staleness, idle claudecode.Idleness, destination *store.Store) (Result, error) {
-	derived, err := claudecode.Read(reader, resolve, names, stale, idle)
+func ClaudeCode(reader io.Reader, resolve claudecode.Resolver, names record.Namer, installed claudecode.Installed, stale claudecode.Staleness, idle claudecode.Idleness, destination *store.Store) (Result, error) {
+	derived, err := claudecode.Read(reader, resolve, names, installed, stale, idle)
 	if err != nil {
 		return Result{}, err
 	}
@@ -113,12 +136,13 @@ type ClaudeCodeScan struct {
 
 // NewClaudeCodeScan opens a scan over one walk. Its arguments are ClaudeCode's,
 // with the same meanings and the same reasons: consent and the scope key travel
-// together from one boundary (ADR-0020), and both thresholds arrive as values
-// because this package does not read config.
-func NewClaudeCodeScan(resolve claudecode.Resolver, names record.Namer, stale claudecode.Staleness,
-	idle claudecode.Idleness, destination *store.Store) *ClaudeCodeScan {
+// together from one boundary (ADR-0020), the installed-primitive set is injected as
+// data because derivation may not read the filesystem (ADR-0036 §3, ADR-0019 §1), and
+// both thresholds arrive as values because this package does not read config.
+func NewClaudeCodeScan(resolve claudecode.Resolver, names record.Namer, installed claudecode.Installed,
+	stale claudecode.Staleness, idle claudecode.Idleness, destination *store.Store) *ClaudeCodeScan {
 	return &ClaudeCodeScan{
-		scan:        claudecode.NewScan(resolve, names, stale, idle),
+		scan:        claudecode.NewScan(resolve, names, installed, stale, idle),
 		destination: destination,
 	}
 }
@@ -128,13 +152,15 @@ func NewClaudeCodeScan(resolve claudecode.Resolver, names record.Namer, stale cl
 //
 // Everything a session's resolution owes to the walk's other transcripts is
 // resolved by Close, so the counters this returns are the per-source ones only —
-// Parsed, Malformed, Refused and the write result. Pending, Interrupted,
-// AmbiguousSkillRuns, RefusedSubagentRuns and SkippedSources are zero here and are
-// answered by Close; a caller must not fold a zero from this call into a health
+// Parsed, Malformed, Refused, SkippedTypedInvocations and the write result. Pending,
+// Interrupted, AmbiguousSkillRuns, RefusedSubagentRuns and SkippedSources are zero here
+// and are answered by Close; a caller must not fold a zero from this call into a health
 // counter.
 //
-// Refused is complete here rather than half an answer: a subagent run's refusal has
-// its own counter on Close (see Result.RefusedSubagentRuns).
+// Refused and SkippedTypedInvocations are complete here rather than half an answer.
+// A subagent run's refusal has its own counter on Close instead (see
+// Result.RefusedSubagentRuns); a command tag is judged entirely within the line it is
+// on, so the walk adds nothing to it.
 func (s *ClaudeCodeScan) Read(reader io.Reader) (Result, error) {
 	derived, err := s.scan.Read(reader)
 	if err != nil {
@@ -150,7 +176,8 @@ func (s *ClaudeCodeScan) Read(reader io.Reader) (Result, error) {
 //
 // The counters that are only knowable now — Pending, Interrupted,
 // AmbiguousSkillRuns, SkippedSources — are the walk's, not any one source's, and
-// the caller folds these rather than the per-source zeros.
+// the caller folds these rather than the per-source zeros. SkippedTypedInvocations is
+// not among them and is zero here: it is per source and Read reports it whole.
 //
 // RefusedSubagentRuns is among them and arrives here only: a subagent transcript
 // declaring no usable name can be judged at this boundary and nowhere else, and it is
@@ -173,16 +200,17 @@ func persist(derived claudecode.Result, destination *store.Store) (Result, error
 		return Result{}, err
 	}
 	return Result{
-		Parsed:              len(derived.Records),
-		Malformed:           derived.Malformed,
-		Pending:             derived.Pending,
-		Refused:             derived.Refused,
-		RefusedSubagentRuns: derived.RefusedSubagentRuns,
-		Interrupted:         derived.Interrupted,
-		AmbiguousSkillRuns:  derived.AmbiguousSkillRuns,
-		SkippedSources:      derived.SkippedSources,
-		Written:             written.Written,
-		Duplicate:           written.Duplicate,
-		Dropped:             written.Dropped,
+		Parsed:                  len(derived.Records),
+		Malformed:               derived.Malformed,
+		Pending:                 derived.Pending,
+		Refused:                 derived.Refused,
+		RefusedSubagentRuns:     derived.RefusedSubagentRuns,
+		SkippedTypedInvocations: derived.SkippedTypedInvocations,
+		Interrupted:             derived.Interrupted,
+		AmbiguousSkillRuns:      derived.AmbiguousSkillRuns,
+		SkippedSources:          derived.SkippedSources,
+		Written:                 written.Written,
+		Duplicate:               written.Duplicate,
+		Dropped:                 written.Dropped,
 	}, nil
 }

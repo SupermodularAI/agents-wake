@@ -1017,12 +1017,21 @@ func deny(string, time.Time) (record.Hash, bool) { return "", false }
 // subkey of the per-machine salt (config.Repos.NameKey).
 var names = record.NewNamer([]byte("test scope key"))
 
+// installedPrimitives is what this package's tests treat the machine as having. It is
+// the third injected input, beside the resolver and the namer; a test about a name the
+// machine does not have passes a narrower Installed of its own.
+var installedPrimitives = NewInstalled([]InstalledPrimitive{
+	{Name: "pr-review", Kind: record.KindSkill},
+	{Name: "run-sdlc", Kind: record.KindSkill},
+	{Name: "deploy", Kind: record.KindCommand},
+})
+
 // read is this file's entry point into Read for every test that says nothing about
 // session_end derivation. It passes a zero Idleness, which derives none — the same
 // safe default a caller that cannot read the threshold gets. A test about the
 // session grain calls Read directly with a real Idleness (see session_end_test.go).
 func read(source io.Reader, resolve Resolver, names record.Namer, stale Staleness) (Result, error) {
-	return Read(source, resolve, names, stale, Idleness{})
+	return Read(source, resolve, names, installedPrimitives, stale, Idleness{})
 }
 
 // quoted encodes value as a JSON string so a hostile value can be embedded in a
@@ -2208,7 +2217,7 @@ func TestMarshalledRecordsCarryNoSeparator(t *testing.T) {
 
 func assertNoSeparatorInRecords(t *testing.T, input string, stale Staleness, idle Idleness) {
 	t.Helper()
-	result, err := Read(strings.NewReader(input), resolver, names, stale, idle)
+	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, stale, idle)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}

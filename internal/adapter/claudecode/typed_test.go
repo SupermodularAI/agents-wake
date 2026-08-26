@@ -1,6 +1,7 @@
 package claudecode
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -176,5 +177,208 @@ func TestTypedSourceEventIsDisjointFromEveryOtherIDShape(t *testing.T) {
 	}
 	if strings.ContainsAny(string(typed), callSeparator+sessionSeparator+subagentSeparator) {
 		t.Fatalf("typedSourceEvent(%q) = %q, want no other shape's separator", uuid, typed)
+	}
+}
+
+// typedEntry is an entry that satisfies every gate typedInvocation applies, so a test
+// can break exactly one of them and say which.
+func typedEntry(tag string) transcriptEntry {
+	return transcriptEntry{
+		UUID:       "entry-1",
+		SessionID:  "session-1",
+		CWD:        consentedPath,
+		Timestamp:  callInstant,
+		Version:    "1.0.0",
+		Entrypoint: "cli",
+		Message:    message{Model: "sonnet", Content: messageContent{command: tag}},
+	}
+}
+
+// A subagent's own turn inherits the parent's message body, so it can carry the
+// parent's tag without being a typed invocation at all. It is dropped on sight, the
+// same rule attributedSkillCandidate applies (ADR-0023 §1).
+func TestTypedInvocationSkipsASidechainCopy(t *testing.T) {
+	entry := typedEntry("pr-review")
+	entry.IsSidechain = true
+
+	if _, status := entry.typedInvocation(resolver, names, installedPrimitives); status != tagAbsent {
+		t.Fatalf("typedInvocation() status = %v, want tagAbsent", status)
+	}
+}
+
+func TestTypedInvocationSkipsAnEntryWithNoTag(t *testing.T) {
+	if _, status := typedEntry("").typedInvocation(resolver, names, installedPrimitives); status != tagAbsent {
+		t.Fatalf("typedInvocation() status = %v, want tagAbsent", status)
+	}
+}
+
+// Outside consent is outside collection, not lost from it, so it must not read as a
+// skipped invocation either — a clean zero all the way through (ADR-0024, ADR-0025).
+func TestTypedInvocationSkipsAnUnconsentedDirectory(t *testing.T) {
+	if _, status := typedEntry("pr-review").typedInvocation(deny, names, installedPrimitives); status != tagAbsent {
+		t.Fatalf("typedInvocation() status = %v, want tagAbsent", status)
+	}
+}
+
+// The name grammar and the installed miss share one counter: a name the grammar
+// refuses also fails ADR-0036 §3's gate, so there is one answer to give and it is the
+// skip, never a refusal and never a record.
+func TestTypedInvocationCountsANameTheGrammarRefuses(t *testing.T) {
+	for _, value := range hostileValues {
+		event, status := typedEntry(value).typedInvocation(resolver, names, installedPrimitives)
+		if status != tagNotInstalled {
+			t.Fatalf("typedInvocation(%q) status = %v, want tagNotInstalled", value, status)
+		}
+		if event.Name != "" || event.EventID != "" {
+			t.Fatalf("typedInvocation(%q) built a record: %+v", value, event)
+		}
+	}
+}
+
+// ADR-0036 §3: a tag naming something the machine has no primitive for is a skip. A
+// typed CLI built-in like /clear was never Wake's to collect, so nothing was lost.
+func TestTypedInvocationCountsANameTheMachineDoesNotHave(t *testing.T) {
+	installed := NewInstalled([]InstalledPrimitive{{Name: "pr-review", Kind: record.KindSkill}})
+
+	if _, status := typedEntry("clear").typedInvocation(resolver, names, installed); status != tagNotInstalled {
+		t.Fatalf("typedInvocation() status = %v, want tagNotInstalled", status)
+	}
+}
+
+// D3: only a skill or a command is admissible, which is the whole of ADR-0036 §1's row
+// for this canonical source. A subagent's canonical source is its own transcript and it
+// gets Invoker: model there (§2), so admitting one here would report one run twice under
+// two invokers.
+func TestTypedInvocationCountsANameInstalledAsAnotherKind(t *testing.T) {
+	kinds := []record.Kind{record.KindSubagent, record.KindMCPTool, record.KindPlugin, record.KindHook}
+	for _, kind := range kinds {
+		installed := NewInstalled([]InstalledPrimitive{{Name: "explorer", Kind: kind}})
+		if _, status := typedEntry("explorer").typedInvocation(resolver, names, installed); status != tagNotInstalled {
+			t.Fatalf("typedInvocation() status for kind %q = %v, want tagNotInstalled", kind, status)
+		}
+	}
+}
+
+// The one gate that counts as a refusal, and it is last for that reason: an entrypoint
+// outside Wake's vocabulary loses an invocation this machine had a primitive for and
+// this repository had consented to. That is the drift signal RefusedCalls exists for.
+func TestTypedInvocationRefusesAnUnmappedEntrypoint(t *testing.T) {
+	entry := typedEntry("pr-review")
+	entry.Entrypoint = "sdk-ts"
+
+	if _, status := entry.typedInvocation(resolver, names, installedPrimitives); status != tagRefused {
+		t.Fatalf("typedInvocation() status = %v, want tagRefused", status)
+	}
+}
+
+// The record's Kind follows the machine's inventory, which is what gives
+// record.KindCommand its first producer. Outcome stays nil: a typed invocation has no
+// completion boundary and a synthesized ok is forbidden (ADR-0005, ADR-0023 §3).
+func TestTypedInvocationDerivesASkillAndACommand(t *testing.T) {
+	for _, kind := range []record.Kind{record.KindSkill, record.KindCommand} {
+		t.Run(string(kind), func(t *testing.T) {
+			installed := NewInstalled([]InstalledPrimitive{{Name: "pr-review", Kind: kind}})
+			event, status := typedEntry("pr-review").typedInvocation(resolver, names, installed)
+			if status != tagAccepted {
+				t.Fatalf("typedInvocation() status = %v, want tagAccepted", status)
+			}
+			if event.Kind != kind {
+				t.Errorf("Kind = %q, want %q", event.Kind, kind)
+			}
+			if event.Name != "pr-review" || event.Invoker != record.InvokerUser || event.Outcome != nil {
+				t.Errorf("record = %+v", event)
+			}
+			if event.Repo != repo || event.SessionID != "session-1" || event.Harness != harness {
+				t.Errorf("record = %+v", event)
+			}
+			if event.HarnessVersion != "1.0.0" || event.Model != "sonnet" || event.Entrypoint != record.EntrypointCLI {
+				t.Errorf("record = %+v", event)
+			}
+			if want := record.DeriveEventID(harness, record.Identifier("entry-1"+typedSeparator+typedSequence)); event.EventID != want {
+				t.Errorf("EventID = %q, want %q", event.EventID, want)
+			}
+			if err := record.Validate(event); err != nil {
+				t.Errorf("Validate() error = %v", err)
+			}
+		})
+	}
+}
+
+// One hostile entry can satisfy both derivation paths at once. The two are logically
+// different records, so they must not land on one id — ADR-0015 rejects upsert, so the
+// first one written would win forever (D4).
+func TestTypedInvocationIDDoesNotCollideWithTheAttributedRunID(t *testing.T) {
+	entry := typedEntry("pr-review")
+	entry.AttributionSkill = "pr-review"
+	entry.Message.StopReason = "end_turn"
+
+	typed, typedStatus := entry.typedInvocation(resolver, names, installedPrimitives)
+	if typedStatus != tagAccepted {
+		t.Fatalf("typedInvocation() status = %v, want tagAccepted", typedStatus)
+	}
+	attributed, attributedStatus := entry.attributedSkillCandidate(resolver, names)
+	if attributedStatus != callAccepted {
+		t.Fatalf("attributedSkillCandidate() status = %v, want callAccepted", attributedStatus)
+	}
+	if typed.EventID == attributed.EventID {
+		t.Fatalf("both paths derived event id %q from one entry", typed.EventID)
+	}
+}
+
+// typedTurn is one consented user turn whose message content is the plain string a
+// typed invocation arrives on, carrying the command tag for name.
+func typedTurn(uuid, name, at string) string {
+	return fmt.Sprintf(
+		`{"uuid":%q,"sessionId":"session-1","cwd":"/repo","timestamp":%q,"type":"user","message":{"role":"user","content":"<command-name>/%s</command-name>"}}`,
+		uuid, at, name,
+	)
+}
+
+// AC 1: ADR-0036 §3 counts a typed invocation once per occurrence, because two
+// occurrences are two invocations. ADR-0023 §4's collapse used to make three one.
+func TestReadDerivesOneRecordPerTypedOccurrence(t *testing.T) {
+	input := strings.Join([]string{
+		typedTurn("entry-1", "pr-review", "2026-08-13T12:00:00Z"),
+		typedTurn("entry-2", "pr-review", "2026-08-13T12:00:01Z"),
+		typedTurn("entry-3", "pr-review", "2026-08-13T12:00:02Z"),
+	}, "\n")
+
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 3 {
+		t.Fatalf("Read() records = %d, want 3: %+v", len(result.Records), result.Records)
+	}
+	if result.SkippedTypedInvocations != 0 || result.Malformed != 0 || result.Refused != 0 {
+		t.Errorf("Read() = %+v", result)
+	}
+	seen := map[record.Hash]struct{}{}
+	for _, event := range result.Records {
+		if event.Kind != record.KindSkill || event.Name != "pr-review" || event.Invoker != record.InvokerUser {
+			t.Errorf("record = %+v", event)
+		}
+		if _, repeated := seen[event.EventID]; repeated {
+			t.Errorf("event id %q derived twice", event.EventID)
+		}
+		seen[event.EventID] = struct{}{}
+	}
+}
+
+// AC 4: a tag naming something the machine has no primitive for yields no record and
+// is counted on its own counter — never on Refused, which would pin doctor to
+// "collects nothing" on every scan forever (ADR-0036 §3).
+func TestReadCountsATypedInvocationTheMachineDoesNotHave(t *testing.T) {
+	input := typedTurn("entry-1", "clear", "2026-08-13T12:00:00Z")
+
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 0 {
+		t.Fatalf("Read() records = %+v, want none", result.Records)
+	}
+	if result.SkippedTypedInvocations != 1 || result.Refused != 0 || result.Malformed != 0 {
+		t.Fatalf("Read() = %+v", result)
 	}
 }

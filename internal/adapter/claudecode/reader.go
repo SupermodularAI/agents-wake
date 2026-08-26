@@ -115,6 +115,28 @@ type Result struct {
 	// §4.2, ADR-0007). A run the tool_use/tool_result pair already described
 	// contributes nothing here: that run is not uncertain, it is covered.
 	AmbiguousSkillRuns int
+	// SkippedTypedInvocations counts typed invocations this scan read the command tag
+	// of and derived no record from, because the name it declared is not a primitive
+	// this machine has: the injected known-name set does not hold it, or holds it under
+	// a kind ADR-0036 §1's precedence row does not cover, or the name/scope grammar
+	// refuses it (ADR-0020).
+	//
+	// It is a skip and not a refusal, and that is ADR-0036 §3's own distinction: a typed
+	// CLI built-in like /clear was never Wake's to collect, so nothing was lost — and it
+	// is the common case, roughly 101 of 136 observed occurrences, not the edge. Routing
+	// it onto Refused would pin doctor to "collects nothing" on every scan forever while
+	// thousands of records are written.
+	//
+	// It is nonetheless counted rather than silent, because the known-name set is
+	// injected and therefore fallible: a name absent from it may be a built-in or may be
+	// a primitive since uninstalled or renamed, and nothing in the transcript tells the
+	// two apart. It deliberately does not move doctor's state word — same reasoning as
+	// RefusedSubagentRuns and ADR-0023's ambiguous skill run (see health.Diagnose).
+	//
+	// It carries no name, no session id and no transcript value — only how many times
+	// the question came up (plan §4.2, ADR-0007). Read reports it for the one source it
+	// read.
+	SkippedTypedInvocations int
 	// SkippedSources counts the sources this scan read that derived nothing, refused
 	// nothing, and had nothing attributed back to them by the post-walk resolution —
 	// most often because their working directory belongs to no consented repository.
@@ -151,6 +173,13 @@ type Resolver func(cwd string, at time.Time) (record.Hash, bool)
 // name for one on its own (ADR-0020); a Namer with no key drops those references
 // rather than persisting an unkeyed digest of a path.
 //
+// installed carries the set of primitive names this machine has. ADR-0036 §3 admits a
+// name read from a command tag only if the machine has a primitive under it, and that
+// answer lives on disk while derivation may not touch the filesystem (ADR-0019 §1) — so
+// it arrives as data, exactly as resolve and names do. Its zero value admits nothing,
+// which is what a caller that could not build an inventory must collect: no typed
+// invocation at all rather than every name it reads.
+//
 // stale carries ADR-0015's staleness rule (scan.stale_call_timeout and the scan's
 // clock) from the caller that owns config, so the threshold is never a constant
 // here. Its zero value buffers every unterminated call, which is what a caller that
@@ -167,8 +196,8 @@ type Resolver func(cwd string, at time.Time) (record.Hash, bool)
 // that may share a session id must use Scan instead: resolving each file on its own
 // closes a session another file shows running and reports one session_end per file
 // rather than one per session, permanently (ADR-0036 §Consequences).
-func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Staleness, idle Idleness) (Result, error) {
-	scan := NewScan(resolve, names, stale, idle)
+func Read(reader io.Reader, resolve Resolver, names record.Namer, installed Installed, stale Staleness, idle Idleness) (Result, error) {
+	scan := NewScan(resolve, names, installed, stale, idle)
 	first, err := scan.Read(reader)
 	if err != nil {
 		return Result{}, err
@@ -190,6 +219,9 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 	// A refused subagent run arrives on Close's own RefusedSubagentRuns and passes
 	// through untouched.
 	final.Refused += first.Refused
+	// Summed for the same defensive reason, though a typed invocation is judged entirely
+	// within the line it is on, so Close derives none of its own today.
+	final.SkippedTypedInvocations += first.SkippedTypedInvocations
 	return final, nil
 }
 

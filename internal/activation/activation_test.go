@@ -96,9 +96,9 @@ func TestInitWithoutFullNeverWalksHarnessHistory(t *testing.T) {
 	original := importHistory
 	t.Cleanup(func() { importHistory = original })
 	walks := 0
-	importHistory = func(repos *config.Repos, claudeDir string, destination *store.Store, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope, discover *boundaryDiscovery) (int, health.Scan, error) {
+	importHistory = func(repos *config.Repos, claudeDir string, destination *store.Store, installed claudecode.Installed, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope, discover *boundaryDiscovery) (int, health.Scan, error) {
 		walks++
-		return original(repos, claudeDir, destination, stale, idle, scope, discover)
+		return original(repos, claudeDir, destination, installed, stale, idle, scope, discover)
 	}
 
 	written, err := Init(paths, root, claudeDir, testExecutable(t), false)
@@ -1417,4 +1417,72 @@ func spoolEventIDs(t *testing.T, paths config.Paths) []string {
 	}
 	slices.Sort(ids)
 	return ids
+}
+
+// The end-to-end shape of ADR-0036 §3, on the real wiring: a tag naming a primitive the
+// machine has is collected, one naming a typed CLI built-in is counted on its own
+// counter, and neither reaches RefusedCalls or moves doctor's state word.
+//
+// The installed set arrives from the one discovery pass each ingesting command already
+// runs, which is what makes the /pr-review half work at all: the fixture installs the
+// skill under the temp claudeDir, so nothing outside t.TempDir() is read or written.
+//
+// Two assertions rather than one, and the negative one is the point. Folding this count
+// into RefusedCalls would pin every machine to "collects nothing" on every scan forever,
+// because the built-ins are re-skipped on every pass over the whole history.
+func TestIngestCountsATypedInvocationTheMachineDoesNotHave(t *testing.T) {
+	paths := testPaths(t)
+	claudeDir, root := inventoryFixture(t)
+	// The primitive the admissible tag names, installed globally inside the fixture's
+	// own claudeDir so discovery finds it there and nowhere else.
+	writeFixture(t, filepath.Join(claudeDir, "skills", "pr-review", "SKILL.md"), "# pr-review")
+	// One consented session carrying both shapes: an installed skill typed by a person,
+	// and a built-in that was never Wake's to collect.
+	lines := []string{
+		`{"uuid":"typed-1","sessionId":"session-typed","cwd":"` + root +
+			`","timestamp":"2026-08-13T12:00:00Z","version":"1.0.0","entrypoint":"cli",` +
+			`"type":"user","message":{"role":"user","content":"<command-name>/pr-review</command-name>"}}`,
+		`{"uuid":"typed-2","sessionId":"session-typed","cwd":"` + root +
+			`","timestamp":"2026-08-13T12:00:01Z","version":"1.0.0","entrypoint":"cli",` +
+			`"type":"user","message":{"role":"user","content":"<command-name>/clear</command-name>"}}`,
+	}
+	writeFixture(t, filepath.Join(claudeDir, "projects", "project", "typed.jsonl"), strings.Join(lines, "\n"))
+
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+
+	scan := scanCounters(t, paths)
+	if scan.SkippedTypedInvocations != 1 {
+		t.Errorf("SkippedTypedInvocations = %d, want 1 — /clear is a skip the count has to report", scan.SkippedTypedInvocations)
+	}
+	if scan.RefusedCalls != 0 {
+		t.Errorf("RefusedCalls = %d, want 0 — a typed built-in is not lost collection (ADR-0036 §3)", scan.RefusedCalls)
+	}
+	if scan.EventsWritten == 0 {
+		t.Fatalf("EventsWritten = 0; the fixture is not collecting and the state assertion below means nothing")
+	}
+	report, err := health.New(paths.HealthFile).Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if got := health.Diagnose(report, nil, nil); got.State == health.StateCollectsNothing {
+		t.Errorf("Diagnose().State = %q; a skipped typed invocation must not blind the integration state", got.State)
+	}
+
+	// The admissible half really was collected, so the skip above is the count of one
+	// case and not of both.
+	entries, err := store.New(filepath.Join(paths.DataDir, eventsFile)).Entries(0)
+	if err != nil {
+		t.Fatalf("Entries() error = %v", err)
+	}
+	typed := 0
+	for _, event := range entries {
+		if event.Record.Kind == record.KindSkill && event.Record.Name == "pr-review" && event.Record.Invoker == record.InvokerUser {
+			typed++
+		}
+	}
+	if typed != 1 {
+		t.Errorf("typed pr-review records = %d, want 1", typed)
+	}
 }

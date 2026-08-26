@@ -35,11 +35,11 @@ func commandTag(text string) string {
 		return ""
 	}
 	body := text[open+len(commandTagOpen):]
-	close := strings.Index(body, commandTagClose)
-	if close < 0 {
+	end := strings.Index(body, commandTagClose)
+	if end < 0 {
 		return ""
 	}
-	return strings.TrimPrefix(strings.TrimSpace(body[:close]), "/")
+	return strings.TrimPrefix(strings.TrimSpace(body[:end]), "/")
 }
 
 // InstalledPrimitive is one primitive the machine has, as the reader is told about it:
@@ -143,4 +143,116 @@ const typedSequence = "typed"
 // transcript re-derives the same id forever and re-ingestion stays a no-op.
 func typedSourceEvent(entryUUID string) record.Identifier {
 	return record.Identifier(entryUUID + typedSeparator + typedSequence)
+}
+
+// tagStatus separates the four outcomes a command tag can have, and it is its own type
+// rather than a fourth callStatus member on purpose: scan.go's two existing callStatus
+// switches would otherwise gain an arm they silently ignore.
+//
+// It mirrors callStatus's skip-versus-refuse distinction (reader.go) with one extra arm.
+// tagRefused is a validated field refusing a value on an invocation that would otherwise
+// have been collected — lost collection worth counting, which keeps RefusedCalls' drift
+// signal. tagNotInstalled is neither that nor silence: ADR-0036 §3 settles it as a skip,
+// because a typed CLI built-in like /clear was never Wake's to collect so nothing was
+// lost, and it is the common case rather than the edge — roughly 101 of 136 observed
+// occurrences. It is still counted rather than dropped in silence, because the installed
+// set is injected and therefore fallible: a name absent from it may be a built-in or may
+// be a primitive since uninstalled or renamed, and nothing in the transcript tells the
+// two apart.
+type tagStatus int
+
+const (
+	tagAbsent tagStatus = iota
+	tagAccepted
+	tagNotInstalled
+	tagRefused
+)
+
+// typedInvocation derives the record for a skill or command a person typed, which
+// ADR-0036 §1 keys to the entry carrying the delimited command tag and §3 counts once
+// per occurrence.
+//
+// The gates run in one fixed order, and the order is the whole of what the three
+// statuses mean:
+//
+// A sidechain entry is excluded outright. A subagent's own turn carries the parent's
+// message body, so it can hold the parent's tag without being a typed invocation at all
+// — the same exclusion attributedSkillCandidate applies for the same reason (ADR-0023
+// §1). Then the tag itself, the session token and consent: each of those is something
+// that was never this invocation's to collect, or never Wake's, so each is a clean zero
+// and not a count of anything.
+//
+// The name grammar and the installed lookup come next and share one status. A name the
+// grammar refuses also fails ADR-0036 §3's gate — there is one question, "is this a
+// primitive this machine has", and two ways to answer no — so splitting them would
+// invent a distinction the ADR does not draw.
+//
+// Only a skill or a command is admissible, which is exactly ADR-0036 §1's row for this
+// canonical source. A tag whose name matches an installed subagent must not produce a
+// record: §2 makes the subagent's own transcript its canonical source and gives it
+// Invoker: model, so admitting one here would report one run twice under two invokers.
+//
+// The entrypoint gate is last, after the installed lookup, so a typed CLI built-in on an
+// entry with an unmapped entrypoint is a skip and not a refusal — nothing was lost. A
+// name this machine does have, refused there, is lost collection and counts.
+//
+// The whole record is built before anything is returned, so every gate has run before a
+// caller can emit it — the discipline attributedSkillCandidate states and the reason a
+// candidate that exists has already passed every check (ADR-0007).
+func (entry transcriptEntry) typedInvocation(resolve Resolver, names record.Namer, installed Installed) (record.Record, tagStatus) {
+	if entry.IsSidechain {
+		return record.Record{}, tagAbsent
+	}
+	tag := entry.Message.Content.command
+	if tag == "" {
+		return record.Record{}, tagAbsent
+	}
+	sessionID, err := record.BoundedToken(entry.SessionID)
+	if err != nil {
+		return record.Record{}, tagAbsent
+	}
+	timestamp := record.NormalizedTimestamp(entry.Timestamp)
+	repo, consented := resolve(entry.CWD, timestamp)
+	if !consented {
+		return record.Record{}, tagAbsent
+	}
+	primitive, err := names.DerivedName(tag)
+	if err != nil {
+		return record.Record{}, tagNotInstalled
+	}
+	kind, known := installed.kindOf(primitive)
+	if !known || (kind != record.KindSkill && kind != record.KindCommand) {
+		return record.Record{}, tagNotInstalled
+	}
+	entrypoint, mapped := entrypointFor(entry.Entrypoint)
+	if !mapped {
+		return record.Record{}, tagRefused
+	}
+
+	event := record.Record{
+		SchemaVersion: record.SchemaVersion,
+		EventID:       record.DeriveEventID(harness, typedSourceEvent(entry.UUID)),
+		Timestamp:     timestamp,
+		Harness:       harness,
+		SessionID:     sessionID,
+		Repo:          repo,
+		Kind:          kind,
+		Name:          primitive,
+		Invoker:       record.InvokerUser,
+		Entrypoint:    entrypoint,
+		// Outcome is left nil deliberately. A typed invocation has no completion
+		// boundary in the transcript — the tag records a person typing it, not the run
+		// finishing — and a synthesized ok is exactly what ADR-0005 forbids. Unknown is
+		// never success, so it is excluded from rate denominators rather than counted
+		// (ADR-0023 §3 takes the same position for the Shape-A record).
+	}
+	// Best-effort, as call's are: a version or model outside its domain leaves the
+	// optional field unset rather than refusing an invocation that happened.
+	if version, err := record.BoundedVersion(entry.Version); err == nil {
+		event.HarnessVersion = version
+	}
+	if model, err := record.BoundedIdentifier(entry.Message.Model); err == nil {
+		event.Model = model
+	}
+	return event, tagAccepted
 }
