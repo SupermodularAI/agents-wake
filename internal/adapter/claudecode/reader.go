@@ -14,7 +14,6 @@ import (
 	"slices"
 	"time"
 
-	"github.com/SupermodularAI/agents-wake/internal/jsonl"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 )
 
@@ -52,15 +51,20 @@ type Result struct {
 	// with outcome interrupted rather than buffered again forever. Those records are
 	// in Records and are also counted by Parsed upstream.
 	Interrupted int
-	// OpenSessions counts the sessions this transcript's entries belong to that have
-	// not closed under the staleness rule. When this read hit a line it could not rule
-	// out no session is reported closed, for the same reason no call is resolved.
+	// OpenSessions counts the sessions this scan's entries belong to that have not
+	// closed under the staleness rule. It is walk-wide: a session is open if any source
+	// of the scan shows recent activity for it (ADR-0036). A session some source read
+	// blind is never reported closed, for the same reason no call of it is resolved.
 	OpenSessions int
 	// CursorFloor is the byte offset of the earliest line belonging to any session
-	// still open. A future incremental cursor (T020, T102) must not advance past it
-	// until that session closes: ADR-0023 §5 generalizes ADR-0015's "does not advance
-	// its cursor past [an unterminated call]" to the session grain. It is meaningful
-	// only when OpenSessions is positive.
+	// still open, inside the one source Read read. A future incremental cursor (T020,
+	// T102) must not advance past it until that session closes: ADR-0023 §5 generalizes
+	// ADR-0015's "does not advance its cursor past [an unterminated call]" to the
+	// session grain, and ADR-0036 widens "still open" from one file to every file of the
+	// session. It is meaningful only when OpenSessions is positive.
+	//
+	// Scan leaves it zero, deliberately: a floor is per source, so a walk has no single
+	// one, and a Scan caller reads SessionState.SourceFloor for each source instead.
 	CursorFloor int64
 	// Refused counts invocations dropped because a validated field refused its
 	// source value: the primitive's own name — a Task block naming no subagent, or
@@ -87,6 +91,20 @@ type Result struct {
 	// §4.2, ADR-0007). A run the tool_use/tool_result pair already described
 	// contributes nothing here: that run is not uncertain, it is covered.
 	AmbiguousSkillRuns int
+	// SkippedSources counts the sources this scan read that derived nothing, refused
+	// nothing, and had nothing attributed back to them by the post-walk resolution —
+	// most often because their working directory belongs to no consented repository.
+	// It is doctor's Skipped counter, moved to where the source ordinals live.
+	//
+	// A per-source caller cannot compute it any more. Before ADR-0036 resolution
+	// happened inside one source's read, so "parsed nothing and refused nothing" was
+	// the whole story for that file; now a source's contribution can resolve after the
+	// walk — a stale call given up on, a share of a session_end's totals — and a zero
+	// at the end of its own read no longer separates an honest zero from a deferral.
+	//
+	// It is a count of sources, never of paths: a source is the ordinal the scan
+	// assigned it (ADR-0007, plan §4.2). Read reports it for the one source it read.
+	SkippedSources int
 }
 
 // Resolver maps one observed event — a recorded working directory and the instant it
@@ -119,255 +137,31 @@ type Resolver func(cwd string, at time.Time) (record.Hash, bool)
 // second threshold answering a different question — when a session id is believed
 // finished, rather than when an unterminated call is given up on — and its zero
 // value derives no session_end at all.
+//
+// It is the one-source form of Scan, kept because a caller reading a single
+// transcript should not have to drive a walk. A caller reading a *set* of sources
+// that may share a session id must use Scan instead: resolving each file on its own
+// closes a session another file shows running and reports one session_end per file
+// rather than one per session, permanently (ADR-0036 §Consequences).
 func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Staleness, idle Idleness) (Result, error) {
-	if resolve == nil {
-		return Result{}, errors.New("missing repository resolver")
-	}
-
-	result := Result{}
-	pending := map[callKey]call{}
-	sessions := &SessionState{}
-	// earlyResults holds a tool_result whose tool_use line has not been read yet.
-	// Claude Code writes the pair out of order in a small fraction of transcripts,
-	// and a forward-only pairing loop drops the result and then buffers the call
-	// forever — which, once the staleness path is live, writes a completed call as
-	// outcome: interrupted permanently, because the store deduplicates on event_id
-	// and never upserts (ADR-0004, ADR-0015).
-	//
-	// It is per-Read state next to pending, not package state, for the same reason
-	// pending is: it is unresolved source state a cursor floor must be able to see
-	// (ADR-0015, ADR-0023), so the derived count cannot depend on where a scan
-	// started. It carries no consent-bearing and no free-text value (see
-	// callResult), so buffering one before the call's repository consent is known
-	// retains nothing.
-	//
-	// Keyed by the same (session, block id) pair pending is, for the same reason: a
-	// buffer that outlives one file must not let one session's result be matched
-	// against another session's call (ADR-0036, see callKey).
-	earlyResults := map[callKey]callResult{}
-	// skillsInvoked and skillCandidates are the session-grain extension of pending that
-	// ADR-0023 §2 asks for: which skills a session invoked through a Skill tool_use, and
-	// the attributed end_turn runs this read has not yet proved are duplicates of one.
-	//
-	// Per-Read state next to pending, for the reason pending is: it is unresolved source
-	// state a cursor floor must be able to see (ADR-0015, ADR-0023 §5). Deliberately not
-	// fields on SessionState, which holds a session id, a timestamp and a byte offset and
-	// no value derived from a transcript's content — the session-close determination is
-	// consumed from there rather than duplicated, which is what ADR-0023 §3's "no second
-	// threshold" requires.
-	skillsInvoked := map[skillRun]struct{}{}
-	skillCandidates := map[skillRun]skillCandidate{}
-	// grains is the session grain's accumulator: what each session id this read saw
-	// spent, and the one anchor entry every dimension of its session_end that is not
-	// a total comes from.
-	//
-	// Per-Read state next to pending, for the reason pending is: it is unresolved
-	// source state, and a derived count may not depend on where a scan started
-	// (ADR-0015, ADR-0023 §5). It holds only consented, gate-passed values — an entry
-	// outside consent contributes nothing to it at all (see observeSessionGrain).
-	grains := map[record.Identifier]*sessionGrain{}
-	// unreadable counts the lines this read could not use *and could not rule out* as
-	// the terminator of a buffered call, which is the only blindness that bears on the
-	// staleness rule: a line too long to be delivered, a line whose JSON leaves nothing
-	// to inspect, and a line the reader has no entry for that carries a tool_result
-	// block anyway.
-	//
-	// It is narrower than Malformed on purpose. A line the reader could inspect and
-	// found no tool_result in cannot have terminated anything, so nothing about any
-	// call's fate is hidden by it. That distinction is what keeps a real transcript's
-	// routine lines — bookkeeping shapes with no uuid, and entries whose message content
-	// is not the type this struct declares — out of the gate. A result payload cannot
-	// put a line here at all: ToolUseResult is captured raw, so its shape never costs
-	// the reader the entry that terminates a call.
-	unreadable := 0
-	skipped, err := jsonl.Lines(reader, maxLineBytes, func(offset int64, line []byte) {
-		var entry transcriptEntry
-		unmarshalErr := json.Unmarshal(line, &entry)
-		// Activity comes from every line that named a session and a time, not only from
-		// the ones this read has an entry for. The last thing a session wrote is what says
-		// it is still alive, and a bookkeeping line or a line whose JSON did not fit this
-		// struct was written by a live session just as much as an entry was. Taking
-		// liveness from entries alone understates it, and the staleness rule would then
-		// call a session that wrote something minutes ago dead — permanently, since
-		// ADR-0004 deduplicates the correction away.
-		//
-		// An id outside the token domain is not observed, matching call, which skips such
-		// an entry — so no call is buffered for a session this cannot judge. Observe
-		// ignores a zero timestamp, which is most of what these lines carry.
-		//
-		// The bounded id is computed once here and reused for every buffer key below.
-		// An entry whose sessionId is outside the token domain buffers nothing at all —
-		// neither a call nor an early result — because there is no session to key it
-		// under. That loses nothing: such a tool_use is callSkipped for the same reason,
-		// and the skipped branch already discarded its early result unread.
-		sessionID, tokenErr := record.BoundedToken(entry.SessionID)
-		if tokenErr == nil {
-			sessions.Observe(0, sessionID, record.NormalizedTimestamp(entry.Timestamp), offset)
-		}
-		if unmarshalErr != nil || !entry.valid() {
-			// This read has no entry for the line, whether its JSON did not fit the struct or
-			// its identity is outside the domain. Either way nothing is derived from it — and
-			// it stops the staleness rule only if it could have been a terminator.
-			result.Malformed++
-			if !inspectable(unmarshalErr) || entry.carriesToolResult() {
-				unreadable++
-			}
-			return
-		}
-		observeSessionGrain(grains, 0, entry, resolve)
-		switch event, status := entry.attributedSkillCandidate(resolve, names); status {
-		case callAccepted:
-			deferSkillCandidate(skillCandidates, skillRun{session: event.SessionID, name: event.Name}, 0, event)
-		case callRefused:
-			// Counted per refused run rather than per entry that would have collapsed
-			// into one: the collapse is a deduplication of records that do exist, and a
-			// candidate refused here never enters it, so there is nothing to collapse
-			// against. What the number says is how many attributed runs this read could
-			// have collected and did not.
-			result.Refused++
-		case callSkipped:
-		}
-		if tokenErr != nil {
-			// No session to key a buffer under, so nothing from this entry can be
-			// buffered or matched. Its blocks are the same clean zero call already
-			// reports for them (callSkipped), not a refusal.
-			return
-		}
-		for _, block := range entry.Message.Content {
-			switch block.Type {
-			case "tool_use":
-				// Every branch below runs after the full entry.call gate, so an early
-				// result can never bypass a consent, id-domain or naming check: the
-				// refused and skipped branches discard the buffered result instead of
-				// leaving it to be matched by anything. They key the discard by the raw
-				// block id because pendingCall.id is empty on those paths.
-				pendingCall, status := entry.call(0, block, resolve, names)
-				switch status {
-				case callAccepted:
-					if pendingCall.kind == record.KindSkill {
-						// Recorded on sight rather than on termination: ADR-0023 §2 asks which
-						// skills the session invoked, and a Skill call that never terminates
-						// still becomes its own record through the staleness rule. The name is
-						// the one primitiveName derived, which is the same names.DerivedName
-						// output a candidate carries.
-						//
-						// On callAccepted only: a refused or skipped call means the identical
-						// name and consent gates also refuse the candidate, so no candidate
-						// exists for that name either.
-						skillsInvoked[skillRun{session: pendingCall.sessionID, name: pendingCall.name}] = struct{}{}
-					}
-					key := callKey{session: pendingCall.sessionID, id: pendingCall.id}
-					if early, terminated := earlyResults[key]; terminated {
-						delete(earlyResults, key)
-						result.Records = append(result.Records, pendingCall.complete(early))
-					} else {
-						pending[key] = pendingCall
-					}
-				case callRefused:
-					result.Refused++
-					delete(earlyResults, callKey{session: sessionID, id: block.ID})
-				case callSkipped:
-					delete(earlyResults, callKey{session: sessionID, id: block.ID})
-				}
-			case "tool_result":
-				key := callKey{session: sessionID, id: block.ToolUseID}
-				pendingCall, open := pending[key]
-				if !open {
-					// The tool_use line has not been read yet, or this id was already
-					// completed, skipped or refused. Retain the first result per id and
-					// nothing else: a second result for one id is a no-op here exactly as
-					// it was before, and a result whose tool_use never arrives yields no
-					// record at all — there is no name, kind, invoker or consented repo to
-					// build one from, and only a terminal event may be emitted (ADR-0015,
-					// ADR-0007).
-					if _, seen := earlyResults[key]; !seen {
-						earlyResults[key] = resultOf(entry, block)
-					}
-					continue
-				}
-				delete(pending, key)
-				result.Records = append(result.Records, pendingCall.complete(resultOf(entry, block)))
-			}
-		}
-	})
+	scan := NewScan(resolve, names, stale, idle)
+	first, err := scan.Read(reader)
 	if err != nil {
-		return Result{}, errors.New("reading Claude Code history")
+		return Result{}, err
 	}
-	// A line too long to deliver is unusable in the same way a line that does not
-	// parse is: counted as malformed so doctor can report blindness, and nothing is
-	// synthesised from it — no call is opened, so no result can terminate one.
-	//
-	// It does not join unreadable below, unlike a line whose bytes arrived but made
-	// no sense. maxLineBytes is a fixed internal constant, not a limit a user can
-	// raise (see above), so an oversized line is oversized on every future scan —
-	// there is no later scan for the staleness rule to defer to. Gating on it would
-	// not buy a slower-but-correct read; it would pin this file's pending calls and
-	// cursor floor forever.
-	result.Malformed += skipped
-	// A read that could not rule out one of its lines may not judge a session silent.
-	// That line may be the tool_result that terminated a buffered call, and it was not
-	// observed as activity either — so last activity is known-understated, not merely
-	// old. Concluding "interrupted" from that would infer a terminal outcome from
-	// blindness, which plan §3.3 forbids, and would write a permanent failure for a
-	// call that succeeded: ADR-0015 rejects upsert and ADR-0004 deduplicates, so no
-	// later scan can take it back. ADR-0015 scopes interrupted to a session that
-	// actually died; this reader cannot tell that apart from one line it cannot read.
-	//
-	// Disabling the rule for the whole read rather than for one session is the
-	// practical grain: internal/jsonl cannot attribute a line it never delivered to a
-	// session, so there is no session to exempt. The cost is a call that stays Pending
-	// and a cursor floor that does not move — a slower scan, never wrong data, which is
-	// the direction Staleness's zero value already takes.
-	//
-	// The gate is unreadable and not Malformed. Every real transcript carries lines
-	// Malformed counts that hide nothing — per-session bookkeeping (ai-title,
-	// last-prompt, queue-operation) has no uuid, so valid() rejects it, and a message's
-	// content arriving as a type this struct does not declare fails json.Unmarshal — and
-	// gating on that count switched ADR-0015's rule off on every machine while every
-	// hand-written fixture stayed green. Keeping this read's own two questions apart
-	// ("did I have an entry for that line" and "could that line have terminated a
-	// call") is what makes the rule run in production and stop only for blindness that
-	// could actually mislead it.
-	judged := stale
-	if unreadable > 0 {
-		judged = Staleness{}
+	final := scan.Close()
+	// One source, so its floor is the scan's floor and CursorFloor means what it
+	// always meant. A Scan caller asks SessionState.SourceFloor per source instead,
+	// because a walk has no single floor.
+	if open, offset := scan.sessions.SourceFloor(0, stale); open {
+		final.CursorFloor = offset
 	}
-	interrupted := resolveStaleCalls(pending, sessions, judged)
-	for _, derived := range interrupted {
-		result.Records = append(result.Records, derived.event)
-	}
-	result.Interrupted = len(interrupted)
-	result.Pending = len(pending)
-	// judged, not stale: a read that could not rule out one of its lines may not
-	// conclude any session went silent, and a Shape-A fallback emitted from a blind
-	// read is permanent (ADR-0015 rejects upsert, ADR-0004 deduplicates the correction
-	// away). The cost is deferral to a later scan, which ADR-0023's Consequences
-	// already name as this record's latency profile.
-	fallbacks, ambiguous := resolveSessionSkills(skillCandidates, skillsInvoked, sessions, judged)
-	for _, derived := range fallbacks {
-		result.Records = append(result.Records, derived.event)
-	}
-	result.AmbiguousSkillRuns = ambiguous
-	result.OpenSessions = sessions.OpenSessions(judged)
-	if open, offset := sessions.SourceFloor(0, judged); open {
-		result.CursorFloor = offset
-	}
-	// judgedIdle, not idle, for the reason judged is not stale: a read that could not
-	// rule out one of its lines may not conclude any session went silent, and a
-	// session_end is permanent (ADR-0015 rejects upsert, ADR-0004 deduplicates the
-	// correction away). Its totals would also be understated by whatever that line
-	// held.
-	judgedIdle := idle
-	if unreadable > 0 {
-		judgedIdle = Idleness{}
-	}
-	// Derived last, from result.Records as it now stands: the aggregate is a snapshot
-	// of what this scan made terminal (ADR-0034 §3), which is every completed call,
-	// every interrupted one, and every Shape-A fallback appended above.
-	tally := invocationTally{}
-	tally.observe(result.Records)
-	result.Records = append(result.Records, resolveSessionEnds(grains, sessions, judgedIdle, &tally)...)
-	return result, nil
+	// This source's own records first, then the post-walk ones — today's order
+	// exactly, so one transcript serialises character-for-character as it did before.
+	final.Records = append(first.Records, final.Records...)
+	final.Malformed = first.Malformed
+	final.Refused = first.Refused
+	return final, nil
 }
 
 // resolveSessionSkills emits the one Shape-A fallback record for every deferred
