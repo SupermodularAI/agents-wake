@@ -382,3 +382,89 @@ func TestReadCountsATypedInvocationTheMachineDoesNotHave(t *testing.T) {
 		t.Fatalf("Read() = %+v", result)
 	}
 }
+
+// attributedTurn is a non-sidechain end_turn entry attributing its turn to skill: the
+// Shape-A candidate ADR-0023 defers until its session closes.
+func attributedTurn(uuid, skill, at string) string {
+	return fmt.Sprintf(
+		`{"uuid":%q,"sessionId":"session-1","cwd":"/repo","timestamp":%q,"attributionSkill":%q,`+
+			`"message":{"model":"sonnet","stop_reason":"end_turn","content":[]}}`,
+		uuid, at, skill)
+}
+
+// AC 2: where a tag exists it is the canonical source, so ADR-0036 §4 narrows
+// ADR-0023 §4's collapse past it. A fallback here would be a second record for one
+// invocation — and its collapsed extras are not ambiguity either, because nothing about
+// this run is uncertain.
+func TestReadEmitsNoFallbackForARunWithACommandTag(t *testing.T) {
+	input := strings.Join([]string{
+		typedTurn("entry-1", "pr-review", "2026-08-13T12:00:00Z"),
+		attributedTurn("entry-2", "pr-review", "2026-08-13T12:00:01Z"),
+	}, "\n")
+
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 1 {
+		t.Fatalf("Read() records = %d, want 1: %+v", len(result.Records), result.Records)
+	}
+	if want := record.DeriveEventID(harness, typedSourceEvent("entry-1")); result.Records[0].EventID != want {
+		t.Errorf("the surviving record is not the tag-derived one: %+v", result.Records[0])
+	}
+	if result.AmbiguousSkillRuns != 0 {
+		t.Errorf("AmbiguousSkillRuns = %d, want 0 — nothing about a typed run is uncertain", result.AmbiguousSkillRuns)
+	}
+}
+
+// AC 3: ADR-0023 §4 is unchanged for the case that still has no signal. Two attributed
+// entries with neither a tag nor a Skill tool_use are one run as far as the transcript
+// says, so one record per (session, skill name) remains the honest answer.
+func TestReadStillEmitsOneFallbackForARunWithNoSignal(t *testing.T) {
+	input := strings.Join([]string{
+		attributedTurn("entry-1", "run-sdlc", "2026-08-13T12:00:00Z"),
+		attributedTurn("entry-2", "run-sdlc", "2026-08-13T12:00:01Z"),
+	}, "\n")
+
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 1 {
+		t.Fatalf("Read() records = %d, want 1: %+v", len(result.Records), result.Records)
+	}
+	if result.AmbiguousSkillRuns != 1 {
+		t.Errorf("AmbiguousSkillRuns = %d, want 1 — the collapse is still an accepted limitation here", result.AmbiguousSkillRuns)
+	}
+}
+
+// AC 5: a tag and a Skill tool_use for one skill in one session are not duplication —
+// they are a typed invocation and a model invocation, two real events with two source
+// events and therefore two ids (ADR-0036 §4). No Shape-A fallback joins them.
+func TestReadDerivesTwoRecordsForATypedAndAModelInvocation(t *testing.T) {
+	input := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-1","name":"Skill","input":{"skill":"pr-review"}}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+		typedTurn("entry-3", "pr-review", "2026-08-13T12:00:02Z"),
+	}, "\n")
+
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 2 {
+		t.Fatalf("Read() records = %d, want 2: %+v", len(result.Records), result.Records)
+	}
+	invokers := map[record.Invoker]int{}
+	ids := map[record.Hash]struct{}{}
+	for _, event := range result.Records {
+		invokers[event.Invoker]++
+		ids[event.EventID] = struct{}{}
+	}
+	if invokers[record.InvokerUser] != 1 || invokers[record.InvokerModel] != 1 {
+		t.Errorf("invokers = %v, want one user and one model", invokers)
+	}
+	if len(ids) != 2 {
+		t.Errorf("the two records share an event id: %+v", result.Records)
+	}
+}

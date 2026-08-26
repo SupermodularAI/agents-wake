@@ -422,7 +422,7 @@ func (s *Scan) Close() Result {
 		s.credit(derived.source)
 		result.Interrupted++
 	}
-	fallbacks, ambiguous := resolveSessionSkills(s.skillCandidates, s.skillsInvoked, s.sessions, s.stale)
+	fallbacks, ambiguous := resolveSessionSkills(s.skillCandidates, s.skillsInvoked, s.typedRuns, s.sessions, s.stale)
 	for _, derived := range fallbacks {
 		result.Records = append(result.Records, derived.event)
 		s.credit(derived.source)

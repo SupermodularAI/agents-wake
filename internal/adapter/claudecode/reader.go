@@ -242,6 +242,18 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, installed Inst
 // better (T111's precedent, attributedSkillCandidate's comment). Its collapsed extras
 // are not counted as ambiguity either — nothing about that run is uncertain.
 //
+// A candidate whose name is in typed is dropped on the same terms, and that is
+// ADR-0036 §4's narrowing: ADR-0023 §4's collapse now applies only to a run for which
+// neither a tool_use block nor a command tag exists. Where a tag exists it is the
+// canonical source (§1), its record is already emitted per occurrence (§3), and a
+// fallback here would be a second record for one invocation. Its extras are treated
+// exactly as a matched run's for the same reason — nothing about a run a person typed
+// is uncertain, so counting them as ambiguity would report doubt where the transcript
+// has none.
+//
+// Where neither exists, nothing has changed: no signal distinguishes one run from two,
+// and one record per (session, skill name) remains the honest answer.
+//
 // The order is sorted rather than the map's, for the reason resolveStaleCalls gives:
 // iteration order is randomised and two scans of one transcript have to produce
 // byte-identical store contents. The key is the chosen candidate's own (timestamp,
@@ -251,7 +263,7 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, installed Inst
 // source it came from. What the function decides is unchanged: the closed gate, the
 // order, the matched-drop and the extra accounting are the same as before ADR-0036
 // widened the buffer from one file to one walk (ADR-0036 §4).
-func resolveSessionSkills(buffer map[skillRun]skillCandidate, invoked map[skillRun]struct{}, sessions *SessionState, stale Staleness) ([]derivation, int) {
+func resolveSessionSkills(buffer map[skillRun]skillCandidate, invoked, typed map[skillRun]struct{}, sessions *SessionState, stale Staleness) ([]derivation, int) {
 	resolved := make([]skillRun, 0, len(buffer))
 	for key := range buffer {
 		if sessions.Closed(key.session, stale) {
@@ -268,6 +280,13 @@ func resolveSessionSkills(buffer map[skillRun]skillCandidate, invoked map[skillR
 		candidate := buffer[key]
 		delete(buffer, key)
 		if _, matched := invoked[key]; matched {
+			continue
+		}
+		if _, wasTyped := typed[key]; wasTyped {
+			// The tag is this invocation's canonical source and its record is already
+			// emitted, so a fallback here would be a second record for one invocation —
+			// the duplication ADR-0036 §4 narrows the collapse to remove. Its collapsed
+			// extras are not ambiguity either: nothing about this run is uncertain.
 			continue
 		}
 		records = append(records, derivation{event: candidate.chosen, source: candidate.source})
