@@ -33,10 +33,11 @@ import (
 //
 // It is single-goroutine state and carries no lock: one walk is one caller.
 type Scan struct {
-	resolve Resolver
-	names   record.Namer
-	stale   Staleness
-	idle    Idleness
+	resolve   Resolver
+	names     record.Namer
+	installed Installed
+	stale     Staleness
+	idle      Idleness
 
 	sessions *SessionState
 	// pending, earlyResults, skillsInvoked, skillCandidates and grains are the
@@ -54,6 +55,13 @@ type Scan struct {
 	// so a per-file buffer would have to resolve it without knowing whether the
 	// session its parent transcript carries is still running.
 	subagents map[record.Identifier]*subagentRun
+	// typedRuns holds the (session, name) pairs some source of this walk carried a
+	// command tag for. It is what narrows ADR-0023 §4's collapse to the case that still
+	// has no signal (ADR-0036 §4): where a tag exists it is the canonical source and the
+	// Shape-A fallback would be a second record for one invocation. Walk-scoped for
+	// skillsInvoked's reason — a tag can arrive in a different file from the attributed
+	// entry — and it holds bounded ids and nothing else (ADR-0007).
+	typedRuns map[skillRun]struct{}
 	tally     invocationTally
 	sources   []sourceTally
 }
@@ -80,18 +88,24 @@ func (t sourceTally) productive() bool {
 
 // NewScan opens a scan over one walk.
 //
-// resolve, names, stale and idle carry exactly what the single-source Read takes
-// them to carry, and for the same reasons: consent stays the caller's to answer, a
-// scope may only be digested by a Namer, and both thresholds arrive as values
-// because this package does not read config. Each zero threshold disables only its
-// own rule.
+// resolve, names, installed, stale and idle carry exactly what the single-source Read
+// takes them to carry, and for the same reasons: consent stays the caller's to answer, a
+// scope may only be digested by a Namer, and both thresholds arrive as values because
+// this package does not read config. Each zero threshold disables only its own rule.
+//
+// installed is the third injected input, and it is injected for the reason the first two
+// are: ADR-0036 §3 admits a name read from a command tag only if the machine has a
+// primitive under it, that answer lives on disk, and derivation may not touch the
+// filesystem (ADR-0019 §1). Its zero value admits nothing, so a caller that could not
+// build an inventory collects no typed invocation rather than every name it reads.
 //
 // The caller drives the walk. Scan never opens, stats or names a file — it is
 // handed one reader at a time and assigns each an ordinal in the order it arrives.
-func NewScan(resolve Resolver, names record.Namer, stale Staleness, idle Idleness) *Scan {
+func NewScan(resolve Resolver, names record.Namer, installed Installed, stale Staleness, idle Idleness) *Scan {
 	return &Scan{
 		resolve:         resolve,
 		names:           names,
+		installed:       installed,
 		stale:           stale,
 		idle:            idle,
 		sessions:        &SessionState{},
@@ -101,6 +115,7 @@ func NewScan(resolve Resolver, names record.Namer, stale Staleness, idle Idlenes
 		skillCandidates: map[skillRun]skillCandidate{},
 		grains:          map[record.Identifier]*sessionGrain{},
 		subagents:       map[record.Identifier]*subagentRun{},
+		typedRuns:       map[skillRun]struct{}{},
 	}
 }
 
@@ -202,13 +217,33 @@ func (s *Scan) Read(reader io.Reader) (Result, error) {
 			result.Refused++
 		case callSkipped:
 		}
+		// Emitted here rather than at close, unlike the Shape-A candidate above: this
+		// record derives entirely from its own entry, so it is order-independent already
+		// and needs no view of the session — exactly like a result-terminated tool call.
+		// What does need the union of the walk is ADR-0036 §4's narrowing, and that stays
+		// in resolveSessionSkills at Close.
+		//
+		// The pair is recorded whichever kind the inventory resolved, because the
+		// narrowing is keyed on the name: ADR-0036 §1's row covers "skill or command"
+		// under one canonical source, and the Shape-A fallback it suppresses is itself
+		// keyed on (session, name).
+		switch event, status := entry.typedInvocation(s.resolve, s.names, s.installed); status {
+		case tagAccepted:
+			result.Records = append(result.Records, event)
+			s.typedRuns[skillRun{session: event.SessionID, name: event.Name}] = struct{}{}
+		case tagNotInstalled:
+			result.SkippedTypedInvocations++
+		case tagRefused:
+			result.Refused++
+		case tagAbsent:
+		}
 		if tokenErr != nil {
 			// No session to key a buffer under, so nothing from this entry can be
 			// buffered or matched. Its blocks are the same clean zero call already
 			// reports for them (callSkipped), not a refusal.
 			return
 		}
-		for _, block := range entry.Message.Content {
+		for _, block := range entry.Message.Content.blocks {
 			switch block.Type {
 			case "tool_use":
 				// Every branch below runs after the full entry.call gate, so an early
@@ -387,7 +422,7 @@ func (s *Scan) Close() Result {
 		s.credit(derived.source)
 		result.Interrupted++
 	}
-	fallbacks, ambiguous := resolveSessionSkills(s.skillCandidates, s.skillsInvoked, s.sessions, s.stale)
+	fallbacks, ambiguous := resolveSessionSkills(s.skillCandidates, s.skillsInvoked, s.typedRuns, s.sessions, s.stale)
 	for _, derived := range fallbacks {
 		result.Records = append(result.Records, derived.event)
 		s.credit(derived.source)

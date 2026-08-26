@@ -24,7 +24,12 @@ import (
 // event_id is derived — from the subagent's own transcript rather than from the
 // invoking tool call (ADR-0036 §2) — which ADR-0004 classes as a schema change all
 // the same, because a stored id no build can re-derive is a record no rescan can
-// deduplicate.
+// deduplicate. Version 5 adds no field either: it changes how a typed invocation's
+// event_id is derived — from the entry carrying the command tag rather than from a
+// session-collapsed attributed entry (ADR-0036 §1, §3, §4) — which ADR-0004 classes as
+// a schema change for the same reason. It also changes which dimensions a session_end
+// carries for an unchanged id, because a user turn whose content is plain text now
+// yields an entry the session grain can date itself from.
 //
 // "Refused on read" is only half of that, and the half on its own is a silent
 // shrink: every consumer reads the spool through store.Entries, so a spool nobody
@@ -37,7 +42,7 @@ import (
 // delivery watermark, which stamps this number and starts over when it changes
 // (internal/remote). What a rebuild cannot recover is a period the harness has since
 // pruned: the store was the only surviving copy of it, and ADR-0014 accepts that.
-const SchemaVersion uint = 4
+const SchemaVersion uint = 5
 
 // ErrUnsupportedVersion is the one refusal from Validate a caller is meant to
 // recognise. Every other refusal means the record was never valid; this one means

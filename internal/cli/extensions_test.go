@@ -67,6 +67,7 @@ func TestDoctorOutputOnAFreshInstall(t *testing.T) {
 		"pending calls: 0\n" +
 		"interrupted calls: 0\n" +
 		"ambiguous skill runs: 0\n" +
+		"skipped typed invocations: 0\n" +
 		"store rebuild: not needed\n" +
 		"integration: never scanned\n" +
 		"global boundary: not set\n" +

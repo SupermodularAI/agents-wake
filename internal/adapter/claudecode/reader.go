@@ -115,6 +115,28 @@ type Result struct {
 	// §4.2, ADR-0007). A run the tool_use/tool_result pair already described
 	// contributes nothing here: that run is not uncertain, it is covered.
 	AmbiguousSkillRuns int
+	// SkippedTypedInvocations counts typed invocations this scan read the command tag
+	// of and derived no record from, because the name it declared is not a primitive
+	// this machine has: the injected known-name set does not hold it, or holds it under
+	// a kind ADR-0036 §1's precedence row does not cover, or the name/scope grammar
+	// refuses it (ADR-0020).
+	//
+	// It is a skip and not a refusal, and that is ADR-0036 §3's own distinction: a typed
+	// CLI built-in like /clear was never Wake's to collect, so nothing was lost — and it
+	// is the common case, roughly 101 of 136 observed occurrences, not the edge. Routing
+	// it onto Refused would pin doctor to "collects nothing" on every scan forever while
+	// thousands of records are written.
+	//
+	// It is nonetheless counted rather than silent, because the known-name set is
+	// injected and therefore fallible: a name absent from it may be a built-in or may be
+	// a primitive since uninstalled or renamed, and nothing in the transcript tells the
+	// two apart. It deliberately does not move doctor's state word — same reasoning as
+	// RefusedSubagentRuns and ADR-0023's ambiguous skill run (see health.Diagnose).
+	//
+	// It carries no name, no session id and no transcript value — only how many times
+	// the question came up (plan §4.2, ADR-0007). Read reports it for the one source it
+	// read.
+	SkippedTypedInvocations int
 	// SkippedSources counts the sources this scan read that derived nothing, refused
 	// nothing, and had nothing attributed back to them by the post-walk resolution —
 	// most often because their working directory belongs to no consented repository.
@@ -151,6 +173,13 @@ type Resolver func(cwd string, at time.Time) (record.Hash, bool)
 // name for one on its own (ADR-0020); a Namer with no key drops those references
 // rather than persisting an unkeyed digest of a path.
 //
+// installed carries the set of primitive names this machine has. ADR-0036 §3 admits a
+// name read from a command tag only if the machine has a primitive under it, and that
+// answer lives on disk while derivation may not touch the filesystem (ADR-0019 §1) — so
+// it arrives as data, exactly as resolve and names do. Its zero value admits nothing,
+// which is what a caller that could not build an inventory must collect: no typed
+// invocation at all rather than every name it reads.
+//
 // stale carries ADR-0015's staleness rule (scan.stale_call_timeout and the scan's
 // clock) from the caller that owns config, so the threshold is never a constant
 // here. Its zero value buffers every unterminated call, which is what a caller that
@@ -167,8 +196,8 @@ type Resolver func(cwd string, at time.Time) (record.Hash, bool)
 // that may share a session id must use Scan instead: resolving each file on its own
 // closes a session another file shows running and reports one session_end per file
 // rather than one per session, permanently (ADR-0036 §Consequences).
-func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Staleness, idle Idleness) (Result, error) {
-	scan := NewScan(resolve, names, stale, idle)
+func Read(reader io.Reader, resolve Resolver, names record.Namer, installed Installed, stale Staleness, idle Idleness) (Result, error) {
+	scan := NewScan(resolve, names, installed, stale, idle)
 	first, err := scan.Read(reader)
 	if err != nil {
 		return Result{}, err
@@ -190,6 +219,9 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 	// A refused subagent run arrives on Close's own RefusedSubagentRuns and passes
 	// through untouched.
 	final.Refused += first.Refused
+	// Summed for the same defensive reason, though a typed invocation is judged entirely
+	// within the line it is on, so Close derives none of its own today.
+	final.SkippedTypedInvocations += first.SkippedTypedInvocations
 	return final, nil
 }
 
@@ -210,6 +242,18 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 // better (T111's precedent, attributedSkillCandidate's comment). Its collapsed extras
 // are not counted as ambiguity either — nothing about that run is uncertain.
 //
+// A candidate whose name is in typed is dropped on the same terms, and that is
+// ADR-0036 §4's narrowing: ADR-0023 §4's collapse now applies only to a run for which
+// neither a tool_use block nor a command tag exists. Where a tag exists it is the
+// canonical source (§1), its record is already emitted per occurrence (§3), and a
+// fallback here would be a second record for one invocation. Its extras are treated
+// exactly as a matched run's for the same reason — nothing about a run a person typed
+// is uncertain, so counting them as ambiguity would report doubt where the transcript
+// has none.
+//
+// Where neither exists, nothing has changed: no signal distinguishes one run from two,
+// and one record per (session, skill name) remains the honest answer.
+//
 // The order is sorted rather than the map's, for the reason resolveStaleCalls gives:
 // iteration order is randomised and two scans of one transcript have to produce
 // byte-identical store contents. The key is the chosen candidate's own (timestamp,
@@ -219,7 +263,7 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 // source it came from. What the function decides is unchanged: the closed gate, the
 // order, the matched-drop and the extra accounting are the same as before ADR-0036
 // widened the buffer from one file to one walk (ADR-0036 §4).
-func resolveSessionSkills(buffer map[skillRun]skillCandidate, invoked map[skillRun]struct{}, sessions *SessionState, stale Staleness) ([]derivation, int) {
+func resolveSessionSkills(buffer map[skillRun]skillCandidate, invoked, typed map[skillRun]struct{}, sessions *SessionState, stale Staleness) ([]derivation, int) {
 	resolved := make([]skillRun, 0, len(buffer))
 	for key := range buffer {
 		if sessions.Closed(key.session, stale) {
@@ -236,6 +280,13 @@ func resolveSessionSkills(buffer map[skillRun]skillCandidate, invoked map[skillR
 		candidate := buffer[key]
 		delete(buffer, key)
 		if _, matched := invoked[key]; matched {
+			continue
+		}
+		if _, wasTyped := typed[key]; wasTyped {
+			// The tag is this invocation's canonical source and its record is already
+			// emitted, so a fallback here would be a second record for one invocation —
+			// the duplication ADR-0036 §4 narrows the collapse to remove. Its collapsed
+			// extras are not ambiguity either: nothing about this run is uncertain.
 			continue
 		}
 		records = append(records, derivation{event: candidate.chosen, source: candidate.source})
@@ -349,7 +400,48 @@ type message struct {
 	// iterations, server_tool_use, service_tier, inference_geo, speed on a real
 	// transcript — reach nothing. Reading a payload is not persisting one.
 	Usage   json.RawMessage `json:"usage"`
-	Content []contentBlock  `json:"content"`
+	Content messageContent  `json:"content"`
+}
+
+// messageContent decodes message.content in both shapes real Claude Code writes: an
+// array of content blocks on an assistant turn, and a plain string on a user turn —
+// which is where a typed invocation's delimited command tag lives (plan §5.1,
+// ADR-0023's Context, ADR-0036 §3). A typed field for the array alone made the string
+// case a *json.UnmarshalTypeError, which cost the whole entry, so nothing could be
+// derived from the line the tag is on.
+//
+// The string is read and not retained: UnmarshalJSON keeps only the bounded name
+// commandTag extracted from it and discards the body, which is the discipline the Skill
+// tool_use path already applies to its args field (ADR-0007, reading is not
+// persisting). It reaches no record field, no error and no log line (plan §4.2).
+type messageContent struct {
+	blocks  []contentBlock
+	command string
+}
+
+// UnmarshalJSON reads whichever of the two shapes this content is.
+//
+// The default branch delegates to the block decode rather than returning an error of
+// its own, and that is load-bearing: it reproduces today's exact behaviour for every
+// shape except the string one — null succeeds with a nil slice, an object, a number and
+// a bool each produce the same *json.UnmarshalTypeError they did before — so
+// inspectable() and Result.Malformed are unchanged for all of them.
+func (c *messageContent) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return nil
+	}
+	if trimmed[0] == '"' {
+		var text string
+		if err := json.Unmarshal(trimmed, &text); err != nil {
+			return err
+		}
+		// Only the bounded name survives the decode. The body it came from is not
+		// assigned anywhere and goes out of scope with this call.
+		c.command = commandTag(text)
+		return nil
+	}
+	return json.Unmarshal(trimmed, &c.blocks)
 }
 
 type contentBlock struct {
@@ -425,14 +517,20 @@ func (entry transcriptEntry) valid() bool {
 
 // inspectable reports whether a decode that ended in err still left the entry worth
 // looking at. A type mismatch does: encoding/json records it and carries on with the
-// remaining keys, so a field this reader does not model arriving as some other type —
-// a message's content as a plain string, ordinary in real transcripts — costs the entry
-// but not the reader's view of the line. Anything else, a syntax error above all, leaves
-// nothing to look at.
+// remaining keys, so a field this reader does not model arriving as some other type
+// costs the entry but not the reader's view of the line. Anything else, a syntax error
+// above all, leaves nothing to look at.
+//
+// A message's content as a plain string used to be this comment's example and is no
+// longer a mismatch at all: messageContent models that shape, because it is the one a
+// typed invocation's command tag arrives on (ADR-0036 §3). What still reaches here is a
+// content at a type the reader models neither of — an object, a number, a bool — which
+// messageContent.UnmarshalJSON deliberately keeps costing the entry rather than
+// guessing at.
 //
 // Whether such an entry should be salvaged rather than rejected is a separate
-// question, and a bigger one than the staleness rule: today the reader derives nothing
-// from it. This only decides whether it may still conclude a session went silent.
+// question, and a bigger one than the staleness rule: the reader derives nothing from
+// one. This only decides whether it may still conclude a session went silent.
 func inspectable(err error) bool {
 	if err == nil {
 		return true
@@ -451,7 +549,7 @@ func inspectable(err error) bool {
 // rejects on a real transcript: bookkeeping lines carrying a title, a queued
 // operation or the last prompt's leaf, none of them a transcript entry at all.
 func (entry transcriptEntry) carriesToolResult() bool {
-	return slices.ContainsFunc(entry.Message.Content, func(block contentBlock) bool {
+	return slices.ContainsFunc(entry.Message.Content.blocks, func(block contentBlock) bool {
 		return block.Type == "tool_result"
 	})
 }

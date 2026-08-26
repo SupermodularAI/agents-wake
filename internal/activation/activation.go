@@ -177,6 +177,13 @@ func initEpilogue(paths config.Paths, repos *config.Repos, claudeDir, command, i
 	}
 
 	events := store.New(filepath.Join(paths.DataDir, eventsFile))
+	// Once, before either branch. The walk is handed these names as data and the
+	// inventory snapshot below publishes the same pass, so discovery's cost — a read of
+	// every transcript under the harness directory for the consented root's listings —
+	// is paid one time (ADR-0016). Moving it ahead of the walk is behaviour-preserving:
+	// it reads installed primitives from disk, which the walk does not modify, and
+	// Refresh still reads the spool afterwards.
+	discovered := discoverPrimitives(repos, claudeDir, inventoryRoot)
 	if !full {
 		// No walk, and deliberately no scan record either. RecordScan replaces the
 		// scan counters wholesale (internal/health), so a zero-valued health.Scan
@@ -189,10 +196,10 @@ func initEpilogue(paths config.Paths, repos *config.Repos, claudeDir, command, i
 		// The boundary is not a cursor and does not stand in for one: it says what the
 		// user consented to, never what has been seen, so re-scanning stays safe for the
 		// reason it always was (ADR-0004, ADR-0015).
-		return 0, refreshInventory(paths, repos, claudeDir, inventoryRoot, events)
+		return 0, refreshInventory(paths, events, discovered)
 	}
 	stale, idle := thresholds(paths)
-	written, scan, err := scanWithBoundary(paths, repos, claudeDir, events, stale, idle, wholeHistory)
+	written, scan, err := scanWithBoundary(paths, repos, claudeDir, events, installedFrom(discovered), stale, idle, wholeHistory)
 	// The counters are recorded whether the scan succeeded or not: a partial
 	// activation — hooks written, history import failed — is reported through
 	// doctor rather than repaired silently, and the counters are the report.
@@ -202,7 +209,7 @@ func initEpilogue(paths config.Paths, repos *config.Repos, claudeDir, command, i
 	if err != nil {
 		return written, err
 	}
-	return written, refreshInventory(paths, repos, claudeDir, inventoryRoot, events)
+	return written, refreshInventory(paths, events, discovered)
 }
 
 // Ingest imports available transcripts for consented repositories only.
@@ -233,18 +240,21 @@ func ingestScoped(paths config.Paths, claudeDir string, scope collectionScope) (
 		return 0, fmt.Errorf("resolving current directory: %w", err)
 	}
 	events := store.New(filepath.Join(paths.DataDir, eventsFile))
+	// One discovery for this command, shared by the walk and the refresh below, for the
+	// reason discoverPrimitives states.
+	discovered := discoverPrimitives(repos, claudeDir, root)
 	// Through the sequencer, so a user-asked scan picks up a repository the boundary
 	// encloses that no scan has seen a session in yet — requirement 6's "not only the
 	// ones present when --global ran".
 	stale, idle := thresholds(paths)
-	written, scan, err := scanWithBoundary(paths, repos, claudeDir, events, stale, idle, scope)
+	written, scan, err := scanWithBoundary(paths, repos, claudeDir, events, installedFrom(discovered), stale, idle, scope)
 	if recordErr := health.New(paths.HealthFile).RecordScan(scan); recordErr != nil && err == nil {
 		err = recordErr
 	}
 	if err != nil {
 		return written, err
 	}
-	return written, refreshInventory(paths, repos, claudeDir, root, events)
+	return written, refreshInventory(paths, events, discovered)
 }
 
 // Trigger is the scan the Claude Code hook causes, and it is single-flight: a
@@ -431,7 +441,7 @@ var importHistory = ingestHistory
 // rather than an error that breaks the command (plan §4.3). Swallowed and
 // uncounted, though, they are indistinguishable from a machine with no history —
 // which is the confusion ADR-0010 asks doctor to end.
-func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Store, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope, discover *boundaryDiscovery) (int, health.Scan, error) {
+func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Store, installed claudecode.Installed, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope, discover *boundaryDiscovery) (int, health.Scan, error) {
 	written := 0
 	scan := health.Scan{At: time.Now().UTC(), RefusedProjects: repos.DroppedEntries()}
 	resolve := resolverFor(repos, scope, discover)
@@ -444,7 +454,7 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 	//
 	// The Namer is hoisted with it. It was already constant across the walk — it is
 	// derived from the one name key — so building it once is the same value.
-	transcripts := ingest.NewClaudeCodeScan(resolve, record.NewNamer(repos.NameKey()), stale, idle, destination)
+	transcripts := ingest.NewClaudeCodeScan(resolve, record.NewNamer(repos.NameKey()), installed, stale, idle, destination)
 	err := filepath.WalkDir(filepath.Join(claudeDir, "projects"), func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			// "Not there" arrives by this same route as "could not be read":
@@ -482,6 +492,12 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 		// primitive's identity lives in would otherwise stop collection in silence
 		// while doctor still reported "collecting" (plan §3.3, §12).
 		scan.RefusedCalls += result.Refused
+		// A typed invocation whose name is not a primitive this machine has. It is a clean
+		// zero rather than lost collection — a typed CLI built-in was never Wake's to
+		// collect — but it is reported rather than silent, because the injected set is
+		// fallible (ADR-0036 §3). Added per source, like RefusedCalls: the tag is judged
+		// entirely within the line it is on, so Close has no half to contribute.
+		scan.SkippedTypedInvocations += result.SkippedTypedInvocations
 		// Pending, Interrupted, AmbiguousSkillRuns and Skipped are deliberately not
 		// folded here. None of the four is knowable from one transcript any more: a call
 		// unterminated in this file may be terminated in the next, and a session quiet
@@ -589,9 +605,40 @@ func discoveryScope(repos *config.Repos, claudeDir, cwd string) (inventory.Scope
 	return inventory.Scope{ClaudeDir: claudeDir, Root: root, Project: inventory.ProjectConsented}, names
 }
 
-func refreshInventory(paths config.Paths, repos *config.Repos, claudeDir, root string, events *store.Store) error {
+// discoverPrimitives runs Claude Code's primitive discovery once for one command.
+//
+// One pass, two consumers: the ingest walk, which is handed the installed names as data
+// because ADR-0036 §3 admits a typed invocation's name only if the machine has a
+// primitive under it and ADR-0019 §1 forbids the reader from looking; and the persisted
+// inventory snapshot refreshInventory publishes afterwards. One pass rather than two
+// because discovery reads every transcript under the harness directory for the consented
+// root's listings (inventory.scanListings), and the hook-fired scan may not pay for that
+// twice (ADR-0016).
+//
+// This is the caller's side of ADR-0019 §1's line: the filesystem is read here, and what
+// crosses into the adapter is a value. Discovery returns no error — an unreadable source
+// contributes nothing — so a partial inventory costs a typed invocation on the skip
+// counter and never a failure (plan §4.3).
+func discoverPrimitives(repos *config.Repos, claudeDir, root string) inventory.Discovery {
 	scope, names := discoveryScope(repos, claudeDir, root)
-	return inventory.New(paths.PrimitivesFile).Refresh(events, inventory.ClaudeCodeInScope(scope, names))
+	return inventory.ClaudeCodeInScope(scope, names)
+}
+
+// installedFrom folds one discovery into the lookup the Claude Code reader is handed.
+//
+// The harness field is dropped rather than filtered: this discovery is Claude Code's
+// own, so every primitive in it is that harness's. Nothing but a bounded name and a kind
+// crosses (ADR-0007).
+func installedFrom(discovered inventory.Discovery) claudecode.Installed {
+	primitives := make([]claudecode.InstalledPrimitive, 0, len(discovered.Primitives))
+	for _, primitive := range discovered.Primitives {
+		primitives = append(primitives, claudecode.InstalledPrimitive{Name: primitive.Name, Kind: primitive.Kind})
+	}
+	return claudecode.NewInstalled(primitives)
+}
+
+func refreshInventory(paths config.Paths, events *store.Store, discovered inventory.Discovery) error {
+	return inventory.New(paths.PrimitivesFile).Refresh(events, discovered)
 }
 
 // AllRepoRoots resolves the Namer together with the canonical root of every

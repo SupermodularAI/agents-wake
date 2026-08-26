@@ -9,13 +9,13 @@ import (
 )
 
 // subagentSeparator delimits the two halves of a subagent invocation's source
-// identity. It is a group separator, and it is a third distinct byte on purpose: a
-// token-domain value can contain none of the three, a tool call's composed identity
-// carries 0x1f, a session_end's carries 0x1e, and a Shape-A fallback derives from a
-// bare entry uuid with no separator at all. The four id shapes are therefore
-// structurally disjoint — no transcript, hostile or otherwise, can craft a subagent
-// id that collides with any other shape (ADR-0004, ADR-0035's Context on what a
-// carelessly hashed fourth shape costs).
+// identity. It is a group separator, and it is a distinct byte on purpose: a
+// token-domain value can contain none of them, a tool call's composed identity carries
+// 0x1f, a session_end's carries 0x1e, a typed invocation's carries 0x1c, and a Shape-A
+// fallback derives from a bare entry uuid with no separator at all. The five id shapes
+// are therefore structurally disjoint — no transcript, hostile or otherwise, can craft a
+// subagent id that collides with any other shape (ADR-0004, ADR-0035's Context on what a
+// carelessly hashed shape costs).
 const subagentSeparator = "\x1d"
 
 // subagentSourceEvent identifies the one record a subagent run ever produces: the

@@ -314,7 +314,7 @@ func TestScanSkipsASubagentTranscriptWhoseAgentIDIsOutsideTheTokenDomain(t *test
 // operation (BC-7, ADR-0019 §1). An unconsented directory is outside collection
 // rather than lost from it, so it is neither a record nor a refusal.
 func TestScanSkipsASubagentTranscriptInAnUnconsentedRepository(t *testing.T) {
-	scan := NewScan(deny, names, closedSession, Idleness{})
+	scan := NewScan(deny, names, installedPrimitives, closedSession, Idleness{})
 	if _, err := scan.Read(strings.NewReader(subagentTranscript(t, "agent-1", "session-1", "explorer"))); err != nil {
 		t.Fatalf("Scan.Read() error = %v", err)
 	}
@@ -372,7 +372,7 @@ func TestScanDerivesADirectoryScopedSubagentName(t *testing.T) {
 // A Namer with no key cannot digest a scope, so the run is refused rather than named
 // with an unkeyed digest of a repository path fragment (ADR-0020, fail closed).
 func TestScanRefusesAScopedSubagentNameWithoutAScopeKey(t *testing.T) {
-	scan := NewScan(resolver, record.Namer{}, closedSession, Idleness{})
+	scan := NewScan(resolver, record.Namer{}, installedPrimitives, closedSession, Idleness{})
 	if _, err := scan.Read(strings.NewReader(subagentTranscript(t, "agent-1", "session-1", "apps/web:reviewer"))); err != nil {
 		t.Fatalf("Scan.Read() error = %v", err)
 	}

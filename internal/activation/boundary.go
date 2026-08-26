@@ -117,7 +117,7 @@ func registerDiscovered(repos *config.Repos, dirs []string, from time.Time) (reg
 // these describe the store it wrote into. Setting them at the one return point is also
 // what keeps them from being dropped when the second walk's counters replace the
 // first's.
-func scanWithBoundary(paths config.Paths, repos *config.Repos, claudeDir string, events *store.Store, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope) (int, health.Scan, error) {
+func scanWithBoundary(paths config.Paths, repos *config.Repos, claudeDir string, events *store.Store, installed claudecode.Installed, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope) (int, health.Scan, error) {
 	found, rebuilt, err := rebuildStaleSpool(events, scope)
 	if err != nil {
 		// A spool this build cannot read and could not replace. At is stamped so the
@@ -125,7 +125,7 @@ func scanWithBoundary(paths config.Paths, repos *config.Repos, claudeDir string,
 		// never ran; the error itself is what the caller surfaces.
 		return 0, health.Scan{At: time.Now().UTC()}, err
 	}
-	written, scan, err := scanBoundaryWalks(paths, repos, claudeDir, events, stale, idle, scope)
+	written, scan, err := scanBoundaryWalks(paths, repos, claudeDir, events, installed, stale, idle, scope)
 	scan.StaleRecords, scan.StaleRebuilt = found, rebuilt
 	return written, scan, err
 }
@@ -187,9 +187,9 @@ func rebuildStaleSpool(events *store.Store, scope collectionScope) (found int, r
 	return found, true, nil
 }
 
-func scanBoundaryWalks(paths config.Paths, repos *config.Repos, claudeDir string, events *store.Store, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope) (int, health.Scan, error) {
+func scanBoundaryWalks(paths config.Paths, repos *config.Repos, claudeDir string, events *store.Store, installed claudecode.Installed, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope) (int, health.Scan, error) {
 	discovery := newBoundaryDiscovery(repos)
-	written, scan, err := importHistory(repos, claudeDir, events, stale, idle, scope, discovery)
+	written, scan, err := importHistory(repos, claudeDir, events, installed, stale, idle, scope, discovery)
 	if err != nil {
 		return written, scan, err
 	}
@@ -215,7 +215,13 @@ func scanBoundaryWalks(paths config.Paths, repos *config.Repos, claudeDir string
 	}
 	// nil collector: whatever this walk observes, there is no third walk to act on it,
 	// and a directory it discovers is one the next scan picks up.
-	second, secondScan, err := importHistory(reopened, claudeDir, events, stale, idle, scope, nil)
+	//
+	// The installed-primitive set is the one built before the first walk, so a primitive
+	// local to a directory that walk newly registered is not in it yet. The next
+	// command's discovery picks it up, and the skip counter is what reports the gap
+	// meanwhile — the same fallibility ADR-0036 §3 puts that counter there for. Building
+	// a second set here would pay for discovery twice on the hook-fired path (ADR-0016).
+	second, secondScan, err := importHistory(reopened, claudeDir, events, installed, stale, idle, scope, nil)
 	if err != nil {
 		return written + second, scan, err
 	}

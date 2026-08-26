@@ -1017,12 +1017,21 @@ func deny(string, time.Time) (record.Hash, bool) { return "", false }
 // subkey of the per-machine salt (config.Repos.NameKey).
 var names = record.NewNamer([]byte("test scope key"))
 
+// installedPrimitives is what this package's tests treat the machine as having. It is
+// the third injected input, beside the resolver and the namer; a test about a name the
+// machine does not have passes a narrower Installed of its own.
+var installedPrimitives = NewInstalled([]InstalledPrimitive{
+	{Name: "pr-review", Kind: record.KindSkill},
+	{Name: "run-sdlc", Kind: record.KindSkill},
+	{Name: "deploy", Kind: record.KindCommand},
+})
+
 // read is this file's entry point into Read for every test that says nothing about
 // session_end derivation. It passes a zero Idleness, which derives none — the same
 // safe default a caller that cannot read the threshold gets. A test about the
 // session grain calls Read directly with a real Idleness (see session_end_test.go).
 func read(source io.Reader, resolve Resolver, names record.Namer, stale Staleness) (Result, error) {
-	return Read(source, resolve, names, stale, Idleness{})
+	return Read(source, resolve, names, installedPrimitives, stale, Idleness{})
 }
 
 // quoted encodes value as a JSON string so a hostile value can be embedded in a
@@ -1732,18 +1741,26 @@ func TestReadStillResolvesAStaleCallOnATranscriptCarryingBookkeepingLines(t *tes
 // rest, so the line is still inspectable — and neither of these carries a tool_result
 // block, so neither can be the terminator of a buffered call.
 //
-// They are the common case, not an edge: sampling ~/.claude/projects, message.content
-// arrives as a plain string on thousands of user turns, touching almost every
-// transcript. A gate keyed on "json.Unmarshal returned an error" would therefore be as
-// permanently closed as one keyed on Malformed was.
+// A gate keyed on "json.Unmarshal returned an error" would be as permanently closed as
+// one keyed on Malformed was, so the shape below has to keep standing for a line the
+// reader has no entry for and which nonetheless hides nothing.
 //
-// A non-object toolUseResult used to belong here and no longer does: the field is read
-// raw, so such a line decodes whole (see transcriptEntry.ToolUseResult). It is covered
-// as an ordinary readable line instead — by
-// TestReadDoesNotInterruptACallTerminatedByAnyResultShape when it terminates a call,
-// and by the case below when it does not.
+// Two shapes used to belong here and no longer do. A non-object toolUseResult decodes
+// whole, because the field is read raw (see transcriptEntry.ToolUseResult); it is
+// covered as an ordinary readable line by
+// TestReadDoesNotInterruptACallTerminatedByAnyResultShape when it terminates a call and
+// by the case below when it does not. And a user turn whose content is a plain string
+// decodes whole now too, because the reader models that shape — it is the one a typed
+// invocation's command tag arrives on (messageContent, ADR-0036 §3) — so it is covered
+// by TestReadDecodesAUserTurnWhoseContentIsText instead.
+//
+// What is left is a content at a type the reader models neither of, which
+// messageContent.UnmarshalJSON still deliberately costs the entry for rather than
+// guessing at. The map must not go empty:
+// TestReadStillResolvesAStaleCallWhenALineOnlyPartlyDecoded iterates it and would pass
+// vacuously.
 var partlyDecodedLines = map[string]string{
-	"a user turn whose content is text rather than blocks": `{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","type":"user","message":{"role":"user","content":"carry on"}}`,
+	"a user turn whose content is an object rather than blocks or text": `{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","type":"user","message":{"role":"user","content":{"note":"carry on"}}}`,
 }
 
 func TestReadStillResolvesAStaleCallWhenALineOnlyPartlyDecoded(t *testing.T) {
@@ -1762,6 +1779,58 @@ func TestReadStillResolvesAStaleCallWhenALineOnlyPartlyDecoded(t *testing.T) {
 				t.Errorf("Malformed = %d, want 1 — the line still yielded no entry", result.Malformed)
 			}
 		})
+	}
+}
+
+// A plain-string message.content is where a typed invocation's command tag lives, so
+// the reader has to get an entry out of that line at all before ADR-0036 §3 can read
+// anything from it. It used to be a *json.UnmarshalTypeError that cost the whole entry.
+func TestReadDecodesAUserTurnWhoseContentIsText(t *testing.T) {
+	line := `{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","type":"user","message":{"role":"user","content":"carry on"}}`
+
+	result, err := read(strings.NewReader(unterminatedCall+"\n"+line), resolver, names, closedSession)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if result.Malformed != 0 {
+		t.Errorf("Malformed = %d, want 0 — the line now yields an entry", result.Malformed)
+	}
+	// The line is still not a terminator, so the staleness rule still runs over it.
+	if result.Interrupted != 1 || result.Pending != 0 || len(result.Records) != 1 {
+		t.Fatalf("Read() = %+v", result)
+	}
+}
+
+// The default branch of messageContent.UnmarshalJSON delegates to the block decode, so
+// every shape other than a string costs the entry exactly as it did before — and the
+// line stays inspectable, so it still cannot stop the staleness rule.
+func TestReadStillCostsTheEntryForAContentTypeItModelsNeither(t *testing.T) {
+	line := `{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","type":"user","message":{"role":"user","content":{"note":"carry on"}}}`
+
+	result, err := read(strings.NewReader(unterminatedCall+"\n"+line), resolver, names, closedSession)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if result.Malformed != 1 {
+		t.Errorf("Malformed = %d, want 1 — the entry is still lost", result.Malformed)
+	}
+	if result.Interrupted != 1 || result.Pending != 0 {
+		t.Fatalf("Read() = %+v", result)
+	}
+}
+
+// D8's first intended side effect, pinned so a later change cannot silently undo it: a
+// string-shaped content is no longer a parse error, on the commonest line shape a real
+// transcript has.
+func TestReadCountsNoParseErrorForAStringShapedUserEntry(t *testing.T) {
+	line := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","type":"user","message":{"role":"user","content":"carry on"}}`
+
+	result, err := read(strings.NewReader(line), resolver, names, Staleness{})
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if result.Malformed != 0 {
+		t.Fatalf("Malformed = %d, want 0", result.Malformed)
 	}
 }
 
@@ -1792,8 +1861,11 @@ func TestReadTreatsALineWithNoEntryAsActivityForItsSession(t *testing.T) {
 	// This is what the narrowed gate makes load-bearing: these lines no longer stop the
 	// rule, so the rule has to take account of them rather than not see them.
 	lines := map[string]string{
-		"bookkeeping line":  `{"type":"queue-operation","operation":"enqueue","sessionId":"session-1","timestamp":"2026-08-13T19:30:00Z"}`,
-		"partly decoded":    `{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T19:30:00Z","type":"user","message":{"role":"user","content":"carry on"}}`,
+		"bookkeeping line": `{"type":"queue-operation","operation":"enqueue","sessionId":"session-1","timestamp":"2026-08-13T19:30:00Z"}`,
+		// An object content, not the string one this line used to carry: the reader models
+		// a string content now (messageContent), so that shape yields an entry and no
+		// longer stands for a line the reader has none for.
+		"partly decoded":    `{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T19:30:00Z","type":"user","message":{"role":"user","content":{"note":"carry on"}}}`,
 		"unusable entry id": `{"uuid":"not/a/token","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T19:30:00Z","message":{"content":[{"type":"text"}]}}`,
 	}
 	// 20:00 against a 19:30 line: half an hour inside a one-hour window.
@@ -2145,7 +2217,7 @@ func TestMarshalledRecordsCarryNoSeparator(t *testing.T) {
 
 func assertNoSeparatorInRecords(t *testing.T, input string, stale Staleness, idle Idleness) {
 	t.Helper()
-	result, err := Read(strings.NewReader(input), resolver, names, stale, idle)
+	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, stale, idle)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}

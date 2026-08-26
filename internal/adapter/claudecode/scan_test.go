@@ -22,7 +22,7 @@ import (
 // not a real transcript but two of them sharing one session id.
 func twoSources(t *testing.T, stale Staleness, idle Idleness, sources ...string) ([]record.Record, Result) {
 	t.Helper()
-	scan := NewScan(resolver, names, stale, idle)
+	scan := NewScan(resolver, names, installedPrimitives, stale, idle)
 	records := []record.Record{}
 	for index, source := range sources {
 		result, err := scan.Read(strings.NewReader(source))
@@ -194,7 +194,7 @@ func TestScanHoldsASourceFloorForASessionOpenInAnotherSource(t *testing.T) {
 	quiet := assistantLine("agent-1", "session-1", "2026-08-13T12:00:00Z", "msg_agent", realUsage)
 	recent := assistantLine("parent-1", "session-1", "2026-08-13T13:30:00Z", "msg_parent", realUsage)
 
-	scan := NewScan(resolver, names, stale, Idleness{})
+	scan := NewScan(resolver, names, installedPrimitives, stale, Idleness{})
 	for index, source := range []string{quiet, recent} {
 		if _, err := scan.Read(strings.NewReader(source)); err != nil {
 			t.Fatalf("Scan.Read(source %d) error = %v", index, err)
@@ -267,7 +267,7 @@ func TestScanResolvesNoSessionOfASourceThatFailedPartWay(t *testing.T) {
 	}, "\n")
 	clean := openCall("other-1", "session-2", "2026-08-13T12:00:00Z", "call-other")
 
-	scan := NewScan(resolver, names, stale, finished)
+	scan := NewScan(resolver, names, installedPrimitives, stale, finished)
 	source := &truncatedSource{head: strings.NewReader(partial), err: errors.New("device error")}
 	if _, err := scan.Read(source); err == nil {
 		t.Fatal("Scan.Read(truncated source) error = nil, want the failed read reported")
@@ -314,5 +314,64 @@ func TestScanRetainsNoPathOrTranscriptValue(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// typedTurnIn is typedTurn for an arbitrary session, so a multi-source case can put a
+// sidechain copy of one tag under the same session id the parent carries.
+func typedTurnIn(uuid, session, at, name string, sidechain bool) string {
+	return fmt.Sprintf(
+		`{"uuid":%q,"sessionId":%q,"cwd":"/repo","timestamp":%q,"version":"1.0.0","entrypoint":"cli","isSidechain":%t,`+
+			`"type":"user","message":{"role":"user","content":"<command-name>/%s</command-name>"}}`,
+		uuid, session, at, sidechain, name)
+}
+
+// ADR-0004: the record set is a property of the transcripts and not of the order the
+// walk opened them in. A typed invocation derives entirely from its own entry, so this
+// is the strongest form of that — reversing the sources must not move a single field.
+func TestScanDerivesOneRecordPerTypedOccurrenceAcrossSources(t *testing.T) {
+	first := typedTurnIn("entry-1", "session-1", "2026-08-13T12:00:00Z", "pr-review", false)
+	second := strings.Join([]string{
+		typedTurnIn("entry-2", "session-1", "2026-08-13T12:00:01Z", "pr-review", false),
+		typedTurnIn("entry-3", "session-1", "2026-08-13T12:00:02Z", "pr-review", false),
+	}, "\n")
+
+	forward, forwardResult := twoSources(t, closedSession, Idleness{}, first, second)
+	if len(forward) != 3 {
+		t.Fatalf("records = %d, want 3: %+v", len(forward), forward)
+	}
+	if forwardResult.SkippedTypedInvocations != 0 || forwardResult.AmbiguousSkillRuns != 0 {
+		t.Errorf("Close() = %+v", forwardResult)
+	}
+	reversed, _ := twoSources(t, closedSession, Idleness{}, second, first)
+
+	byID := func(events []record.Record) []record.Record {
+		sorted := slices.Clone(events)
+		slices.SortFunc(sorted, func(a, b record.Record) int {
+			return cmp.Compare(string(a.EventID), string(b.EventID))
+		})
+		return sorted
+	}
+	if !reflect.DeepEqual(byID(forward), byID(reversed)) {
+		t.Errorf("source order changed the record set:\nforward = %+v\nreversed = %+v", byID(forward), byID(reversed))
+	}
+}
+
+// A subagent's own turn carries the parent's message body, so the same tag text
+// appears in the subagent's transcript on a different uuid. Counting it would report
+// one typed invocation twice, once per file (ADR-0023 §1, ADR-0036 §2).
+func TestScanIgnoresASidechainCopyOfATypedInvocation(t *testing.T) {
+	parent := typedTurnIn("entry-1", "session-1", "2026-08-13T12:00:00Z", "pr-review", false)
+	subagent := typedTurnIn("entry-2", "session-1", "2026-08-13T12:00:01Z", "pr-review", true)
+
+	records, result := twoSources(t, closedSession, Idleness{}, parent, subagent)
+	if len(records) != 1 {
+		t.Fatalf("records = %d, want 1: %+v", len(records), records)
+	}
+	if records[0].EventID != record.DeriveEventID(harness, typedSourceEvent("entry-1")) {
+		t.Errorf("record derived from the wrong entry: %+v", records[0])
+	}
+	if result.SkippedTypedInvocations != 0 || result.Refused != 0 {
+		t.Errorf("Close() = %+v", result)
 	}
 }

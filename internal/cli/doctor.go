@@ -98,6 +98,13 @@ func newDoctorCmd() *cobra.Command {
 // The interpretation of these counters lives in health.Diagnose, because
 // internal/cli only parses and prints (ADR-0001, plan §6.2). This function is the
 // print loop and holds no decision about what the numbers mean.
+//
+// The skipped-typed-invocation line prints whatever the state word says, and it is not
+// part of the refused-call count. ADR-0036 §3 keeps the two apart: a refused call is
+// lost collection and blinds the integration state, while a tag naming something this
+// machine has no primitive for was never Wake's to collect. Every scan re-skips the
+// same built-ins, so a state word following that count could never change again — the
+// line is how it is reported instead.
 func writeDiagnosis(out io.Writer, paths config.Paths, claudeDir string) error {
 	report, readErr := health.New(paths.HealthFile).Read()
 
@@ -152,6 +159,7 @@ func writeDiagnosis(out io.Writer, paths config.Paths, claudeDir string) error {
 		{"pending calls", report.Scan.PendingCalls},
 		{"interrupted calls", report.Scan.InterruptedCalls},
 		{"ambiguous skill runs", report.Scan.AmbiguousSkillRuns},
+		{"skipped typed invocations", report.Scan.SkippedTypedInvocations},
 	} {
 		if _, err := fmt.Fprintf(out, "%s: %d\n", line.key, line.value); err != nil {
 			return err
