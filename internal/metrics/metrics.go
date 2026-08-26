@@ -72,6 +72,15 @@ type Summary struct {
 	Primitives   []PrimitiveUsage
 }
 
+// Observed reports whether the aggregate saw any terminal record at all. It is the
+// question a renderer's empty state means to ask, and it lives here because the
+// answer is not "Invocations == 0": a session-grain record is terminal evidence that
+// counts toward Sessions and nothing else (see Aggregate), so a session with zero
+// primitive use — the plan §2.7 baseline — has been observed while every invocation
+// count is still zero. Re-deriving this per renderer is what made `wake report` and
+// the dashboard claim an empty store over exactly that session.
+func (s Summary) Observed() bool { return s.Invocations > 0 || s.Sessions > 0 }
+
 // Aggregate derives the MVP's metrics from terminal records. Unknown outcomes
 // remain usage evidence but are excluded from health-rate denominators.
 //

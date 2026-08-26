@@ -154,6 +154,31 @@ func TestAggregateCountsASessionWithNoInvocations(t *testing.T) {
 	}
 }
 
+// TestSummaryObserved pins the question every renderer's empty state actually asks:
+// did the store hold anything terminal at all? Asking it as "Invocations == 0" was
+// true only while an invocation was the sole thing a record could be; the session
+// grain made it a renderer bug, twice over, so the answer lives here beside the
+// counts instead of being re-derived per renderer.
+func TestSummaryObserved(t *testing.T) {
+	ok := record.OutcomeOK
+	instant := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name    string
+		records []record.Record
+		want    bool
+	}{
+		{name: "nothing", records: nil},
+		{name: "an invocation", records: []record.Record{testRecord("one", &ok)}, want: true},
+		{name: "a session with no primitive use", records: []record.Record{sessionEndRecord("session-1", instant)}, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := Aggregate(test.records).Observed(); got != test.want {
+				t.Errorf("Observed() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func sessionEndRecord(sessionID record.Identifier, at time.Time) record.Record {
 	var zero int64
 	return record.Record{

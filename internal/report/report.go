@@ -60,7 +60,7 @@ func Render(writer io.Writer, summary metrics.Summary, available []inventory.Usa
 	if _, err := fmt.Fprintln(writer, style.Paint(pretty, style.Lime, strings.Repeat("=", 72))); err != nil {
 		return err
 	}
-	if summary.Invocations == 0 && len(available) == 0 {
+	if !summary.Observed() && len(available) == 0 {
 		_, err := fmt.Fprintln(writer, "No terminal events yet. Run `wake ingest` after using a consented harness.")
 		return err
 	}
