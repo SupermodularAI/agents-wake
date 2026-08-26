@@ -107,6 +107,12 @@ func NewScan(resolve Resolver, names record.Namer, stale Staleness, idle Idlenes
 // terminated in the next, and a session quiet in this source may be running in the
 // next. Close answers all six. A caller must not read a zero here as an answer.
 //
+// A read that fails part-way costs its own records and nothing else: they are
+// dropped with the error, and every session the source carried is marked blind so
+// the walk resolves none of them from the partial view it now holds. The caller may
+// therefore keep walking after an error — which is what a per-harness soft failure
+// means (plan §4.3) — without a truncated source contaminating a sibling.
+//
 // Only events accepted by the resolver can become records, so an adapter scan
 // cannot widen project consent.
 func (s *Scan) Read(reader io.Reader) (Result, error) {
@@ -249,6 +255,28 @@ func (s *Scan) Read(reader io.Reader) (Result, error) {
 		}
 	})
 	if err != nil {
+		// The read stopped part-way, so the sessions this source carried are known to
+		// have been judged from an incomplete view. internal/jsonl delivers every line
+		// before the failing one, so those lines are already folded into the walk-scoped
+		// buffers above — while everything the harness wrote after the failure was never
+		// seen. Returning the error without tainting them would leave the walk resolving
+		// them as if the source had been read whole, which is the same inference from
+		// blindness the unreadable gate below refuses, in its most complete form: not one
+		// line unread but the rest of the file.
+		//
+		// The records this source did derive are dropped with the error, as they were
+		// before this state was hoisted to the walk. Dropping them is safe — a record not
+		// written is derived again by the next scan — and it is exactly why the taint is
+		// needed: the totals folded into the session grain are now missing them, so an
+		// unmarked session would report a session_end understating its own tool calls,
+		// written once and never corrected (ADR-0034 §3 first-write-wins).
+		//
+		// A failing read is not rare enough to reason about hypothetically: these
+		// transcripts are being appended to by a running harness while the walk reads
+		// them, and os.Open succeeding says nothing about reading to the end. The cost of
+		// the taint is a call that stays Pending and a session_end deferred to the next
+		// scan — a slower scan, never a permanently wrong record.
+		s.markBlind(seen)
 		return Result{}, errors.New("reading Claude Code history")
 	}
 	// A line too long to deliver is unusable in the same way a line that does not
@@ -296,9 +324,7 @@ func (s *Scan) Read(reader io.Reader) (Result, error) {
 	// call") is what makes the rule run in production and stop only for blindness that
 	// could actually mislead it.
 	if unreadable > 0 {
-		for sessionID := range seen {
-			s.sessions.MarkBlind(sessionID)
-		}
+		s.markBlind(seen)
 	}
 	// Folded here rather than at Close so the aggregate never has to retain the
 	// records: a session_end's totals are a running count over the union of its
@@ -368,6 +394,17 @@ func (s *Scan) Close() Result {
 		}
 	}
 	return result
+}
+
+// markBlind taints every session one source observed activity for, so that nothing
+// the walk resolves may conclude silence for any of them. Both callers are the two
+// ways a source can be read blind — one line it could not rule out as a
+// terminator, or a read that stopped part-way — and the grain is the same for
+// both: the sessions that source carried, and no others.
+func (s *Scan) markBlind(seen map[record.Identifier]struct{}) {
+	for sessionID := range seen {
+		s.sessions.MarkBlind(sessionID)
+	}
 }
 
 // credit records that the post-walk resolution attributed a record back to one

@@ -2,6 +2,7 @@ package claudecode
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"reflect"
 	"slices"
@@ -229,6 +230,63 @@ func TestScanBlindnessIsPerSessionNotPerWalk(t *testing.T) {
 	for _, event := range records {
 		if event.Outcome != nil && *event.Outcome == record.OutcomeInterrupted && event.SessionID != "session-2" {
 			t.Errorf("interrupted record %+v belongs to the blind session", event)
+		}
+	}
+}
+
+// truncatedSource is a source whose bytes stop part-way: every line before the
+// failure is delivered, and then the read fails. It is what a transcript a running
+// harness is appending to looks like when the read does not complete — os.Open
+// succeeding says nothing about reading to the end.
+type truncatedSource struct {
+	head *strings.Reader
+	err  error
+}
+
+func (s *truncatedSource) Read(buffer []byte) (int, error) {
+	if s.head.Len() > 0 {
+		return s.head.Read(buffer)
+	}
+	return 0, s.err
+}
+
+// Requirement 4, plan §3.3, ADR-0015: a source whose read failed part-way has
+// already folded its lines into the walk's buffers, so the sessions it carried are
+// judged from a view that is known-incomplete. None of them may be resolved — the
+// unread remainder of that source may hold the tool_result that terminated a
+// buffered call, and both the interrupted record and the session_end are permanent
+// (ADR-0015 rejects upsert, ADR-0004 deduplicates the correction away).
+func TestScanResolvesNoSessionOfASourceThatFailedPartWay(t *testing.T) {
+	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(4 * time.Hour)}
+	// Newline-terminated, so both lines are delivered before the failure: what is
+	// unread is whatever the harness wrote after them.
+	partial := strings.Join([]string{
+		openCall("parent-1", "session-1", "2026-08-13T12:00:00Z", "call-parent"),
+		assistantLine("parent-2", "session-1", "2026-08-13T12:00:01Z", "msg_parent", realUsage),
+		"",
+	}, "\n")
+	clean := openCall("other-1", "session-2", "2026-08-13T12:00:00Z", "call-other")
+
+	scan := NewScan(resolver, names, stale, finished)
+	source := &truncatedSource{head: strings.NewReader(partial), err: errors.New("device error")}
+	if _, err := scan.Read(source); err == nil {
+		t.Fatal("Scan.Read(truncated source) error = nil, want the failed read reported")
+	}
+	result, err := scan.Read(strings.NewReader(clean))
+	if err != nil {
+		t.Fatalf("Scan.Read(clean source) error = %v", err)
+	}
+	final := scan.Close()
+
+	if final.Interrupted != 1 {
+		t.Errorf("Interrupted = %d, want 1: only the clean source's session may be judged silent", final.Interrupted)
+	}
+	if final.Pending != 1 {
+		t.Errorf("Pending = %d, want 1: the truncated source's call stays buffered", final.Pending)
+	}
+	for _, event := range append(result.Records, final.Records...) {
+		if event.SessionID == "session-1" {
+			t.Errorf("record derived for the truncated source's session: %+v", event)
 		}
 	}
 }
