@@ -796,13 +796,29 @@ func TestADeferredChildOfAnOpenSessionIsNotEmitted(t *testing.T) {
 	source := attributedToolCall("call-entry", "session-1", "2026-08-13T12:00:00Z", "call-1", "Bash", "pr-review")
 	open := Staleness{Timeout: time.Hour, Now: callInstant.Add(10 * time.Minute)}
 
-	records, result := twoSources(t, open, Idleness{}, source)
-
-	if len(records) != 0 {
-		t.Fatalf("records = %+v, want none while the session may still be running", records)
+	// Driven directly rather than through twoSources, so the source floor can be
+	// asked for: a walk has no single floor, so Result leaves CursorFloor zero and
+	// SessionState.SourceFloor is the per-source answer (ADR-0023 §5).
+	scan := NewScan(resolver, names, installedPrimitives, open, Idleness{})
+	read, err := scan.Read(strings.NewReader(source))
+	if err != nil {
+		t.Fatalf("Scan.Read() error = %v", err)
 	}
-	if result.OpenSessions != 1 {
-		t.Errorf("OpenSessions = %d, want 1", result.OpenSessions)
+	final := scan.Close()
+
+	if len(read.Records) != 0 {
+		t.Fatalf("Read() records = %+v, want none: the child is deferred", read.Records)
+	}
+	if len(final.Records) != 0 {
+		t.Fatalf("Close() records = %+v, want none while the session may still be running", final.Records)
+	}
+	if final.OpenSessions != 1 {
+		t.Errorf("OpenSessions = %d, want 1", final.OpenSessions)
+	}
+	// The floor is what stops a future cursor advancing past the lines the deferred
+	// child was derived from, so the next scan can re-derive it.
+	if reported, _ := scan.sessions.SourceFloor(0, open); !reported {
+		t.Error("SourceFloor() reported no floor for a source carrying an open session")
 	}
 }
 
