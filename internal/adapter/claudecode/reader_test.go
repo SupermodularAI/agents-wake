@@ -3,6 +3,7 @@ package claudecode
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"testing"
@@ -32,7 +33,7 @@ func TestReadDerivesOnlyTerminalRecords(t *testing.T) {
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -47,7 +48,7 @@ func TestReadDerivesOnlyTerminalRecords(t *testing.T) {
 
 func TestReadDoesNotEmitUnterminatedCall(t *testing.T) {
 	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Skill"}]}}`
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -64,7 +65,7 @@ func TestReadUsesSkillNameInsteadOfToolName(t *testing.T) {
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Skill","input":{"skill":"pr-review","args":"never retain this prose"}}]}}`,
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -81,7 +82,7 @@ func TestReadUsesSkillNameInsteadOfToolName(t *testing.T) {
 // Staleness.
 func TestReadDerivesTerminalAttributedSkill(t *testing.T) {
 	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"run-sdlc","message":{"model":"sonnet","stop_reason":"end_turn"}}`
-	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -100,7 +101,7 @@ func TestReadDerivesTerminalAttributedSkill(t *testing.T) {
 // too would report one run as two.
 func TestReadDerivesNoSubagentRecordFromAttributionAlone(t *testing.T) {
 	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionAgent":"sdlc-check-architecture","message":{"model":"sonnet","stop_reason":"end_turn"}}`
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -122,7 +123,7 @@ func TestReadDefersASkillCandidateUntilItsSessionCloses(t *testing.T) {
 	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"run-sdlc","message":{"model":"sonnet","stop_reason":"end_turn"}}`
 
 	inside := Staleness{Timeout: time.Hour, Now: callInstant.Add(30 * time.Minute)}
-	buffered, err := Read(strings.NewReader(input), resolver, names, inside)
+	buffered, err := read(strings.NewReader(input), resolver, names, inside)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -136,7 +137,7 @@ func TestReadDefersASkillCandidateUntilItsSessionCloses(t *testing.T) {
 		t.Errorf("Read() = %+v, want the session open and no call buffered", buffered)
 	}
 
-	closed, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	closed, err := read(strings.NewReader(input), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -166,7 +167,7 @@ func TestReadCountsOneSkillRunAsOneInvocation(t *testing.T) {
 		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -204,7 +205,7 @@ func TestReadCollapsesASkillCandidatePerSessionNotPerTranscript(t *testing.T) {
 		`{"uuid":"entry-2","sessionId":"session-2","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -237,7 +238,7 @@ func TestReadEmitsOneFallbackForRepeatedShapeACandidates(t *testing.T) {
 		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -267,7 +268,7 @@ func TestReadDoesNotCountAmbiguityForACandidateTheToolUsePathCovered(t *testing.
 		`{"uuid":"entry-5","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:04Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -293,7 +294,7 @@ func TestReadEmitsSkillFallbacksInADeterministicOrder(t *testing.T) {
 
 	var want []record.Hash
 	for attempt := range 20 {
-		result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+		result, err := read(strings.NewReader(input), resolver, names, closedSession)
 		if err != nil {
 			t.Fatalf("Read() error = %v", err)
 		}
@@ -317,7 +318,7 @@ func TestReadEmitsSkillFallbacksInADeterministicOrder(t *testing.T) {
 func TestReadResolvesASkillCandidateDespiteAnOversizedLine(t *testing.T) {
 	candidate := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`
 
-	result, err := Read(strings.NewReader(candidate+"\n"+oversizedResult(t)+"\n"), resolver, names, closedSession)
+	result, err := read(strings.NewReader(candidate+"\n"+oversizedResult(t)+"\n"), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -342,7 +343,7 @@ func TestReadDoesNotResolveASkillCandidateWhenALineWasUnreadable(t *testing.T) {
 	candidate := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`
 	unreadable := `{"uuid":"entry-2","sessionId":"session-1",`
 
-	result, err := Read(strings.NewReader(candidate+"\n"+unreadable+"\n"), resolver, names, closedSession)
+	result, err := read(strings.NewReader(candidate+"\n"+unreadable+"\n"), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -365,7 +366,7 @@ func TestReadDoesNotResolveASkillCandidateWhenALineWasUnreadable(t *testing.T) {
 func TestReadNeverCountsASidechainTurnAsASkillInvocation(t *testing.T) {
 	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","isSidechain":true,"attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`
 
-	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -385,7 +386,7 @@ func TestReadRecordsAttributingAgentForPrimitiveCalls(t *testing.T) {
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionAgent":"sdlc-implement","message":{"content":[{"type":"tool_use","id":"call-1","name":"Skill","input":{"skill":"commit-message"}}]}}`,
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -396,7 +397,7 @@ func TestReadRecordsAttributingAgentForPrimitiveCalls(t *testing.T) {
 
 func TestReadDoesNotEmitUnfinishedAttributedRun(t *testing.T) {
 	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionAgent":"sdlc-check-architecture","message":{"model":"sonnet","stop_reason":"tool_use"}}`
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -410,7 +411,7 @@ func TestReadSkipsUnconsentedRepository(t *testing.T) {
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/outside","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/outside","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
-	result, err := Read(strings.NewReader(input), deny, names, Staleness{})
+	result, err := read(strings.NewReader(input), deny, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -445,7 +446,7 @@ func TestReadSkipsAnEventBeforeTheInstantCollectionBegan(t *testing.T) {
 		`{"uuid":"entry-4","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), forwardOnly, names, Staleness{})
+	result, err := read(strings.NewReader(input), forwardOnly, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -465,7 +466,7 @@ func TestReadKeepsUnknownOutcomeNull(t *testing.T) {
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1"}]}}`,
 	}, "\n")
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -480,7 +481,7 @@ func TestReadSkipsMalformedLine(t *testing.T) {
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Task","input":{"subagent_type":"explorer"}}]}}`,
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":true}]}}`,
 	}, "\n")
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -496,7 +497,7 @@ const twoCallsInOneEntry = `{"uuid":"entry-1","sessionId":"session-1","cwd":"/re
 {"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false},{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}`
 
 func TestReadDerivesADistinctIDForEachToolCallInOneEntry(t *testing.T) {
-	result, err := Read(strings.NewReader(twoCallsInOneEntry), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(twoCallsInOneEntry), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -515,11 +516,11 @@ func TestReadDerivesADistinctIDForEachToolCallInOneEntry(t *testing.T) {
 }
 
 func TestReadDerivesTheSameToolCallIDsOnReingest(t *testing.T) {
-	first, err := Read(strings.NewReader(twoCallsInOneEntry), resolver, names, Staleness{})
+	first, err := read(strings.NewReader(twoCallsInOneEntry), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("first Read() error = %v", err)
 	}
-	second, err := Read(strings.NewReader(twoCallsInOneEntry), resolver, names, Staleness{})
+	second, err := read(strings.NewReader(twoCallsInOneEntry), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("second Read() error = %v", err)
 	}
@@ -539,7 +540,7 @@ func TestReadDoesNotCollideAToolCallWithATerminalRun(t *testing.T) {
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -572,7 +573,7 @@ func TestReadRejectsAnEntryIDOutsideTheTokenDomain(t *testing.T) {
 		fmt.Sprintf(`{"uuid":%s,"sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","attributionSkill":"pr-review","message":{"stop_reason":"end_turn"}}`, quoted(t, "../escape")),
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -594,7 +595,7 @@ func TestReadCountsAnOversizedLineWithoutRetainingIt(t *testing.T) {
 		`{"uuid":"entry-4","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:03Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -625,7 +626,7 @@ func TestReadNeverUsesToolArguments(t *testing.T) {
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Skill","input":{"args":"do not retain this secret"}}]}}`,
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -657,7 +658,7 @@ var (
 // writes a call that genuinely succeeded as outcome: interrupted, permanently
 // (ADR-0004 dedup never upserts, ADR-0015).
 func TestReadCompletesACallWhoseResultLinePrecedesIt(t *testing.T) {
-	result, err := Read(strings.NewReader(reversedOrderPair), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(reversedOrderPair), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -690,7 +691,7 @@ func TestReadCompletesACallWhoseResultLinePrecedesIt(t *testing.T) {
 func TestReadDerivesTheSameRecordInEitherLineOrder(t *testing.T) {
 	encoded := make([]string, 0, 2)
 	for _, transcript := range []string{forwardOrderPair, reversedOrderPair} {
-		result, err := Read(strings.NewReader(transcript), resolver, names, Staleness{})
+		result, err := read(strings.NewReader(transcript), resolver, names, Staleness{})
 		if err != nil {
 			t.Fatalf("Read() error = %v", err)
 		}
@@ -714,7 +715,7 @@ func TestReadDerivesTheSameRecordInEitherLineOrder(t *testing.T) {
 // calls awaiting a result", and the staleness path ages exactly those into
 // interrupted. A call that does not exist has nothing to age.
 func TestReadEmitsNothingForAResultWhoseCallNeverArrives(t *testing.T) {
-	result, err := Read(strings.NewReader(toolResultLine), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(toolResultLine), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -746,7 +747,7 @@ func TestReadDerivesTheRealOutcomeWhenTheResultArrivesFirst(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			transcript := reversedPairWith(testCase.entryFields, testCase.blockFields)
-			result, err := Read(strings.NewReader(transcript), resolver, names, Staleness{})
+			result, err := read(strings.NewReader(transcript), resolver, names, Staleness{})
 			if err != nil {
 				t.Fatalf("Read() error = %v", err)
 			}
@@ -769,7 +770,7 @@ func TestReadDoesNotEmitAnEarlyResultForAnUnconsentedCall(t *testing.T) {
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/outside","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/outside","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
 	}, "\n")
-	result, err := Read(strings.NewReader(transcript), deny, names, Staleness{})
+	result, err := read(strings.NewReader(transcript), deny, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -785,7 +786,7 @@ func TestReadCountsARefusedNameWhoseResultArrivedFirst(t *testing.T) {
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Task"}]}}`,
 	}, "\n")
-	result, err := Read(strings.NewReader(transcript), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(transcript), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -802,7 +803,7 @@ func TestReadDoesNotEmitAnEarlyResultForAnIDOutsideTheTokenDomain(t *testing.T) 
 		fmt.Sprintf(`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":%s,"is_error":false}]}}`, unsafe),
 		fmt.Sprintf(`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":%s,"name":"Bash"}]}}`, unsafe),
 	}, "\n")
-	result, err := Read(strings.NewReader(transcript), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(transcript), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -822,7 +823,7 @@ func TestReadIgnoresARepeatedResultForACompletedCall(t *testing.T) {
 		toolResultLine,
 		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":true}]}}`,
 	}, "\n")
-	result, err := Read(strings.NewReader(transcript), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(transcript), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -845,7 +846,7 @@ func TestReadKeepsTheFirstOfTwoEarlyResultsForOneCall(t *testing.T) {
 		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":true}]}}`,
 		toolUseLine,
 	}, "\n")
-	result, err := Read(strings.NewReader(transcript), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(transcript), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -868,7 +869,7 @@ func TestReadRetainsNothingFromAnEarlyResultLine(t *testing.T) {
 	for _, value := range hostileValues {
 		entryFields := fmt.Sprintf(`"toolDenialKind":%s,"pad":%s,"toolUseResult":{"interrupted":false},`,
 			quoted(t, value), quoted(t, "swordfish-"+value))
-		result, err := Read(strings.NewReader(reversedPairWith(entryFields, "")), resolver, names, Staleness{})
+		result, err := read(strings.NewReader(reversedPairWith(entryFields, "")), resolver, names, Staleness{})
 		if err != nil {
 			t.Fatalf("Read() error = %v", err)
 		}
@@ -924,7 +925,7 @@ const mixedShapeTranscript = `{"uuid":"entry-1","sessionId":"session-1","cwd":"/
 {"uuid":"entry-5","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:04Z","toolUseResult":{"stdout":"swordfish","interrupted":true},"message":{"content":[{"type":"tool_result","tool_use_id":"call-3"}]}}`
 
 func TestReadTerminatesEveryCallInATranscriptShapedLikeARealOne(t *testing.T) {
-	result, err := Read(strings.NewReader(mixedShapeTranscript), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(mixedShapeTranscript), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -993,6 +994,14 @@ func deny(string, time.Time) (record.Hash, bool) { return "", false }
 // subkey of the per-machine salt (config.Repos.NameKey).
 var names = record.NewNamer([]byte("test scope key"))
 
+// read is this file's entry point into Read for every test that says nothing about
+// session_end derivation. It passes a zero Idleness, which derives none — the same
+// safe default a caller that cannot read the threshold gets. A test about the
+// session grain calls Read directly with a real Idleness (see session_end_test.go).
+func read(source io.Reader, resolve Resolver, names record.Namer, stale Staleness) (Result, error) {
+	return Read(source, resolve, names, stale, Idleness{})
+}
+
 // quoted encodes value as a JSON string so a hostile value can be embedded in a
 // transcript line without hand-escaping it.
 func quoted(t *testing.T, value string) string {
@@ -1029,7 +1038,7 @@ func TestReadNamesASubagentCallByItsSubagentType(t *testing.T) {
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false},{"type":"tool_result","tool_use_id":"call-2","is_error":false},{"type":"tool_result","tool_use_id":"call-3","is_error":false}]}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1065,7 +1074,7 @@ func TestReadCollapsesRepeatedSubagentInvocationsToOnePrimitive(t *testing.T) {
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false},{"type":"tool_result","tool_use_id":"call-2","is_error":false},{"type":"tool_result","tool_use_id":"call-3","is_error":false}]}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1117,7 +1126,7 @@ func TestReadCountsOneSubagentRunAsOneInvocation(t *testing.T) {
 		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1144,7 +1153,7 @@ func TestReadDropsAndCountsASubagentCallWithNoType(t *testing.T) {
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false},{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1173,7 +1182,7 @@ func TestReadDoesNotCountARefusalInAnUnconsentedRepository(t *testing.T) {
 		subagentCallTranscript(t, ""),
 		subagentCallTranscript(t, "/usr/local/bin"),
 	} {
-		result, err := Read(strings.NewReader(transcript), deny, names, Staleness{})
+		result, err := read(strings.NewReader(transcript), deny, names, Staleness{})
 		if err != nil {
 			t.Fatalf("Read() error = %v", err)
 		}
@@ -1185,7 +1194,7 @@ func TestReadDoesNotCountARefusalInAnUnconsentedRepository(t *testing.T) {
 
 func TestReadDropsAndCountsSubagentCallsWithAHostileType(t *testing.T) {
 	for _, value := range hostileValues {
-		result, err := Read(strings.NewReader(subagentCallTranscript(t, value)), resolver, names, Staleness{})
+		result, err := read(strings.NewReader(subagentCallTranscript(t, value)), resolver, names, Staleness{})
 		if err != nil {
 			t.Fatalf("Read() error = %v", err)
 		}
@@ -1196,7 +1205,7 @@ func TestReadDropsAndCountsSubagentCallsWithAHostileType(t *testing.T) {
 }
 
 func TestReadDerivesADirectoryScopedSubagentReference(t *testing.T) {
-	result, err := Read(strings.NewReader(subagentCallTranscript(t, "apps/web:reviewer")), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(subagentCallTranscript(t, "apps/web:reviewer")), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1220,7 +1229,7 @@ func TestReadDerivesADirectoryScopedSubagentReference(t *testing.T) {
 }
 
 func TestReadDropsAScopedSubagentCallWithoutAScopeKey(t *testing.T) {
-	result, err := Read(strings.NewReader(subagentCallTranscript(t, "apps/web:reviewer")), resolver, record.Namer{}, Staleness{})
+	result, err := read(strings.NewReader(subagentCallTranscript(t, "apps/web:reviewer")), resolver, record.Namer{}, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1231,7 +1240,7 @@ func TestReadDropsAScopedSubagentCallWithoutAScopeKey(t *testing.T) {
 
 func TestReadDropsCallsWhosePrimitiveNameIsPathShaped(t *testing.T) {
 	for _, value := range hostileValues {
-		result, err := Read(strings.NewReader(skillCallTranscript(t, value)), resolver, names, Staleness{})
+		result, err := read(strings.NewReader(skillCallTranscript(t, value)), resolver, names, Staleness{})
 		if err != nil {
 			t.Fatalf("Read() error = %v", err)
 		}
@@ -1248,7 +1257,7 @@ func TestReadDropsAttributedRunWithPathShapedAttribution(t *testing.T) {
 			// Read under closedSession, the staleness value that does emit a Shape-A
 			// fallback: under the zero Staleness this assertion would pass vacuously,
 			// because nothing is emitted for any reason at all.
-			result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+			result, err := read(strings.NewReader(input), resolver, names, closedSession)
 			if err != nil {
 				t.Fatalf("Read() error = %v", err)
 			}
@@ -1282,7 +1291,7 @@ func TestReadCarriesEachClaudeCodeEntrypoint(t *testing.T) {
 		"sdk-py":  record.EntrypointSDKPython,
 		"sdk-cli": record.EntrypointSDKCLI,
 	} {
-		result, err := Read(strings.NewReader(entrypointCallTranscript(quoted(t, source))), resolver, names, Staleness{})
+		result, err := read(strings.NewReader(entrypointCallTranscript(quoted(t, source))), resolver, names, Staleness{})
 		if err != nil {
 			t.Fatalf("Read() error = %v", err)
 		}
@@ -1304,7 +1313,7 @@ func TestReadOmitsAnAbsentEntrypoint(t *testing.T) {
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1327,7 +1336,7 @@ func TestReadDropsAndCountsACallWithAnUnknownEntrypoint(t *testing.T) {
 	// "sdk_python" is deliberate: Wake's own spelling is not a Claude Code spelling
 	// and a transcript claiming it must not be trusted.
 	for _, value := range []string{"sdk-ts", "vscode", "CLI", "sdk_python"} {
-		result, err := Read(strings.NewReader(entrypointCallTranscript(quoted(t, value))), resolver, names, Staleness{})
+		result, err := read(strings.NewReader(entrypointCallTranscript(quoted(t, value))), resolver, names, Staleness{})
 		if err != nil {
 			t.Fatalf("Read() error = %v", err)
 		}
@@ -1345,7 +1354,7 @@ func TestReadDropsAndCountsACallWithAnUnknownEntrypoint(t *testing.T) {
 // so this can be asserted rather than assumed.
 func TestReadTreatsANonStringEntrypointAsAnUnusableLine(t *testing.T) {
 	for _, value := range []string{"123", "{}", "[]", "true", "null"} {
-		result, err := Read(strings.NewReader(entrypointCallTranscript(value)), resolver, names, Staleness{})
+		result, err := read(strings.NewReader(entrypointCallTranscript(value)), resolver, names, Staleness{})
 		if err != nil {
 			t.Fatalf("Read() error = %v", err)
 		}
@@ -1365,7 +1374,7 @@ func TestReadTreatsANonStringEntrypointAsAnUnusableLine(t *testing.T) {
 
 func TestReadDropsCallsWithAHostileEntrypoint(t *testing.T) {
 	for _, value := range hostileValues {
-		result, err := Read(strings.NewReader(entrypointCallTranscript(quoted(t, value))), resolver, names, Staleness{})
+		result, err := read(strings.NewReader(entrypointCallTranscript(quoted(t, value))), resolver, names, Staleness{})
 		if err != nil {
 			t.Fatalf("Read() error = %v", err)
 		}
@@ -1379,7 +1388,7 @@ func TestReadDropsCallsWithAHostileEntrypoint(t *testing.T) {
 // result-terminated paths, so it inherits the field rather than losing it.
 func TestReadCarriesEntrypointOnAnInterruptedCall(t *testing.T) {
 	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","entrypoint":"sdk-py","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`
-	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1397,7 +1406,7 @@ func TestReadCarriesEntrypointOnAnInterruptedCall(t *testing.T) {
 
 func TestReadCarriesEntrypointOnAnAttributedSkillRun(t *testing.T) {
 	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"pr-review","entrypoint":"cli","message":{"model":"sonnet","stop_reason":"end_turn"}}`
-	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1411,7 +1420,7 @@ func TestReadCarriesEntrypointOnAnAttributedSkillRun(t *testing.T) {
 
 func TestReadDropsAnAttributedRunWithAnUnknownEntrypoint(t *testing.T) {
 	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"pr-review","entrypoint":"sdk-ts","message":{"model":"sonnet","stop_reason":"end_turn"}}`
-	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1432,7 +1441,7 @@ func TestReadCountsEveryRefusedAttributedRun(t *testing.T) {
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","attributionSkill":"commit-message","entrypoint":"sdk-ts","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1446,7 +1455,7 @@ func TestReadCountsEveryRefusedAttributedRun(t *testing.T) {
 // from it, so nothing about it may reach doctor's "collects nothing" arm.
 func TestReadSkipsAnAttributedRunItNeverCollects(t *testing.T) {
 	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/elsewhere","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"pr-review","entrypoint":"cli","message":{"model":"sonnet","stop_reason":"end_turn"}}`
-	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1461,7 +1470,7 @@ func TestReadOmitsUnsafeOptionalFieldsAndKeepsTheEvent(t *testing.T) {
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1478,7 +1487,7 @@ func TestReadOmitsUnsafeOptionalFieldsAndKeepsTheEvent(t *testing.T) {
 }
 
 func TestReadDerivesADirectoryScopedSkillReference(t *testing.T) {
-	result, err := Read(strings.NewReader(skillCallTranscript(t, "apps/web:deploy")), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(skillCallTranscript(t, "apps/web:deploy")), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1504,7 +1513,7 @@ func TestReadPreservesRealClaudeCodeIdentityFormats(t *testing.T) {
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1556,7 +1565,7 @@ const resultForUnterminatedCall = `{"uuid":"entry-2","sessionId":"session-1","cw
 func TestReadEmitsInterruptedForACallWhoseSessionWentStale(t *testing.T) {
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(2 * time.Hour)}
 
-	result, err := Read(strings.NewReader(unterminatedCall), resolver, names, stale)
+	result, err := read(strings.NewReader(unterminatedCall), resolver, names, stale)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1583,7 +1592,7 @@ func TestReadEmitsInterruptedForACallWhoseSessionWentStale(t *testing.T) {
 func TestReadKeepsACallBufferedInsideTheStalenessWindow(t *testing.T) {
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(30 * time.Minute)}
 
-	result, err := Read(strings.NewReader(unterminatedCall), resolver, names, stale)
+	result, err := read(strings.NewReader(unterminatedCall), resolver, names, stale)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1603,7 +1612,7 @@ func TestReadDoesNotInterruptACallInAStillActiveSession(t *testing.T) {
 	}, "\n")
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(3*time.Hour + time.Minute)}
 
-	result, err := Read(strings.NewReader(input), resolver, names, stale)
+	result, err := read(strings.NewReader(input), resolver, names, stale)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1637,7 +1646,7 @@ func oversizedResult(t *testing.T) string {
 func TestReadInterruptsAStaleCallDespiteAnOversizedLine(t *testing.T) {
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
 
-	result, err := Read(strings.NewReader(unterminatedCall+"\n"+oversizedResult(t)+"\n"), resolver, names, stale)
+	result, err := read(strings.NewReader(unterminatedCall+"\n"+oversizedResult(t)+"\n"), resolver, names, stale)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1667,7 +1676,7 @@ func TestReadDoesNotInterruptACallWhenALineWasUnusable(t *testing.T) {
 
 	for name, unusable := range cases {
 		t.Run(name, func(t *testing.T) {
-			result, err := Read(strings.NewReader(unterminatedCall+"\n"+unusable+"\n"), resolver, names, stale)
+			result, err := read(strings.NewReader(unterminatedCall+"\n"+unusable+"\n"), resolver, names, stale)
 			if err != nil {
 				t.Fatalf("Read() error = %v", err)
 			}
@@ -1708,7 +1717,7 @@ func TestReadDoesNotInterruptACallTerminatedByAnyResultShape(t *testing.T) {
 				payload +
 				`,"message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`
 
-			result, err := Read(strings.NewReader(unterminatedCall+"\n"+terminator+"\n"), resolver, names, stale)
+			result, err := read(strings.NewReader(unterminatedCall+"\n"+terminator+"\n"), resolver, names, stale)
 			if err != nil {
 				t.Fatalf("Read() error = %v", err)
 			}
@@ -1735,7 +1744,7 @@ func TestReadResolvesSessionsDespiteAnOversizedLine(t *testing.T) {
 	input := strings.Join([]string{unterminatedCall, oversizedResult(t)}, "\n")
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
 
-	result, err := Read(strings.NewReader(input), resolver, names, stale)
+	result, err := read(strings.NewReader(input), resolver, names, stale)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1759,7 +1768,7 @@ func TestReadKeepsEverySessionOpenWhenALineWasUnreadable(t *testing.T) {
 	input := strings.Join([]string{unterminatedCall, unreadable}, "\n")
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
 
-	result, err := Read(strings.NewReader(input), resolver, names, stale)
+	result, err := read(strings.NewReader(input), resolver, names, stale)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1782,7 +1791,7 @@ func TestReadStillResolvesStaleCallsWhenEveryLineWasUsable(t *testing.T) {
 	}, "\n")
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
 
-	result, err := Read(strings.NewReader(input), resolver, names, stale)
+	result, err := read(strings.NewReader(input), resolver, names, stale)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1825,7 +1834,7 @@ func TestReadStillResolvesAStaleCallOnATranscriptCarryingBookkeepingLines(t *tes
 
 	for name, input := range inputs {
 		t.Run(name, func(t *testing.T) {
-			result, err := Read(strings.NewReader(input), resolver, names, stale)
+			result, err := read(strings.NewReader(input), resolver, names, stale)
 			if err != nil {
 				t.Fatalf("Read() error = %v", err)
 			}
@@ -1874,7 +1883,7 @@ func TestReadStillResolvesAStaleCallWhenALineOnlyPartlyDecoded(t *testing.T) {
 
 	for name, line := range partlyDecodedLines {
 		t.Run(name, func(t *testing.T) {
-			result, err := Read(strings.NewReader(unterminatedCall+"\n"+line), resolver, names, stale)
+			result, err := read(strings.NewReader(unterminatedCall+"\n"+line), resolver, names, stale)
 			if err != nil {
 				t.Fatalf("Read() error = %v", err)
 			}
@@ -1896,7 +1905,7 @@ func TestReadStillResolvesAStaleCallPastANonObjectToolUseResult(t *testing.T) {
 	line := `{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","toolUseResult":["one","two"],"message":{"content":[{"type":"text"}]}}`
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
 
-	result, err := Read(strings.NewReader(unterminatedCall+"\n"+line), resolver, names, stale)
+	result, err := read(strings.NewReader(unterminatedCall+"\n"+line), resolver, names, stale)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1924,7 +1933,7 @@ func TestReadTreatsALineWithNoEntryAsActivityForItsSession(t *testing.T) {
 
 	for name, line := range lines {
 		t.Run(name, func(t *testing.T) {
-			result, err := Read(strings.NewReader(unterminatedCall+"\n"+line), resolver, names, stale)
+			result, err := read(strings.NewReader(unterminatedCall+"\n"+line), resolver, names, stale)
 			if err != nil {
 				t.Fatalf("Read() error = %v", err)
 			}
@@ -1945,11 +1954,11 @@ func TestReadDerivesTheSameEventIDForAStaleCallAsForACompletedOne(t *testing.T) 
 	// comes from the source event, so no suffix and no second id namespace separates
 	// the interrupted record from the completed one (ADR-0004). That is what makes a
 	// rescan, a retry and two concurrent scans all a no-op at the store.
-	stale, err := Read(strings.NewReader(unterminatedCall), resolver, names, Staleness{Timeout: time.Hour, Now: callInstant.Add(2 * time.Hour)})
+	stale, err := read(strings.NewReader(unterminatedCall), resolver, names, Staleness{Timeout: time.Hour, Now: callInstant.Add(2 * time.Hour)})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
-	completed, err := Read(strings.NewReader(unterminatedCall+"\n"+resultForUnterminatedCall), resolver, names, Staleness{})
+	completed, err := read(strings.NewReader(unterminatedCall+"\n"+resultForUnterminatedCall), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1962,7 +1971,7 @@ func TestReadDerivesTheSameEventIDForAStaleCallAsForACompletedOne(t *testing.T) 
 
 	// And a different clock does not change it either: the id is derived from the
 	// source event, never from when the scan happened.
-	later, err := Read(strings.NewReader(unterminatedCall), resolver, names, Staleness{Timeout: time.Minute, Now: callInstant.Add(400 * time.Hour)})
+	later, err := read(strings.NewReader(unterminatedCall), resolver, names, Staleness{Timeout: time.Minute, Now: callInstant.Add(400 * time.Hour)})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1983,7 +1992,7 @@ func TestReadEmitsStaleCallsInADeterministicOrder(t *testing.T) {
 
 	var want []record.Hash
 	for attempt := range 20 {
-		result, err := Read(strings.NewReader(input), resolver, names, stale)
+		result, err := read(strings.NewReader(input), resolver, names, stale)
 		if err != nil {
 			t.Fatalf("Read() error = %v", err)
 		}
@@ -2011,7 +2020,7 @@ func TestReadReportsTheCursorFloorOfTheEarliestOpenSession(t *testing.T) {
 	input := strings.Join([]string{closedSession, openFirst, openLater}, "\n")
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8*time.Hour + 30*time.Minute)}
 
-	result, err := Read(strings.NewReader(input), resolver, names, stale)
+	result, err := read(strings.NewReader(input), resolver, names, stale)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -2035,7 +2044,7 @@ func TestReadReleasesTheCursorFloorWhenEverySessionClosed(t *testing.T) {
 	second := `{"uuid":"entry-2","sessionId":"session-2","cwd":"/repo","timestamp":"2026-08-13T12:00:05Z","message":{"content":[{"type":"tool_use","id":"call-2","name":"Read"}]}}`
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
 
-	result, err := Read(strings.NewReader(unterminatedCall+"\n"+second), resolver, names, stale)
+	result, err := read(strings.NewReader(unterminatedCall+"\n"+second), resolver, names, stale)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -2056,7 +2065,7 @@ func TestReadPinsTheCursorFloorForAnOpenSessionWithNothingBuffered(t *testing.T)
 	// re-read, which writes nothing twice (ADR-0004).
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(30 * time.Minute)}
 
-	result, err := Read(strings.NewReader(unterminatedCall+"\n"+resultForUnterminatedCall), resolver, names, stale)
+	result, err := read(strings.NewReader(unterminatedCall+"\n"+resultForUnterminatedCall), resolver, names, stale)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -2082,7 +2091,7 @@ func TestReadPinsTheCursorFloorForASessionHoldingOnlyASkillCandidate(t *testing.
 	live := `{"uuid":"entry-2","sessionId":"session-live","cwd":"/repo","timestamp":"2026-08-13T19:45:00Z","attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
 
-	result, err := Read(strings.NewReader(strings.Join([]string{closed, live}, "\n")), resolver, names, stale)
+	result, err := read(strings.NewReader(strings.Join([]string{closed, live}, "\n")), resolver, names, stale)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -2127,7 +2136,7 @@ func TestReadDoesNotInterruptACallItNeverCollected(t *testing.T) {
 
 	for name, test := range cases {
 		t.Run(name, func(t *testing.T) {
-			result, err := Read(strings.NewReader(test.transcript), resolver, names, stale)
+			result, err := read(strings.NewReader(test.transcript), resolver, names, stale)
 			if err != nil {
 				t.Fatalf("Read() error = %v", err)
 			}
@@ -2158,7 +2167,7 @@ func TestReadRetainsNothingFromAnInterruptedCall(t *testing.T) {
 			`{"uuid":"entry-1","sessionId":"session-1","cwd":%s,"timestamp":"2026-08-13T12:00:00Z","toolDenialKind":%s,"pad":%s,"message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
 			quoted(t, consentedPath), quoted(t, value), quoted(t, "swordfish-"+value))
 
-		result, err := Read(strings.NewReader(transcript), resolver, names, stale)
+		result, err := read(strings.NewReader(transcript), resolver, names, stale)
 		if err != nil {
 			t.Fatalf("Read() error = %v", err)
 		}
@@ -2201,7 +2210,7 @@ func TestReadRetainsNothingFromASkillFallback(t *testing.T) {
 			`{"uuid":"entry-1","sessionId":"session-1","cwd":%s,"timestamp":"2026-08-13T12:00:00Z","toolDenialKind":%s,"pad":%s,"attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
 			quoted(t, consentedPath), quoted(t, value), quoted(t, "swordfish-"+value))
 
-		result, err := Read(strings.NewReader(transcript), resolver, names, closedSession)
+		result, err := read(strings.NewReader(transcript), resolver, names, closedSession)
 		if err != nil {
 			t.Fatalf("Read() error = %v", err)
 		}
@@ -2242,24 +2251,33 @@ func TestMarshalledRecordsCarryNoSeparator(t *testing.T) {
 
 	// Every input under both staleness values, so each one also traverses the two
 	// terminal paths a closed session opens: the interrupted rule, and the Shape-A
-	// skill fallback. A record built on either of those must carry no path fragment
+	// skill fallback. And under both idleness values, so each also traverses the
+	// third — the session grain, whose record is built from an anchor entry rather
+	// than from a call. A record built on any of those must carry no path fragment
 	// either (ADR-0007).
 	for _, input := range inputs {
 		for _, stale := range []Staleness{{}, closedSession} {
-			result, err := Read(strings.NewReader(input), resolver, names, stale)
-			if err != nil {
-				t.Fatalf("Read() error = %v", err)
+			for _, idle := range []Idleness{{}, finished} {
+				assertNoSeparatorInRecords(t, input, stale, idle)
 			}
-			for _, event := range result.Records {
-				encoded, err := record.Marshal(event)
-				if err != nil {
-					t.Fatalf("Marshal() error = %v", err)
-				}
-				for _, fragment := range []string{"/", `\`, "etc", "Windows", "secrets", ".ssh"} {
-					if strings.Contains(string(encoded), fragment) {
-						t.Fatalf("record contains %q: %s", fragment, encoded)
-					}
-				}
+		}
+	}
+}
+
+func assertNoSeparatorInRecords(t *testing.T, input string, stale Staleness, idle Idleness) {
+	t.Helper()
+	result, err := Read(strings.NewReader(input), resolver, names, stale, idle)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	for _, event := range result.Records {
+		encoded, err := record.Marshal(event)
+		if err != nil {
+			t.Fatalf("Marshal() error = %v", err)
+		}
+		for _, fragment := range []string{"/", `\`, "etc", "Windows", "secrets", ".ssh"} {
+			if strings.Contains(string(encoded), fragment) {
+				t.Fatalf("record contains %q: %s", fragment, encoded)
 			}
 		}
 	}

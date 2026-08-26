@@ -113,7 +113,13 @@ type Resolver func(cwd string, at time.Time) (record.Hash, bool)
 // clock) from the caller that owns config, so the threshold is never a constant
 // here. Its zero value buffers every unterminated call, which is what a caller that
 // cannot read the threshold must do.
-func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Staleness) (Result, error) {
+//
+// idle carries ADR-0014's session-end inference threshold (session.idle_timeout)
+// from the same caller, for the same reason and with the same shape. It is a
+// second threshold answering a different question — when a session id is believed
+// finished, rather than when an unterminated call is given up on — and its zero
+// value derives no session_end at all.
+func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Staleness, idle Idleness) (Result, error) {
 	if resolve == nil {
 		return Result{}, errors.New("missing repository resolver")
 	}
@@ -147,6 +153,15 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 	// threshold" requires.
 	skillsInvoked := map[skillRun]struct{}{}
 	skillCandidates := map[skillRun]skillCandidate{}
+	// grains is the session grain's accumulator: what each session id this read saw
+	// spent, and the one anchor entry every dimension of its session_end that is not
+	// a total comes from.
+	//
+	// Per-Read state next to pending, for the reason pending is: it is unresolved
+	// source state, and a derived count may not depend on where a scan started
+	// (ADR-0015, ADR-0023 §5). It holds only consented, gate-passed values — an entry
+	// outside consent contributes nothing to it at all (see observeSessionGrain).
+	grains := map[record.Identifier]*sessionGrain{}
 	// unreadable counts the lines this read could not use *and could not rule out* as
 	// the terminator of a buffered call, which is the only blindness that bears on the
 	// staleness rule: a line too long to be delivered, a line whose JSON leaves nothing
@@ -188,6 +203,7 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 			}
 			return
 		}
+		observeSessionGrain(grains, entry, resolve)
 		switch event, status := entry.attributedSkillCandidate(resolve, names); status {
 		case callAccepted:
 			deferSkillCandidate(skillCandidates, skillRun{session: event.SessionID, name: event.Name}, event)
@@ -310,6 +326,19 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 	result.Records = append(result.Records, fallbacks...)
 	result.AmbiguousSkillRuns = ambiguous
 	result.OpenSessions, result.CursorFloor = sessions.CursorFloor(judged)
+	// judgedIdle, not idle, for the reason judged is not stale: a read that could not
+	// rule out one of its lines may not conclude any session went silent, and a
+	// session_end is permanent (ADR-0015 rejects upsert, ADR-0004 deduplicates the
+	// correction away). Its totals would also be understated by whatever that line
+	// held.
+	judgedIdle := idle
+	if unreadable > 0 {
+		judgedIdle = Idleness{}
+	}
+	// Derived last, from result.Records as it now stands: the aggregate is a snapshot
+	// of what this scan made terminal (ADR-0034 §3), which is every completed call,
+	// every interrupted one, and every Shape-A fallback appended above.
+	result.Records = append(result.Records, resolveSessionEnds(grains, sessions, judgedIdle, result.Records)...)
 	return result, nil
 }
 
@@ -430,9 +459,23 @@ type transcriptEntry struct {
 }
 
 type message struct {
-	Model      string         `json:"model"`
-	StopReason string         `json:"stop_reason"`
-	Content    []contentBlock `json:"content"`
+	// ID is the assistant API message's own id. It is read for exactly one purpose:
+	// deduplicating a usage block Claude Code repeats verbatim on every transcript
+	// line belonging to one API message — measured at three to seven lines per
+	// message on a real transcript, so summing per line would multiply a session's
+	// token totals several-fold. It is never persisted and reaches no record field
+	// (ADR-0007).
+	ID         string `json:"id"`
+	Model      string `json:"model"`
+	StopReason string `json:"stop_reason"`
+	// Usage stays raw for the reason ToolUseResult does: a typed field type-errors
+	// the whole line, and that line may be the tool_result that terminates a
+	// buffered call (ADR-0015). Only the five allowlisted numbers are read out of
+	// it, by usage below; the block's unmodelled siblings — cache_creation,
+	// iterations, server_tool_use, service_tier, inference_geo, speed on a real
+	// transcript — reach nothing. Reading a payload is not persisting one.
+	Usage   json.RawMessage `json:"usage"`
+	Content []contentBlock  `json:"content"`
 }
 
 type contentBlock struct {
