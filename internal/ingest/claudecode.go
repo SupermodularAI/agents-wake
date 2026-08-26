@@ -18,7 +18,8 @@ type Result struct {
 	Pending   int
 	// Refused is the reader's count of invocations a validated field refused — the
 	// primitive's own name, or an entrypoint outside Wake's vocabulary — whether the
-	// invocation was a tool call or an attributed skill run.
+	// invocation was a tool call, an attributed skill run, or a subagent run whose own
+	// transcript declares no usable name at all.
 	// It stays separate from Dropped, which is the store's count of
 	// records refused at write time: the two are different fail-closed points and
 	// merging them would invent the reason taxonomy doctor (T029) owns.
@@ -27,6 +28,11 @@ type Result struct {
 	// health.Scan.RefusedCalls, which doctor renders and which puts integration
 	// state in "collects nothing". A dropped call nobody counts is how format drift
 	// stops collection while doctor still says "collecting" (plan §3.3, §12).
+	//
+	// It arrives on both ClaudeCodeScan.Read and ClaudeCodeScan.Close, and the caller
+	// sums the two: a subagent run is judged only once its session has closed
+	// (ADR-0036 §2, ADR-0015), so the closure half exists and assigning one over the
+	// other would drop exactly the refusal this counter exists to surface.
 	Refused int
 	// Interrupted is the reader's count of calls that resolved to outcome interrupted
 	// because their session went quiet past the staleness threshold (ADR-0015). Those
@@ -117,6 +123,10 @@ func NewClaudeCodeScan(resolve claudecode.Resolver, names record.Namer, stale cl
 // Parsed, Malformed, Refused and the write result. Pending, Interrupted,
 // AmbiguousSkillRuns and SkippedSources are zero here and are answered by Close; a
 // caller must not fold a zero from this call into a health counter.
+//
+// Refused is the one counter reported by both, and the caller adds the two halves:
+// this one is the refusals this transcript's own lines produced, and Close's is the
+// refusals the post-walk resolution produced (see Result.Refused).
 func (s *ClaudeCodeScan) Read(reader io.Reader) (Result, error) {
 	derived, err := s.scan.Read(reader)
 	if err != nil {
@@ -133,6 +143,11 @@ func (s *ClaudeCodeScan) Read(reader io.Reader) (Result, error) {
 // The counters that are only knowable now — Pending, Interrupted,
 // AmbiguousSkillRuns, SkippedSources — are the walk's, not any one source's, and
 // the caller folds these rather than the per-source zeros.
+//
+// Refused is the exception in the other direction: it arrives here *as well as* on
+// Read, because a subagent transcript declaring no name can only be judged at this
+// boundary, and the caller sums the two halves rather than overwriting one with the
+// other (see Result.Refused).
 //
 // A walk that read no source derives nothing, and Append on an empty slice creates
 // no spool, so calling Close after an empty walk is a clean zero rather than a

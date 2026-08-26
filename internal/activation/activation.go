@@ -504,6 +504,11 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 	if closeErr != nil {
 		return written, scan, closeErr
 	}
+	// The other half of the refusal count. A subagent transcript that declares no name
+	// is refused at the closure boundary, not while its own lines are read (ADR-0036
+	// §2, ADR-0015), so folding only the per-source halves above would report lost
+	// collection as a clean zero — the silence plan §3.3 and §12 exist to prevent.
+	scan.RefusedCalls += final.Refused
 	// Two different facts, deliberately two counters. Pending is a call whose session
 	// may still be running — transient, and not a fault. Interrupted is a call whose
 	// session went quiet past the threshold, so the invocation is now in the store

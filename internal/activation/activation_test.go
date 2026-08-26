@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -622,6 +623,58 @@ func inventoryFixture(t *testing.T) (claudeDir, root string) {
 {"uuid":"entry-2","sessionId":"session-1","cwd":"` + root + `","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`
 	writeFixture(t, filepath.Join(claudeDir, "projects", "project", "session.jsonl"), transcript)
 	return claudeDir, root
+}
+
+// A subagent transcript declaring no name is refused at the closure boundary, not
+// while its own lines are read — the name and the agent id are not on the same entry
+// (ADR-0036 §2, ADR-0015). Folding only the per-source halves would therefore report
+// that lost collection as a clean zero, which is the silence plan §3.3 and §12 exist
+// to prevent: doctor would say "collecting" while an invocation nobody counts goes
+// missing.
+//
+// The transcript's date is deliberately historical, so the session is closed under
+// the staleness default on any clock this test runs on.
+func TestIngestCountsASubagentRefusedAtSessionClose(t *testing.T) {
+	paths := testPaths(t)
+	claudeDir, root := inventoryFixture(t)
+	// Three entries sharing one agentId and declaring no attributionAgent anywhere:
+	// the 2% shape ADR-0036 §2 measured, which is refused and counted rather than
+	// named from the harness's documented default.
+	lines := make([]string, 0, 3)
+	for index, at := range []string{"2026-08-13T12:00:00Z", "2026-08-13T12:00:01Z", "2026-08-13T12:00:02Z"} {
+		lines = append(lines, `{"uuid":"agent-entry-`+strconv.Itoa(index)+`","sessionId":"session-1","cwd":"`+root+
+			`","timestamp":"`+at+`","version":"1.0.0","entrypoint":"cli","isSidechain":true,"agentId":"agent-1",`+
+			`"message":{"model":"sonnet","content":[]}}`)
+	}
+	writeFixture(t, filepath.Join(claudeDir, "projects", "project", "session.jsonl"), strings.Join(lines, "\n"))
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+
+	scan := scanCounters(t, paths)
+	if scan.RefusedCalls != 1 {
+		t.Errorf("RefusedCalls = %d, want 1 — a subagent run this build could not name is collection it lost", scan.RefusedCalls)
+	}
+	// The session grain still derives its one record — the session was observed and
+	// went idle — but the run itself produces none: nothing names it, and fail closed
+	// means no placeholder name is substituted (ADR-0007).
+	entries, err := store.New(filepath.Join(paths.DataDir, eventsFile)).Entries(0)
+	if err != nil {
+		t.Fatalf("Entries() error = %v", err)
+	}
+	for _, event := range entries {
+		if event.Record.Kind == record.KindSubagent {
+			t.Errorf("a subagent record was written for a run nothing names: %+v", event.Record)
+		}
+	}
+	// Not an honest zero either: the source's one contribution was a counted refusal,
+	// which is the opposite of the clean zero doctor reports as Skipped.
+	if scan.Skipped != 0 {
+		t.Errorf("Skipped = %d, want 0 — an all-refused transcript is not an honest zero", scan.Skipped)
+	}
+	if scan.ParseErrors != 0 || scan.Unreadable != 0 {
+		t.Errorf("ParseErrors = %d, Unreadable = %d; want 0 and 0 — every line was readable", scan.ParseErrors, scan.Unreadable)
+	}
 }
 
 func writeFixture(t *testing.T, path, content string) {

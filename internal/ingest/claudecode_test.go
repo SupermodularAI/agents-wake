@@ -678,6 +678,51 @@ func walkSources(t *testing.T, idle claudecode.Idleness, sources ...string) (str
 	return spool, final
 }
 
+// One subagent run is one invocation all the way to what a person reads. Claude
+// Code's storage describes the run twice — the parent transcript's invoking
+// tool_use/tool_result pair, and the subagent's own transcript — and only the
+// transcript is the canonical source, so the invoking pair contributes no record at
+// all (ADR-0036 §1-§2, ADR-0002's invocation grain).
+//
+// Driven over two sources rather than one because that is the real shape, and because
+// ClaudeCode's own doc comment says a caller reading a set of sources that may share
+// a session id has to drive the scan.
+func TestClaudeCodeScanReportsOneSubagentRunAsOneInvocation(t *testing.T) {
+	parent := strings.Join([]string{
+		`{"uuid":"parent-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","entrypoint":"cli","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-1","name":"Agent","input":{"subagent_type":"explorer"}}]}}`,
+		`{"uuid":"parent-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:03Z","entrypoint":"cli","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+	}, "\n")
+	// The subagent's own transcript: the agent id on every entry, the name on none of
+	// the first ones.
+	subagent := strings.Join([]string{
+		`{"uuid":"agent-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","entrypoint":"cli","isSidechain":true,"agentId":"agent-1","message":{"model":"sonnet","content":[]}}`,
+		`{"uuid":"agent-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","entrypoint":"cli","isSidechain":true,"agentId":"agent-1","attributionAgent":"explorer","message":{"model":"sonnet","content":[]}}`,
+	}, "\n")
+
+	_, destination, resolve := sessionFixture(t)
+	scan := NewClaudeCodeScan(resolve, names, closingStaleness, claudecode.Idleness{}, destination)
+	written := 0
+	for index, source := range []string{parent, subagent} {
+		result, err := scan.Read(strings.NewReader(source))
+		if err != nil {
+			t.Fatalf("Read(source %d) error = %v", index, err)
+		}
+		written += result.Written
+	}
+	final, err := scan.Close()
+	if err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	written += final.Written
+
+	if written != 1 {
+		t.Fatalf("written = %d, want one record for one subagent run (final = %+v)", written, final)
+	}
+	if got := invocationsOf(t, destination, filepath.Join(t.TempDir(), "primitives.json"), record.KindSubagent, "explorer"); got != 1 {
+		t.Errorf("inventory invocations = %d, want 1", got)
+	}
+}
+
 // TestClaudeCodeScanWritesOneSessionEndAcrossTwoTranscripts is AC 1 at the store:
 // one record for the session, with totals covering both of its transcripts.
 func TestClaudeCodeScanWritesOneSessionEndAcrossTwoTranscripts(t *testing.T) {
