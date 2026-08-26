@@ -20,7 +20,11 @@ import (
 // derived index, so a record of any other version is refused on read and the spool
 // that holds it is discarded and re-derived from the harness's own history
 // (ADR-0015). Version 2 added entrypoint; version 3 added the session grain's
-// nullable totals.
+// nullable totals. Version 4 added no field: it changes how a subagent invocation's
+// event_id is derived — from the subagent's own transcript rather than from the
+// invoking tool call (ADR-0036 §2) — which ADR-0004 classes as a schema change all
+// the same, because a stored id no build can re-derive is a record no rescan can
+// deduplicate.
 //
 // "Refused on read" is only half of that, and the half on its own is a silent
 // shrink: every consumer reads the spool through store.Entries, so a spool nobody
@@ -33,7 +37,7 @@ import (
 // delivery watermark, which stamps this number and starts over when it changes
 // (internal/remote). What a rebuild cannot recover is a period the harness has since
 // pruned: the store was the only surviving copy of it, and ADR-0014 accepts that.
-const SchemaVersion uint = 3
+const SchemaVersion uint = 4
 
 // ErrUnsupportedVersion is the one refusal from Validate a caller is meant to
 // recognise. Every other refusal means the record was never valid; this one means

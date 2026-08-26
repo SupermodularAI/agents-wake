@@ -914,7 +914,7 @@ func TestSessionEndSpanCarriesTheSessionGrain(t *testing.T) {
 func TestIntegerAttributesAreJSONStrings(t *testing.T) {
 	attributes := attributesOf(t, encodeOne(t, fullRecord()), "attributes")
 	for key, want := range map[string]string{
-		"wake.schema_version":       "3",
+		"wake.schema_version":       strconv.FormatUint(uint64(record.SchemaVersion), 10),
 		"wake.duration_ms":          "1500",
 		"wake.tool_calls":           "66",
 		"wake.builtin_tool_calls":   "77",
@@ -949,9 +949,12 @@ func TestSchemaVersionOnEverySpan(t *testing.T) {
 	if len(spans) != 3 {
 		t.Fatalf("Encode() emitted %d spans, want 3", len(spans))
 	}
+	// Derived from the constant rather than written out, so a schema bump does not
+	// need this assertion edited to keep meaning "the version this build stamps".
+	want := strconv.FormatUint(uint64(record.SchemaVersion), 10)
 	for i, span := range spans {
-		if got := attributesOf(t, span, "attributes")["wake.schema_version"]["intValue"]; got != "3" {
-			t.Fatalf("span %d wake.schema_version = %v, want %q", i, got, "3")
+		if got := attributesOf(t, span, "attributes")["wake.schema_version"]["intValue"]; got != want {
+			t.Fatalf("span %d wake.schema_version = %v, want %q", i, got, want)
 		}
 	}
 }

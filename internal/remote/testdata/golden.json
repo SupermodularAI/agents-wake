@@ -35,7 +35,7 @@
                 {
                   "key": "wake.schema_version",
                   "value": {
-                    "intValue": "3"
+                    "intValue": "4"
                   }
                 },
                 {
@@ -252,7 +252,7 @@
                 {
                   "key": "wake.schema_version",
                   "value": {
-                    "intValue": "3"
+                    "intValue": "4"
                   }
                 },
                 {
@@ -325,7 +325,7 @@
                 {
                   "key": "wake.schema_version",
                   "value": {
-                    "intValue": "3"
+                    "intValue": "4"
                   }
                 },
                 {
