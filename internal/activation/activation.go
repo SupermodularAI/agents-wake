@@ -435,6 +435,16 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 	written := 0
 	scan := health.Scan{At: time.Now().UTC(), RefusedProjects: repos.DroppedEntries()}
 	resolve := resolverFor(repos, scope, discover)
+	// One scan for the whole walk, not one per transcript. Claude Code writes one
+	// session id into several files — the parent's and one per subagent — so a reader
+	// whose session state died with each file judged every session from a partial view:
+	// it closed a session another file showed running and wrote one partial session_end
+	// per file instead of one per session, permanently, because ADR-0015 rejects upsert
+	// and ADR-0004 deduplicates the correction away (ADR-0036 §Consequences).
+	//
+	// The Namer is hoisted with it. It was already constant across the walk — it is
+	// derived from the one name key — so building it once is the same value.
+	transcripts := ingest.NewClaudeCodeScan(resolve, record.NewNamer(repos.NameKey()), stale, idle, destination)
 	err := filepath.WalkDir(filepath.Join(claudeDir, "projects"), func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			// "Not there" arrives by this same route as "could not be read":
@@ -458,7 +468,7 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 			return nil
 		}
 		defer file.Close()
-		result, ingestErr := ingest.ClaudeCode(file, resolve, record.NewNamer(repos.NameKey()), stale, idle, destination)
+		result, ingestErr := transcripts.Read(file)
 		if ingestErr != nil {
 			scan.ParseErrors++
 			return nil
@@ -472,38 +482,57 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 		// primitive's identity lives in would otherwise stop collection in silence
 		// while doctor still reported "collecting" (plan §3.3, §12).
 		scan.RefusedCalls += result.Refused
-		// Two different facts, deliberately two counters. Pending is a call whose
-		// session may still be running — transient, and not a fault. Interrupted is a
-		// call whose session went quiet past the threshold, so the invocation is now
-		// in the store carrying the outcome that says it never finished (ADR-0015).
-		// Neither is lost collection, so neither joins doctor's "collects nothing" arm.
-		scan.PendingCalls += result.Pending
-		scan.InterruptedCalls += result.Interrupted
-		// Uncertainty, not lost collection and not an invocation: the record is in the
-		// store, and this says how many further attributed runs for the same session and
-		// skill it stood in for (ADR-0023).
-		scan.AmbiguousSkillRuns += result.AmbiguousSkillRuns
-		if result.Parsed == 0 && result.Refused == 0 {
-			// Read successfully and yielded no terminal event — most often because
-			// its working directory belongs to no consented repository, sometimes
-			// because every call in it is still unterminated and not yet stale
-			// (ADR-0015) — a transcript whose stale calls did resolve has parsed
-			// records and is not skipped. Either way it is a clean zero, not a
-			// failure, and the two must not share a counter. A transcript whose every
-			// call was refused is deliberately not one of those: doctor reports
-			// Skipped as an honest zero, and that transcript is the opposite of one.
-			scan.Skipped++
-		}
+		// Pending, Interrupted, AmbiguousSkillRuns and Skipped are deliberately not
+		// folded here. None of the four is knowable from one transcript any more: a call
+		// unterminated in this file may be terminated in the next, and a session quiet
+		// here may be running there. The scan answers all four once, below.
 		scan.EventsWritten += result.Written
 		written += result.Written
 		return nil
 	})
-	if errors.Is(err, fs.ErrNotExist) {
-		// No projects directory at all: nothing was there to read, which is a clean
-		// zero rather than something unreadable.
-		return written, scan, nil
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		// A truncated walk has not seen every source of every session, so resolving now
+		// would judge a session closed from a partial view — permanently, since ADR-0015
+		// rejects upsert and ADR-0004 deduplicates the correction away. Deferring to the
+		// next scan costs a slower scan and never a wrong record.
+		return written, scan, err
 	}
-	return written, scan, err
+	// Resolved once, over the union of every transcript the walk read. With no projects
+	// directory at all this read no source, so it derives nothing and store.Append on
+	// an empty slice creates no spool — the same clean zero that arm reported before.
+	final, closeErr := transcripts.Close()
+	if closeErr != nil {
+		return written, scan, closeErr
+	}
+	// Two different facts, deliberately two counters. Pending is a call whose session
+	// may still be running — transient, and not a fault. Interrupted is a call whose
+	// session went quiet past the threshold, so the invocation is now in the store
+	// carrying the outcome that says it never finished (ADR-0015). Neither is lost
+	// collection, so neither joins doctor's "collects nothing" arm.
+	scan.PendingCalls = final.Pending
+	scan.InterruptedCalls = final.Interrupted
+	// Uncertainty, not lost collection and not an invocation: the record is in the
+	// store, and this says how many further attributed runs for the same session and
+	// skill it stood in for (ADR-0023).
+	scan.AmbiguousSkillRuns = final.AmbiguousSkillRuns
+	// A transcript read successfully that yielded no terminal event — most often
+	// because its working directory belongs to no consented repository, sometimes
+	// because every call in it is still unterminated and not yet stale (ADR-0015). It
+	// is a clean zero, not a failure, and the two must not share a counter. A
+	// transcript whose every call was refused is deliberately not one of those: doctor
+	// reports Skipped as an honest zero, and that transcript is the opposite of one.
+	//
+	// The decision moved out of the walk callback because it stopped being answerable
+	// there. After ADR-0036 a transcript's contribution can resolve after the walk — a
+	// stale call given up on, a share of a session's session_end totals — so "parsed
+	// nothing and refused nothing" at the end of its own read no longer separates an
+	// honest zero from a deferral. SkippedSources is the counter that does: it credits
+	// each source with what it derived, what it refused, and what the resolution
+	// attributed back to it.
+	scan.Skipped = final.SkippedSources
+	scan.EventsWritten += final.Written
+	written += final.Written
+	return written, scan, nil
 }
 
 // DiscoveryScope resolves which Claude Code discovery paths cwd may read.
