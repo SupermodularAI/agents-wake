@@ -171,8 +171,9 @@ func (s *ClaudeCodeScan) Read(reader io.Reader) (Result, error) {
 
 // Close resolves the walk's session-scoped state once, over the union of every
 // source it read, and persists the records that resolution derived: the calls the
-// staleness rule gave up on, the Shape-A skill fallbacks, and one session_end per
-// finished session.
+// staleness rule gave up on, the Shape-A skill fallbacks, one record per subagent
+// run, the children whose parent link needed the walk's final view, and one
+// session_end per finished session.
 //
 // The counters that are only knowable now — Pending, Interrupted,
 // AmbiguousSkillRuns, SkippedSources — are the walk's, not any one source's, and

@@ -451,8 +451,10 @@ func (s *Scan) Close() Result {
 	fallbacks, ambiguous := resolveSessionSkills(s.skillCandidates, s.skillsInvoked, s.typedRuns, s.sessions, s.stale)
 	for _, derived := range fallbacks {
 		// A Shape-A fallback carries neither ViaSkill nor ViaAgent and belongs to no
-		// subagent transcript, so it routes with an empty agent id and is case 3.
-		if s.route(&result.Records, derived.event, derived.source, derived.agentID) {
+		// subagent transcript, so it routes with a literal empty agent id and is case 3 —
+		// stated the same way the subagent group below states it, rather than by passing
+		// a derivation field resolveSessionSkills never sets.
+		if s.route(&result.Records, derived.event, derived.source, "") {
 			s.credit(derived.source)
 		}
 	}
