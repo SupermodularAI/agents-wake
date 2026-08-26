@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -668,5 +669,156 @@ func TestClaudeCodeWritesNoSecondSessionEndAfterResumedActivity(t *testing.T) {
 	}
 	if ends[0].InputTokens == nil || *ends[0].InputTokens != *written.InputTokens {
 		t.Errorf("input_tokens = %v, want the first scan's %d", ends[0].InputTokens, *written.InputTokens)
+	}
+}
+
+// splitSessionSources are two transcripts of one session id — the shape ADR-0036
+// is about: a parent's file and one subagent's, each with a terminated call and its
+// own assistant usage block under a distinct message id.
+func splitSessionSources() (parent, subagent string) {
+	parent = strings.Join([]string{
+		`{"uuid":"parent-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","entrypoint":"cli","message":{"model":"sonnet","id":"msg_parent","usage":{"input_tokens":10,"output_tokens":20},"content":[{"type":"tool_use","id":"call-parent","name":"Bash"}]}}`,
+		`{"uuid":"parent-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","entrypoint":"cli","message":{"content":[{"type":"tool_result","tool_use_id":"call-parent","is_error":false}]}}`,
+	}, "\n")
+	subagent = strings.Join([]string{
+		`{"uuid":"agent-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","entrypoint":"cli","message":{"model":"sonnet","id":"msg_agent","usage":{"input_tokens":7,"output_tokens":3},"content":[{"type":"tool_use","id":"call-agent","name":"Bash"}]}}`,
+		`{"uuid":"agent-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:03Z","entrypoint":"cli","message":{"content":[{"type":"tool_result","tool_use_id":"call-agent","is_error":false}]}}`,
+	}, "\n")
+	return parent, subagent
+}
+
+// walkSources drives one ClaudeCodeScan over sources in the given order against a
+// fresh spool, and returns the spool path and the Close result.
+func walkSources(t *testing.T, idle claudecode.Idleness, sources ...string) (string, Result) {
+	t.Helper()
+	spool, destination, resolve := sessionFixture(t)
+	scan := NewClaudeCodeScan(resolve, names, claudecode.Staleness{}, idle, destination)
+	for index, source := range sources {
+		if _, err := scan.Read(strings.NewReader(source)); err != nil {
+			t.Fatalf("Read(source %d) error = %v", index, err)
+		}
+	}
+	final, err := scan.Close()
+	if err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	return spool, final
+}
+
+// TestClaudeCodeScanWritesOneSessionEndAcrossTwoTranscripts is AC 1 at the store:
+// one record for the session, with totals covering both of its transcripts.
+func TestClaudeCodeScanWritesOneSessionEndAcrossTwoTranscripts(t *testing.T) {
+	parent, subagent := splitSessionSources()
+	idle := claudecode.Idleness{Timeout: 30 * time.Minute, Now: sessionInstant.Add(2 * time.Hour)}
+
+	spool, _ := walkSources(t, idle, parent, subagent)
+
+	ends := sessionEndsInSpool(t, spool)
+	if len(ends) != 1 {
+		t.Fatalf("the spool holds %d session_end records, want 1", len(ends))
+	}
+	end := ends[0]
+	if end.ToolCalls == nil || *end.ToolCalls != 2 {
+		t.Errorf("tool_calls = %v, want 2: one call from each transcript", end.ToolCalls)
+	}
+	if end.InputTokens == nil || *end.InputTokens != 17 {
+		t.Errorf("input_tokens = %v, want 17: both transcripts' usage blocks", end.InputTokens)
+	}
+}
+
+// TestClaudeCodeScanIsIndependentOfSourceOrder is AC 4 at the store, in both
+// halves: what lands does not depend on the order the walk visited the sources in,
+// and scanning the same set again is a byte-level no-op (ADR-0004).
+//
+// The comparison across orders is over the record set rather than the file's line
+// order. Each source is persisted as it is read — requirement 1 keeps one Read per
+// file and never buffers a whole walk's records to the end — so a reversed walk
+// writes the same records in a different sequence, and the store appends in the
+// order it is given.
+func TestClaudeCodeScanIsIndependentOfSourceOrder(t *testing.T) {
+	parent, subagent := splitSessionSources()
+	idle := claudecode.Idleness{Timeout: 30 * time.Minute, Now: sessionInstant.Add(2 * time.Hour)}
+
+	forwardSpool, forward := walkSources(t, idle, parent, subagent)
+	reverseSpool, reverse := walkSources(t, idle, subagent, parent)
+
+	if forward.Written+reverse.Written == 0 {
+		t.Fatalf("neither walk wrote anything: %+v / %+v", forward, reverse)
+	}
+	if got, want := recordSet(t, reverseSpool), recordSet(t, forwardSpool); !slices.Equal(got, want) {
+		t.Fatalf("the two walk orders wrote different records:\nforward  = %v\nreversed = %v", want, got)
+	}
+
+	// And the same set again, in the same order, is a no-op: every id re-derives, so
+	// the store recognises it and the bytes do not move.
+	before, err := os.ReadFile(forwardSpool)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	destination := store.New(forwardSpool)
+	_, _, resolve := sessionFixture(t)
+	again := NewClaudeCodeScan(resolve, names, claudecode.Staleness{}, idle, destination)
+	written := 0
+	duplicate := 0
+	for _, source := range []string{parent, subagent} {
+		result, readErr := again.Read(strings.NewReader(source))
+		if readErr != nil {
+			t.Fatalf("Read() error = %v", readErr)
+		}
+		written += result.Written
+		duplicate += result.Duplicate
+	}
+	final, err := again.Close()
+	if err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	written += final.Written
+	duplicate += final.Duplicate
+	if written != 0 {
+		t.Errorf("re-scan wrote %d records, want 0", written)
+	}
+	if duplicate == 0 {
+		t.Error("re-scan recognised no duplicates, so the ids did not re-derive")
+	}
+	after, err := os.ReadFile(forwardSpool)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("re-scan changed the spool:\nbefore %s\nafter  %s", before, after)
+	}
+}
+
+// recordSet reads a spool back as the sorted list of its event ids, so two walks
+// can be compared as sets. An event id identifies a record (ADR-0004), so the
+// order is total.
+func recordSet(t *testing.T, spool string) []string {
+	t.Helper()
+	entries, err := store.New(spool).Entries(0)
+	if err != nil {
+		t.Fatalf("Entries() error = %v", err)
+	}
+	ids := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		ids = append(ids, string(entry.Record.EventID))
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+// TestClaudeCodeScanReportsASourceThatProducedNothing is doctor's Skipped counter
+// after the hoist: it is reported by the walk, because a source's contribution can
+// now resolve after that source's own read has ended.
+func TestClaudeCodeScanReportsASourceThatProducedNothing(t *testing.T) {
+	collecting := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","entrypoint":"cli","message":{"model":"sonnet","id":"msg_1","content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}
+{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","entrypoint":"cli","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`
+	// A working directory belonging to no consented repository: read fine, collected
+	// nothing, refused nothing. The clean zero doctor calls skipped.
+	unconsented := `{"uuid":"other-1","sessionId":"session-2","cwd":"/elsewhere","timestamp":"2026-08-13T12:00:00Z","entrypoint":"cli","message":{"model":"sonnet","id":"msg_2","content":[{"type":"tool_use","id":"call-2","name":"Bash"}]}}`
+
+	_, final := walkSources(t, claudecode.Idleness{}, collecting, unconsented)
+
+	if final.SkippedSources != 1 {
+		t.Fatalf("SkippedSources = %d, want 1: one of the two sources produced nothing", final.SkippedSources)
 	}
 }
