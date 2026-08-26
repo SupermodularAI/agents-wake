@@ -169,7 +169,11 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 	// exactly, so one transcript serialises character-for-character as it did before.
 	final.Records = append(first.Records, final.Records...)
 	final.Malformed = first.Malformed
-	final.Refused = first.Refused
+	// Summed, not assigned: the two halves are the refusals this source's own lines
+	// produced and the ones closure produced, and closure is the only place a subagent
+	// transcript declaring no name is judged at all (see Result.Refused). Assigning
+	// would silently drop that half — lost collection reported as a clean zero.
+	final.Refused += first.Refused
 	return final, nil
 }
 

@@ -39,11 +39,12 @@ func (i Idleness) enabled() bool { return i.Timeout > 0 && !i.Now.IsZero() }
 
 // sessionSeparator delimits the two halves of a session_end's source identity. It
 // is a record separator, and it is a different byte from callSeparator on purpose:
-// no token-domain value can contain either, callSourceEvent's composed identity
-// contains 0x1f and never 0x1e, and the Shape-A path derives from a bare entry
-// uuid with no separator at all. The three id shapes are therefore structurally
-// disjoint — no transcript, hostile or otherwise, can craft a session_end id that
-// collides with a tool call's or an attributed run's.
+// no token-domain value can contain any of them, callSourceEvent's composed identity
+// contains 0x1f and never 0x1e, subagentSourceEvent's contains 0x1d and never
+// either, and the Shape-A path derives from a bare entry uuid with no separator at
+// all. The four id shapes are therefore structurally disjoint — no transcript,
+// hostile or otherwise, can craft a session_end id that collides with a tool call's,
+// an attributed run's or a subagent run's.
 const sessionSeparator = "\x1e"
 
 // sessionName is the Name a session-grain row carries. record.Validate requires a
