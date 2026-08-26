@@ -190,7 +190,9 @@ func TestInitDisclosesAndImportsHistoryOnlyWithFull(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Existing Claude Code history will be imported now.",
-		"Claude Code collection enabled; imported 1 terminal event.",
+		// Two: the transcript's one call, and the session_end for its long-silent
+		// session id (ADR-0034).
+		"Claude Code collection enabled; imported 2 terminal events.",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("init --full output is missing %q; got:\n%s", want, out)
