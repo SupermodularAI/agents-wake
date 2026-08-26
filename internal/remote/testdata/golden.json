@@ -35,7 +35,7 @@
                 {
                   "key": "wake.schema_version",
                   "value": {
-                    "intValue": "2"
+                    "intValue": "3"
                   }
                 },
                 {
@@ -159,6 +159,78 @@
                   }
                 },
                 {
+                  "key": "wake.input_tokens",
+                  "value": {
+                    "intValue": "11"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "11"
+                  }
+                },
+                {
+                  "key": "wake.output_tokens",
+                  "value": {
+                    "intValue": "22"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "22"
+                  }
+                },
+                {
+                  "key": "wake.cache_read_tokens",
+                  "value": {
+                    "intValue": "33"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_read_input_tokens",
+                  "value": {
+                    "intValue": "33"
+                  }
+                },
+                {
+                  "key": "wake.cache_creation_tokens",
+                  "value": {
+                    "intValue": "44"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_creation_input_tokens",
+                  "value": {
+                    "intValue": "44"
+                  }
+                },
+                {
+                  "key": "wake.thinking_tokens",
+                  "value": {
+                    "intValue": "55"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.thinking_tokens",
+                  "value": {
+                    "intValue": "55"
+                  }
+                },
+                {
+                  "key": "wake.tool_calls",
+                  "value": {
+                    "intValue": "66"
+                  }
+                },
+                {
+                  "key": "wake.builtin_tool_calls",
+                  "value": {
+                    "intValue": "77"
+                  }
+                },
+                {
                   "key": "langfuse.observation.type",
                   "value": {
                     "stringValue": "span"
@@ -180,7 +252,7 @@
                 {
                   "key": "wake.schema_version",
                   "value": {
-                    "intValue": "2"
+                    "intValue": "3"
                   }
                 },
                 {
@@ -253,7 +325,7 @@
                 {
                   "key": "wake.schema_version",
                   "value": {
-                    "intValue": "2"
+                    "intValue": "3"
                   }
                 },
                 {
@@ -368,6 +440,78 @@
                   "key": "wake.outcome",
                   "value": {
                     "stringValue": "denied_user"
+                  }
+                },
+                {
+                  "key": "wake.input_tokens",
+                  "value": {
+                    "intValue": "11"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "11"
+                  }
+                },
+                {
+                  "key": "wake.output_tokens",
+                  "value": {
+                    "intValue": "22"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "22"
+                  }
+                },
+                {
+                  "key": "wake.cache_read_tokens",
+                  "value": {
+                    "intValue": "33"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_read_input_tokens",
+                  "value": {
+                    "intValue": "33"
+                  }
+                },
+                {
+                  "key": "wake.cache_creation_tokens",
+                  "value": {
+                    "intValue": "44"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_creation_input_tokens",
+                  "value": {
+                    "intValue": "44"
+                  }
+                },
+                {
+                  "key": "wake.thinking_tokens",
+                  "value": {
+                    "intValue": "55"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.thinking_tokens",
+                  "value": {
+                    "intValue": "55"
+                  }
+                },
+                {
+                  "key": "wake.tool_calls",
+                  "value": {
+                    "intValue": "66"
+                  }
+                },
+                {
+                  "key": "wake.builtin_tool_calls",
+                  "value": {
+                    "intValue": "77"
                   }
                 },
                 {

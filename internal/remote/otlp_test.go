@@ -251,6 +251,15 @@ func fullRecord() record.Record {
 	r.Entrypoint = record.EntrypointSDKPython
 	r.Outcome = ptr(record.OutcomeOK)
 	r.DurationMS = ptr(int64(1500))
+	// The session grain's totals, all distinct and none equal to 1500, so a
+	// mis-mapped key shows up as the wrong number rather than as a coincidence.
+	r.InputTokens = ptr(int64(11))
+	r.OutputTokens = ptr(int64(22))
+	r.CacheReadTokens = ptr(int64(33))
+	r.CacheCreationTokens = ptr(int64(44))
+	r.ThinkingTokens = ptr(int64(55))
+	r.ToolCalls = ptr(int64(66))
+	r.BuiltinToolCalls = ptr(int64(77))
 	return r
 }
 
@@ -586,18 +595,32 @@ func TestStatusCodeNeverGuessesSuccess(t *testing.T) {
 // (ADR-0007, ADR-0030).
 var frozenSpanAttributeKeys = []string{
 	"gen_ai.request.model",
+	// The five token totals under the namespace a generic OTLP receiver reads,
+	// beside the wake.* spellings below. Conditional, every one: they are populated
+	// only on a session_end record, so they belong in this list and not in
+	// frozenAlwaysPresentKeys.
+	"gen_ai.usage.cache_creation_input_tokens",
+	"gen_ai.usage.cache_read_input_tokens",
+	"gen_ai.usage.input_tokens",
+	"gen_ai.usage.output_tokens",
+	"gen_ai.usage.thinking_tokens",
 	"langfuse.observation.type",
 	"langfuse.session.id",
+	"wake.builtin_tool_calls",
+	"wake.cache_creation_tokens",
+	"wake.cache_read_tokens",
 	"wake.duration_ms",
 	"wake.effort",
 	"wake.entrypoint",
 	"wake.harness",
 	"wake.harness_version",
+	"wake.input_tokens",
 	"wake.invoker",
 	"wake.kind",
 	"wake.model",
 	"wake.name",
 	"wake.outcome",
+	"wake.output_tokens",
 	"wake.package",
 	"wake.package_version",
 	"wake.repo",
@@ -609,6 +632,8 @@ var frozenSpanAttributeKeys = []string{
 	"wake.schema_version",
 	"wake.session_id",
 	"wake.source",
+	"wake.thinking_tokens",
+	"wake.tool_calls",
 	"wake.via_agent",
 	"wake.via_skill",
 }
@@ -720,6 +745,16 @@ func TestOptionalAttributesAreOmittedNotBlank(t *testing.T) {
 		{"Effort", func(r *record.Record) { r.Effort = "" }, []string{"wake.effort"}},
 		{"Entrypoint", func(r *record.Record) { r.Entrypoint = "" }, []string{"wake.entrypoint"}},
 		{"Outcome", func(r *record.Record) { r.Outcome = nil }, []string{"wake.outcome"}},
+		// The session grain's totals. Each clears one field and names both keys it
+		// feeds, so a mirror emitted from the wrong gate is caught here rather than
+		// at the receiver.
+		{"InputTokens", func(r *record.Record) { r.InputTokens = nil }, []string{"wake.input_tokens", "gen_ai.usage.input_tokens"}},
+		{"OutputTokens", func(r *record.Record) { r.OutputTokens = nil }, []string{"wake.output_tokens", "gen_ai.usage.output_tokens"}},
+		{"CacheReadTokens", func(r *record.Record) { r.CacheReadTokens = nil }, []string{"wake.cache_read_tokens", "gen_ai.usage.cache_read_input_tokens"}},
+		{"CacheCreationTokens", func(r *record.Record) { r.CacheCreationTokens = nil }, []string{"wake.cache_creation_tokens", "gen_ai.usage.cache_creation_input_tokens"}},
+		{"ThinkingTokens", func(r *record.Record) { r.ThinkingTokens = nil }, []string{"wake.thinking_tokens", "gen_ai.usage.thinking_tokens"}},
+		{"ToolCalls", func(r *record.Record) { r.ToolCalls = nil }, []string{"wake.tool_calls"}},
+		{"BuiltinToolCalls", func(r *record.Record) { r.BuiltinToolCalls = nil }, []string{"wake.builtin_tool_calls"}},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.field, func(t *testing.T) {
@@ -769,9 +804,122 @@ func TestUnknownDurationOmitsItsAttribute(t *testing.T) {
 	}
 }
 
+// TestZeroSessionTotalsAreEmittedNotOmitted is the discriminating pair for the
+// session grain, mirroring TestUnknownDurationOmitsItsAttribute. A session with
+// zero primitive invocations is the plan §2.7 baseline and has to be observable at
+// the receiver; an unreported count has to stay absent. Both would look identical
+// if the encoder gated on the value rather than on nil.
+func TestZeroSessionTotalsAreEmittedNotOmitted(t *testing.T) {
+	sessionGrainKeys := []string{
+		"wake.input_tokens", "gen_ai.usage.input_tokens",
+		"wake.output_tokens", "gen_ai.usage.output_tokens",
+		"wake.cache_read_tokens", "gen_ai.usage.cache_read_input_tokens",
+		"wake.cache_creation_tokens", "gen_ai.usage.cache_creation_input_tokens",
+		"wake.thinking_tokens", "gen_ai.usage.thinking_tokens",
+		"wake.tool_calls", "wake.builtin_tool_calls",
+	}
+
+	measured := fullRecord()
+	for _, set := range []func(*record.Record, *int64){
+		func(r *record.Record, v *int64) { r.InputTokens = v },
+		func(r *record.Record, v *int64) { r.OutputTokens = v },
+		func(r *record.Record, v *int64) { r.CacheReadTokens = v },
+		func(r *record.Record, v *int64) { r.CacheCreationTokens = v },
+		func(r *record.Record, v *int64) { r.ThinkingTokens = v },
+		func(r *record.Record, v *int64) { r.ToolCalls = v },
+		func(r *record.Record, v *int64) { r.BuiltinToolCalls = v },
+	} {
+		set(&measured, ptr(int64(0)))
+	}
+	attributes := attributesOf(t, encodeOne(t, measured), "attributes")
+	for _, key := range sessionGrainKeys {
+		if got := attributes[key]["intValue"]; got != "0" {
+			t.Errorf("%s = %v, want %q for a measured zero", key, got, "0")
+		}
+	}
+
+	unreported := fullRecord()
+	for _, set := range []func(*record.Record, *int64){
+		func(r *record.Record, v *int64) { r.InputTokens = v },
+		func(r *record.Record, v *int64) { r.OutputTokens = v },
+		func(r *record.Record, v *int64) { r.CacheReadTokens = v },
+		func(r *record.Record, v *int64) { r.CacheCreationTokens = v },
+		func(r *record.Record, v *int64) { r.ThinkingTokens = v },
+		func(r *record.Record, v *int64) { r.ToolCalls = v },
+		func(r *record.Record, v *int64) { r.BuiltinToolCalls = v },
+	} {
+		set(&unreported, nil)
+	}
+	attributes = attributesOf(t, encodeOne(t, unreported), "attributes")
+	for _, key := range sessionGrainKeys {
+		if _, present := attributes[key]; present {
+			t.Errorf("%s emitted for an unreported count", key)
+		}
+	}
+}
+
+// TestSessionEndSpanCarriesTheSessionGrain is the whole record shape on the wire:
+// the row a receiver reads to recover a session's cost and the denominator
+// encodeSpan's built-in-tool omission destroys (ADR-0006).
+func TestSessionEndSpanCarriesTheSessionGrain(t *testing.T) {
+	r := fullRecord()
+	r.Kind = record.KindSessionEnd
+	r.Name = "session"
+	r.Invoker = record.InvokerAuto
+	// A session reports no outcome and no duration of its own, so both are absent
+	// exactly as the adapter builds them.
+	r.Outcome = nil
+	r.DurationMS = nil
+	if err := record.Validate(r); err != nil {
+		t.Fatalf("the fixture is not a valid record: %v", err)
+	}
+
+	span := encodeOne(t, r)
+	if got := attributesOf(t, span, "attributes")["langfuse.observation.type"]["stringValue"]; got != "span" {
+		t.Errorf("langfuse.observation.type = %v, want %q", got, "span")
+	}
+	// Same trace as every invocation in its session: the id is derived from the
+	// session id, so the session's own row joins the calls inside it.
+	if got := span["traceId"]; got != traceID(r) {
+		t.Errorf("traceId = %v, want %v", got, traceID(r))
+	}
+	// nil outcome is UNSET, never OK (ADR-0005).
+	if got := child(t, span, "status")["code"]; got != float64(codeUnset) {
+		t.Errorf("status.code = %v, want %d", got, codeUnset)
+	}
+	attributes := attributesOf(t, span, "attributes")
+	for key, want := range map[string]string{
+		"wake.input_tokens":                        "11",
+		"gen_ai.usage.input_tokens":                "11",
+		"wake.output_tokens":                       "22",
+		"gen_ai.usage.output_tokens":               "22",
+		"wake.cache_read_tokens":                   "33",
+		"gen_ai.usage.cache_read_input_tokens":     "33",
+		"wake.cache_creation_tokens":               "44",
+		"gen_ai.usage.cache_creation_input_tokens": "44",
+		"wake.thinking_tokens":                     "55",
+		"gen_ai.usage.thinking_tokens":             "55",
+		"wake.tool_calls":                          "66",
+		"wake.builtin_tool_calls":                  "77",
+	} {
+		if got := attributes[key]["intValue"]; got != want {
+			t.Errorf("%s = %v, want %q", key, got, want)
+		}
+	}
+	if _, present := attributes["wake.duration_ms"]; present {
+		t.Error("wake.duration_ms emitted for a session that reports no duration")
+	}
+}
+
 func TestIntegerAttributesAreJSONStrings(t *testing.T) {
 	attributes := attributesOf(t, encodeOne(t, fullRecord()), "attributes")
-	for key, want := range map[string]string{"wake.schema_version": "2", "wake.duration_ms": "1500"} {
+	for key, want := range map[string]string{
+		"wake.schema_version":       "3",
+		"wake.duration_ms":          "1500",
+		"wake.tool_calls":           "66",
+		"wake.builtin_tool_calls":   "77",
+		"gen_ai.usage.input_tokens": "11",
+	} {
 		got, ok := attributes[key]["intValue"].(string)
 		if !ok {
 			// A float64 here means a JSON number reached the wire, which
@@ -802,8 +950,8 @@ func TestSchemaVersionOnEverySpan(t *testing.T) {
 		t.Fatalf("Encode() emitted %d spans, want 3", len(spans))
 	}
 	for i, span := range spans {
-		if got := attributesOf(t, span, "attributes")["wake.schema_version"]["intValue"]; got != "2" {
-			t.Fatalf("span %d wake.schema_version = %v, want %q", i, got, "2")
+		if got := attributesOf(t, span, "attributes")["wake.schema_version"]["intValue"]; got != "3" {
+			t.Fatalf("span %d wake.schema_version = %v, want %q", i, got, "3")
 		}
 	}
 }
@@ -1044,8 +1192,13 @@ func assertEveryStringIsAllowlisted(t *testing.T, payload []byte, r record.Recor
 	if r.Outcome != nil {
 		values = append(values, string(*r.Outcome))
 	}
-	if r.DurationMS != nil {
-		values = append(values, strconv.FormatInt(*r.DurationMS, 10))
+	for _, count := range []*int64{
+		r.DurationMS, r.InputTokens, r.OutputTokens, r.CacheReadTokens,
+		r.CacheCreationTokens, r.ThinkingTokens, r.ToolCalls, r.BuiltinToolCalls,
+	} {
+		if count != nil {
+			values = append(values, strconv.FormatInt(*count, 10))
+		}
 	}
 	for _, value := range values {
 		allowed[value] = true

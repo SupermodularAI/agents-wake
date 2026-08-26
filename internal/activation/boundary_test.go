@@ -62,9 +62,9 @@ func countWalks(t *testing.T) *int {
 	original := importHistory
 	t.Cleanup(func() { importHistory = original })
 	walks := 0
-	importHistory = func(repos *config.Repos, claudeDir string, destination *store.Store, stale claudecode.Staleness, scope collectionScope, discover *boundaryDiscovery) (int, health.Scan, error) {
+	importHistory = func(repos *config.Repos, claudeDir string, destination *store.Store, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope, discover *boundaryDiscovery) (int, health.Scan, error) {
 		walks++
-		return original(repos, claudeDir, destination, stale, scope, discover)
+		return original(repos, claudeDir, destination, stale, idle, scope, discover)
 	}
 	return &walks
 }
@@ -154,8 +154,10 @@ func TestAScanUnderTheGlobalRootRegistersTheEnclosedRepositoryAndAttributesItsOw
 	}
 	boundaryID := mustIdentify(t, repos, base)
 	entries := spoolEntries(t, paths)
-	if len(entries) != 1 {
-		t.Fatalf("the spool holds %d records, want 1", len(entries))
+	// The invocation, and the session_end for its session id. Attribution is asserted
+	// on the invocation below, which is written first.
+	if len(entries) != 2 {
+		t.Fatalf("the spool holds %d records, want 2", len(entries))
 	}
 	if got := string(entries[0].Record.Repo); got != projectID.ID {
 		t.Errorf("the record is attributed to %s, want the repository's own id %s", got, projectID.ID)

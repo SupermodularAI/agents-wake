@@ -191,7 +191,8 @@ func initEpilogue(paths config.Paths, repos *config.Repos, claudeDir, command, i
 		// reason it always was (ADR-0004, ADR-0015).
 		return 0, refreshInventory(paths, repos, claudeDir, inventoryRoot, events)
 	}
-	written, scan, err := scanWithBoundary(paths, repos, claudeDir, events, staleness(paths), wholeHistory)
+	stale, idle := thresholds(paths)
+	written, scan, err := scanWithBoundary(paths, repos, claudeDir, events, stale, idle, wholeHistory)
 	// The counters are recorded whether the scan succeeded or not: a partial
 	// activation — hooks written, history import failed — is reported through
 	// doctor rather than repaired silently, and the counters are the report.
@@ -235,7 +236,8 @@ func ingestScoped(paths config.Paths, claudeDir string, scope collectionScope) (
 	// Through the sequencer, so a user-asked scan picks up a repository the boundary
 	// encloses that no scan has seen a session in yet — requirement 6's "not only the
 	// ones present when --global ran".
-	written, scan, err := scanWithBoundary(paths, repos, claudeDir, events, staleness(paths), scope)
+	stale, idle := thresholds(paths)
+	written, scan, err := scanWithBoundary(paths, repos, claudeDir, events, stale, idle, scope)
 	if recordErr := health.New(paths.HealthFile).RecordScan(scan); recordErr != nil && err == nil {
 		err = recordErr
 	}
@@ -322,30 +324,42 @@ func Uninstall(paths config.Paths, claudeDir string, purge bool) (bool, error) {
 	return removed > 0, nil
 }
 
-// staleness resolves ADR-0015's staleness rule for one scan: the configured
-// threshold, and the instant to compare last activity against.
+// thresholds resolves the two rules one scan runs on: ADR-0015's staleness rule,
+// and ADR-0034's session-end inference. Each is a configured threshold plus the
+// instant to compare last activity against.
 //
-// scan.stale_call_timeout is the only threshold read, and it governs both the
-// interrupted emission and the session-close determination the reader shares with
-// its other caller — ADR-0023 §3: "no second threshold is introduced".
-// session.idle_timeout is a different tunable (ADR-0014's session-end inference,
-// for the session grain's ended_at) and is deliberately not read here.
+// Two keys, two rules, no overlap. scan.stale_call_timeout governs the interrupted
+// emission and the session-close determination the reader shares with its other
+// caller — ADR-0023 §3's "no second threshold is introduced" holds for *that* rule,
+// and this does not introduce one into it. session.idle_timeout answers a different
+// question about a different record: when a session id is believed finished, so the
+// session grain's one record can be derived (ADR-0034 §1). Neither value is
+// calibrated (ADR-0014), and nothing derived from either is reported as a duration.
+//
+// One config.Load and one clock for the whole scan, so both rules judge every
+// session against the same instant. Each key is resolved independently: a
+// session.idle_timeout this build cannot read derives no session_end without
+// disabling the staleness rule, and the other way round.
 //
 // A config file this build cannot read, or a value it cannot use, leaves the rule
-// disabled rather than guessing a threshold: emitting interrupted too early is
-// permanent (ADR-0015 rejects upsert, ADR-0004 deduplicates), so a scan that cannot
-// read its own threshold buffers instead. The value is uncalibrated and provisional
-// (ADR-0014), which is why nothing derived from it is reported as a duration.
-func staleness(paths config.Paths) claudecode.Staleness {
+// disabled rather than guessing a threshold. Both records are permanent once
+// written — ADR-0015 rejects upsert and ADR-0004 deduplicates the correction away —
+// so a scan that cannot read its own threshold defers instead.
+func thresholds(paths config.Paths) (claudecode.Staleness, claudecode.Idleness) {
 	settings, err := config.Load(paths)
 	if err != nil {
-		return claudecode.Staleness{}
+		return claudecode.Staleness{}, claudecode.Idleness{}
 	}
-	timeout, usable, err := settings.Duration("scan.stale_call_timeout")
-	if err != nil || !usable {
-		return claudecode.Staleness{}
+	now := time.Now().UTC()
+	stale := claudecode.Staleness{}
+	if timeout, usable, err := settings.Duration("scan.stale_call_timeout"); err == nil && usable {
+		stale = claudecode.Staleness{Timeout: timeout, Now: now}
 	}
-	return claudecode.Staleness{Timeout: timeout, Now: time.Now().UTC()}
+	idle := claudecode.Idleness{}
+	if timeout, usable, err := settings.Duration("session.idle_timeout"); err == nil && usable {
+		idle = claudecode.Idleness{Timeout: timeout, Now: now}
+	}
+	return stale, idle
 }
 
 // collectionScope decides which of a consented repository's events one scan may
@@ -417,7 +431,7 @@ var importHistory = ingestHistory
 // rather than an error that breaks the command (plan §4.3). Swallowed and
 // uncounted, though, they are indistinguishable from a machine with no history —
 // which is the confusion ADR-0010 asks doctor to end.
-func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Store, stale claudecode.Staleness, scope collectionScope, discover *boundaryDiscovery) (int, health.Scan, error) {
+func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Store, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope, discover *boundaryDiscovery) (int, health.Scan, error) {
 	written := 0
 	scan := health.Scan{At: time.Now().UTC(), RefusedProjects: repos.DroppedEntries()}
 	resolve := resolverFor(repos, scope, discover)
@@ -444,7 +458,7 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 			return nil
 		}
 		defer file.Close()
-		result, ingestErr := ingest.ClaudeCode(file, resolve, record.NewNamer(repos.NameKey()), stale, destination)
+		result, ingestErr := ingest.ClaudeCode(file, resolve, record.NewNamer(repos.NameKey()), stale, idle, destination)
 		if ingestErr != nil {
 			scan.ParseErrors++
 			return nil

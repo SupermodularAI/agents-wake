@@ -50,11 +50,14 @@ func TestInitPreservesHooksAndImportsOnlyConsentedHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
-	if written != 1 {
-		t.Fatalf("Init() wrote %d events, want 1", written)
+	// Two: the consented call, and the session_end for the session id that made it
+	// (ADR-0034). The unconsented history is what this test is about, and none of it
+	// contributes either record.
+	if written != 2 {
+		t.Fatalf("Init() wrote %d events, want 2", written)
 	}
 	entries, err := store.New(filepath.Join(paths.DataDir, eventsFile)).Entries(0)
-	if err != nil || len(entries) != 1 {
+	if err != nil || len(entries) != 2 {
 		t.Fatalf("store entries = %d, error = %v", len(entries), err)
 	}
 	var persisted map[string]any
@@ -74,8 +77,8 @@ func TestInitPreservesHooksAndImportsOnlyConsentedHistory(t *testing.T) {
 	// watermark is involved, which is what makes a re-scan safe rather than merely
 	// cheap.
 	entries, err = store.New(filepath.Join(paths.DataDir, eventsFile)).Entries(0)
-	if err != nil || len(entries) != 1 {
-		t.Fatalf("after a second full init: entries = %d, error = %v; want 1", len(entries), err)
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("after a second full init: entries = %d, error = %v; want 2", len(entries), err)
 	}
 }
 
@@ -92,9 +95,9 @@ func TestInitWithoutFullNeverWalksHarnessHistory(t *testing.T) {
 	original := importHistory
 	t.Cleanup(func() { importHistory = original })
 	walks := 0
-	importHistory = func(repos *config.Repos, claudeDir string, destination *store.Store, stale claudecode.Staleness, scope collectionScope, discover *boundaryDiscovery) (int, health.Scan, error) {
+	importHistory = func(repos *config.Repos, claudeDir string, destination *store.Store, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope, discover *boundaryDiscovery) (int, health.Scan, error) {
 		walks++
-		return original(repos, claudeDir, destination, stale, scope, discover)
+		return original(repos, claudeDir, destination, stale, idle, scope, discover)
 	}
 
 	written, err := Init(paths, root, claudeDir, testExecutable(t), false)
@@ -163,8 +166,8 @@ func TestInitWithoutFullNeverWalksHarnessHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Init(full) error = %v", err)
 	}
-	if walks != 1 || full != 1 {
-		t.Fatalf("Init(full) = %d events after %d walks; want 1 event after 1 walk", full, walks)
+	if walks != 1 || full != 2 {
+		t.Fatalf("Init(full) = %d events after %d walks; want 2 events after 1 walk", full, walks)
 	}
 }
 
@@ -184,7 +187,7 @@ func TestAFullInitLiftsTheBoundaryAnEarlierPlainInitRecorded(t *testing.T) {
 	if _, err := Init(paths, root, claudeDir, testExecutable(t), false); err != nil {
 		t.Fatalf("plain Init() error = %v", err)
 	}
-	if written, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil || written != 1 {
+	if written, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil || written != 2 {
 		t.Fatalf("Init(full) = %d, %v; want the declined history imported", written, err)
 	}
 	if discardErr := spool.Discard(); discardErr != nil {
@@ -198,8 +201,8 @@ func TestAFullInitLiftsTheBoundaryAnEarlierPlainInitRecorded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Entries() error = %v", err)
 	}
-	if len(entries) != 1 {
-		t.Errorf("Entries() = %+v, want the pre-existing call — the boundary outlived the full import", entries)
+	if len(entries) != 2 {
+		t.Errorf("Entries() = %+v, want the pre-existing call and its session_end — the boundary outlived the full import", entries)
 	}
 }
 
@@ -216,7 +219,7 @@ func TestAPlainInitAfterAFullOneKeepsTheEarlierScanCounters(t *testing.T) {
 		t.Fatalf("Init(full) error = %v", err)
 	}
 	before := scanOf(t, paths)
-	if before.At.IsZero() || before.EventsWritten != 1 {
+	if before.At.IsZero() || before.EventsWritten != 2 {
 		t.Fatalf("Scan = %+v, want the full import's counters", before)
 	}
 
@@ -310,7 +313,7 @@ func TestRebuildReplacesOnlyTheDerivedEventStore(t *testing.T) {
 		t.Fatalf("Rebuild() changed consented projects: %v", err)
 	}
 	entries, err := store.New(filepath.Join(paths.DataDir, eventsFile)).Entries(0)
-	if err != nil || len(entries) != 1 {
+	if err != nil || len(entries) != 2 {
 		t.Fatalf("rebuilt entries = %d, error = %v", len(entries), err)
 	}
 }
@@ -683,8 +686,12 @@ func TestIngestSurfacesPendingAndInterruptedCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
-	if written != 1 {
-		t.Fatalf("Init() wrote %d events, want 1 — the stale call resolved and the live one did not", written)
+	// The stale session yields two records — its interrupted call and its session_end
+	// — and the live session yields neither: its call is still buffered and its session
+	// id is not silent yet. Both thresholds decline on the same session, which is what
+	// makes this the end-to-end criterion for either rule.
+	if written != 2 {
+		t.Fatalf("Init() wrote %d events, want 2 — the stale session resolved and the live one did not", written)
 	}
 
 	report, err := health.New(paths.HealthFile).Read()
@@ -702,8 +709,10 @@ func TestIngestSurfacesPendingAndInterruptedCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Entries() error = %v", err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("Entries() = %+v, want exactly one record", entries)
+	// The interrupted call and the stale session's session_end. Position 1 is the
+	// call: the session grain is derived last.
+	if len(entries) != 2 {
+		t.Fatalf("Entries() = %+v, want the interrupted call and the session_end", entries)
 	}
 	if outcome := entries[0].Record.Outcome; outcome == nil || *outcome != record.OutcomeInterrupted {
 		t.Fatalf("Outcome = %v, want interrupted", outcome)
@@ -749,8 +758,10 @@ func TestIngestSurfacesAmbiguousSkillRuns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Init() error = %v", err)
 	}
-	if written != 1 {
-		t.Fatalf("Init() wrote %d events, want 1 — three attributed runs of one skill in one session are one record", written)
+	// Two: the one fallback record, plus the session_end its long-silent session id
+	// yields (ADR-0034). The collapse this test is about is the fallback count.
+	if written != 2 {
+		t.Fatalf("Init() wrote %d events, want 2 — three attributed runs of one skill in one session are one record, beside the session_end", written)
 	}
 
 	report, err := health.New(paths.HealthFile).Read()
@@ -765,8 +776,10 @@ func TestIngestSurfacesAmbiguousSkillRuns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Entries() error = %v", err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("Entries() = %+v, want exactly one record", entries)
+	// The one fallback record, and the session_end beside it. Position 1 is the
+	// fallback: the session grain is derived last.
+	if len(entries) != 2 {
+		t.Fatalf("Entries() = %+v, want the fallback record and the session_end", entries)
 	}
 	// An end_turn entry describes no result, and unknown is never success (ADR-0005).
 	if outcome := entries[0].Record.Outcome; outcome != nil {
@@ -863,8 +876,11 @@ func TestIngestResolvesAStaleCallOnlyOnce(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Entries() error = %v", err)
 		}
-		if len(entries) != 1 {
-			t.Fatalf("after scan %d: Entries() = %+v, want exactly one record", scanNumber, entries)
+		// Two records, and the same two every scan: the interrupted call, and the
+		// session_end. Both are derived from their own source identity, so neither
+		// accumulates a copy per scan (ADR-0004).
+		if len(entries) != 2 {
+			t.Fatalf("after scan %d: Entries() = %+v, want exactly two records", scanNumber, entries)
 		}
 	}
 }
@@ -889,34 +905,72 @@ func TestIngestKeepsCollectingWhenTheConfigFileCannotBeRead(t *testing.T) {
 	}
 }
 
-func TestActivationNeverReadsTheSessionIdleTimeout(t *testing.T) {
-	// ADR-0014 scopes session.idle_timeout to session-end inference — the session
-	// grain's ended_at — which is a different question from whether an unresolved call
-	// may be resolved. ADR-0023 §3 allows exactly one threshold for that,
-	// scan.stale_call_timeout, so reading the other one here would be the "second
-	// threshold" it forbids. A grep is the cheapest guard, in the same spirit as
-	// internal/config's walk for its salt name.
-	//
-	// The quoted form is what it looks for, not the bare name: a key can only reach
-	// config as a string literal, so the quotes are the difference between reading the
-	// tunable and documenting that this package does not.
-	const readingTheKey = `"session.idle_timeout"`
-	sources, err := os.ReadDir(".")
+// TestEachThresholdGovernsOnlyItsOwnRule is what ADR-0023 §3's "no second
+// threshold is introduced" actually requires, tested on behaviour rather than by
+// grepping for a key name.
+//
+// This package used to assert that session.idle_timeout is never read here at all,
+// which was the same guarantee while the staleness rule was the only rule there
+// was. ADR-0034 adds a second one — when a session id is believed finished, so the
+// session grain's one record can be derived — and this package owns config for
+// every reader (plan §6.2), so the key has to be read here. What must not happen is
+// either threshold reaching the other's rule, and each half below fails if it does.
+func TestEachThresholdGovernsOnlyItsOwnRule(t *testing.T) {
+	// A call one minute old, under a staleness threshold of 24h and an idle threshold
+	// of one second: the session is long finished and the call is nowhere near stale.
+	t.Run("session.idle_timeout does not resolve a call", func(t *testing.T) {
+		paths, claudeDir := stalenessFixture(t, time.Minute)
+		if _, err := config.Set(paths, "session.idle_timeout", "1s"); err != nil {
+			t.Fatalf("Set() error = %v", err)
+		}
+		if _, err := Ingest(paths, claudeDir); err != nil {
+			t.Fatalf("Ingest() error = %v", err)
+		}
+
+		if scan := scanOf(t, paths); scan.PendingCalls != 1 || scan.InterruptedCalls != 0 {
+			t.Fatalf("Scan = %+v, want the call still buffered", scan)
+		}
+		if got := kindsInSpool(t, paths); !slices.Equal(got, []record.Kind{record.KindSessionEnd}) {
+			t.Fatalf("spool holds %v, want only the session_end", got)
+		}
+	})
+
+	// The mirror image: the call resolves and the session is not finished, so the two
+	// records the two rules produce never arrive together by accident.
+	t.Run("scan.stale_call_timeout does not finish a session", func(t *testing.T) {
+		paths, claudeDir := stalenessFixture(t, time.Minute)
+		if _, err := config.Set(paths, "scan.stale_call_timeout", "1s"); err != nil {
+			t.Fatalf("Set() error = %v", err)
+		}
+		if _, err := config.Set(paths, "session.idle_timeout", "72h"); err != nil {
+			t.Fatalf("Set() error = %v", err)
+		}
+		if _, err := Ingest(paths, claudeDir); err != nil {
+			t.Fatalf("Ingest() error = %v", err)
+		}
+
+		if scan := scanOf(t, paths); scan.InterruptedCalls != 1 || scan.PendingCalls != 0 {
+			t.Fatalf("Scan = %+v, want the call resolved", scan)
+		}
+		if got := kindsInSpool(t, paths); !slices.Equal(got, []record.Kind{record.KindBuiltinTool}) {
+			t.Fatalf("spool holds %v, want only the interrupted call", got)
+		}
+	})
+}
+
+// kindsInSpool reads back the kinds the spool holds, in position order. It is what
+// a test asserting "this rule produced this record and no other" compares against.
+func kindsInSpool(t *testing.T, paths config.Paths) []record.Kind {
+	t.Helper()
+	entries, err := store.New(filepath.Join(paths.DataDir, eventsFile)).Entries(0)
 	if err != nil {
-		t.Fatalf("ReadDir() error = %v", err)
+		t.Fatalf("Entries() error = %v", err)
 	}
-	for _, entry := range sources {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || entry.Name() == "activation_test.go" {
-			continue
-		}
-		body, err := os.ReadFile(entry.Name())
-		if err != nil {
-			t.Fatalf("ReadFile(%s) error = %v", entry.Name(), err)
-		}
-		if strings.Contains(string(body), readingTheKey) {
-			t.Errorf("%s reads %s; the staleness rule reads scan.stale_call_timeout only", entry.Name(), readingTheKey)
-		}
+	kinds := make([]record.Kind, 0, len(entries))
+	for _, entry := range entries {
+		kinds = append(kinds, entry.Record.Kind)
 	}
+	return kinds
 }
 
 func testPaths(t *testing.T) config.Paths {
@@ -1025,10 +1079,11 @@ func TestIngestRebuildsASpoolFromAnotherSchemaVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Entries() error = %v", err)
 	}
-	// Re-derived from the transcript, at position 1: the rebuild is what keeps a
-	// cursor over this spool meaningful.
-	if len(entries) != 1 || entries[0].Position != 1 {
-		t.Fatalf("Entries() = %+v, want one re-derived record at position 1", entries)
+	// Re-derived from the transcript, from position 1: the rebuild is what keeps a
+	// cursor over this spool meaningful. Two records — the call and its session_end —
+	// and the point is where they start, not how many there are.
+	if len(entries) != 2 || entries[0].Position != 1 {
+		t.Fatalf("Entries() = %+v, want the re-derived records from position 1", entries)
 	}
 
 	report, err := health.New(paths.HealthFile).Read()

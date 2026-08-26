@@ -115,10 +115,10 @@ const (
 
 	// maxSpanAttributes is the size of the frozen span attribute key set. It
 	// only sizes an allocation, but keeping it beside the constants makes a
-	// change to the key set visible in the same review. wake.repo_label is the
-	// twenty-second and is conditional, so this sizes the allocation for the
-	// widest span rather than for every span.
-	maxSpanAttributes = 22
+	// change to the key set visible in the same review. wake.repo_label and the
+	// twelve session-grain keys are all conditional, so this sizes the
+	// allocation for the widest span rather than for every span.
+	maxSpanAttributes = 34
 )
 
 // errEncode is deliberately valueless. A diagnostic that quoted the record it
@@ -296,6 +296,50 @@ func spanAttributes(r record.Record, labels RepoLabels) []keyValue {
 		// Gated on nil, never on the value. Emitting 0 for an unreported
 		// duration would turn "not measured" into "measured as instant".
 		attrs = appendInt(attrs, "wake.duration_ms", *r.DurationMS)
+	}
+	// The session grain's totals. They are populated only on a session_end record,
+	// so gating on nil is also what keeps them off every invocation span — no branch
+	// on Kind is needed or wanted. Gated on nil and never on the value: an unreported
+	// total is an absent attribute, and a genuine zero is emitted as zero (ADR-0005,
+	// ADR-0027).
+	//
+	// wake.builtin_tool_calls is the one that matters most at the receiver. encodeSpan
+	// omits built-in tool spans, so without this count a session with 800 calls of
+	// which three were skills and a session with twelve are indistinguishable, and any
+	// rate computed there has lost its denominator (ADR-0006).
+	//
+	// Each token total is emitted twice: under wake.* and under the gen_ai.usage.*
+	// namespace a generic OTLP receiver reads, exactly as wake.model is also emitted
+	// as gen_ai.request.model. It is the same already-bounded number under a second
+	// key, never a second derivation. input_tokens and output_tokens are the semantic
+	// convention's own spellings; the other three keep the provider's spelling because
+	// the convention names none, and a receiver that folds gen_ai.usage.* into usage
+	// details reads them anyway.
+	if r.InputTokens != nil {
+		attrs = appendInt(attrs, "wake.input_tokens", *r.InputTokens)
+		attrs = appendInt(attrs, "gen_ai.usage.input_tokens", *r.InputTokens)
+	}
+	if r.OutputTokens != nil {
+		attrs = appendInt(attrs, "wake.output_tokens", *r.OutputTokens)
+		attrs = appendInt(attrs, "gen_ai.usage.output_tokens", *r.OutputTokens)
+	}
+	if r.CacheReadTokens != nil {
+		attrs = appendInt(attrs, "wake.cache_read_tokens", *r.CacheReadTokens)
+		attrs = appendInt(attrs, "gen_ai.usage.cache_read_input_tokens", *r.CacheReadTokens)
+	}
+	if r.CacheCreationTokens != nil {
+		attrs = appendInt(attrs, "wake.cache_creation_tokens", *r.CacheCreationTokens)
+		attrs = appendInt(attrs, "gen_ai.usage.cache_creation_input_tokens", *r.CacheCreationTokens)
+	}
+	if r.ThinkingTokens != nil {
+		attrs = appendInt(attrs, "wake.thinking_tokens", *r.ThinkingTokens)
+		attrs = appendInt(attrs, "gen_ai.usage.thinking_tokens", *r.ThinkingTokens)
+	}
+	if r.ToolCalls != nil {
+		attrs = appendInt(attrs, "wake.tool_calls", *r.ToolCalls)
+	}
+	if r.BuiltinToolCalls != nil {
+		attrs = appendInt(attrs, "wake.builtin_tool_calls", *r.BuiltinToolCalls)
 	}
 	attrs = appendString(attrs, "langfuse.observation.type", observationType(r.Kind))
 

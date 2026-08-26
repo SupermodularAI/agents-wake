@@ -111,7 +111,7 @@ type dashboardView struct {
 type primitiveView struct{ Name, Kind, Harness, LastUsed, Invocations, Errors string }
 
 func view(summary metrics.Summary, available []inventory.Usage) dashboardView {
-	result := dashboardView{Empty: summary.Invocations == 0 && len(available) == 0, Invocations: number(summary.Invocations), Sessions: number(summary.Sessions), ErrorRate: rate(summary.ErrorRate), ErrorDetail: ratioDetail(summary.ErrorRate)}
+	result := dashboardView{Empty: !summary.Observed() && len(available) == 0, Invocations: number(summary.Invocations), Sessions: number(summary.Sessions), ErrorRate: rate(summary.ErrorRate), ErrorDetail: ratioDetail(summary.ErrorRate)}
 	if !summary.LastObserved.IsZero() {
 		result.Updated = "Last observed " + summary.LastObserved.Local().Format("2006-01-02 15:04")
 		result.LastObserved = summary.LastObserved.Local().Format("Jan 02")

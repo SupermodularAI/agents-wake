@@ -125,7 +125,9 @@ func TestAPlainInitOnAnUnboundedRepositoryBoundsTheNextTrigger(t *testing.T) {
 	claudeDir, root := inventoryFixture(t)
 	spool := store.New(filepath.Join(paths.DataDir, eventsFile))
 
-	if written, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil || written != 1 {
+	// Two records for the fixture's one call: the invocation, and the session_end
+	// its long-silent session id now yields (ADR-0034).
+	if written, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil || written != 2 {
 		t.Fatalf("Init(full) = %d, %v; want the pre-existing history imported", written, err)
 	}
 	if _, err := Init(paths, root, claudeDir, testExecutable(t), false); err != nil {
@@ -190,7 +192,8 @@ func TestATriggerLeavesASpoolFromAnotherSchemaVersionForAUserAskedScan(t *testin
 	}
 	// The backfill a plain `init` names in its own output: history from before the
 	// boundary, in the spool because the user asked for it.
-	if written, err := Ingest(paths, claudeDir); err != nil || written != 1 {
+	// The invocation and its session's own record, as above.
+	if written, err := Ingest(paths, claudeDir); err != nil || written != 2 {
 		t.Fatalf("Ingest() = %d, %v; want the pre-boundary history backfilled", written, err)
 	}
 	spoolPath := filepath.Join(paths.DataDir, eventsFile)
@@ -204,8 +207,10 @@ func TestATriggerLeavesASpoolFromAnotherSchemaVersionForAUserAskedScan(t *testin
 	if err != nil {
 		t.Fatalf("Entries() error = %v", err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("Entries() = %+v, want the backfilled record still in the spool", entries)
+	// The backfilled call and its session_end, both still there: what this test is
+	// about is that the hook-fired scan deleted neither.
+	if len(entries) != 2 {
+		t.Fatalf("Entries() = %+v, want the backfilled records still in the spool", entries)
 	}
 	raw, err := os.ReadFile(spoolPath)
 	if err != nil {
@@ -238,8 +243,8 @@ func TestATriggerLeavesASpoolFromAnotherSchemaVersionForAUserAskedScan(t *testin
 	if err != nil {
 		t.Fatalf("Entries() error = %v", err)
 	}
-	if len(entries) != 1 || entries[0].Record.Name != "Bash" {
-		t.Fatalf("Entries() = %+v, want the backfilled record re-derived from the transcript", entries)
+	if len(entries) != 2 || entries[0].Record.Name != "Bash" {
+		t.Fatalf("Entries() = %+v, want the backfilled records re-derived from the transcript", entries)
 	}
 	if scan := scanCounters(t, paths); scan.StaleRecords != 1 || !scan.StaleRebuilt {
 		t.Errorf("Scan.StaleRecords, Scan.StaleRebuilt = %d, %v; want 1, true — the rebuild happened and says so", scan.StaleRecords, scan.StaleRebuilt)
@@ -414,8 +419,14 @@ func TestScanCountersDistinguishAnUnreadableSourceFromACleanZero(t *testing.T) {
 		if scan.ParseErrors != 0 || scan.Unreadable != 0 {
 			t.Errorf("ParseErrors = %d, Unreadable = %d; want 0 and 0", scan.ParseErrors, scan.Unreadable)
 		}
-		if scan.EventsWritten != 0 {
-			t.Errorf("EventsWritten = %d, want 0", scan.EventsWritten)
+		// The session grain is written even though every call in it was refused, and
+		// that is the honest answer rather than a consolation record: the session
+		// happened, and a session whose primitive calls this build could not name is
+		// exactly the plan §2.7 baseline a rate is measured against. Its tool_calls is
+		// 0 — this scan collected none — and RefusedCalls above still reports what was
+		// lost, so nothing is presented as complete that is not.
+		if scan.EventsWritten != 1 {
+			t.Errorf("EventsWritten = %d, want 1 — the session_end, and no invocation", scan.EventsWritten)
 		}
 	})
 

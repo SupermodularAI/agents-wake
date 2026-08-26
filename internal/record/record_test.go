@@ -481,3 +481,108 @@ func TestDerivedNameCarriesTheKeyedHMACSHA256DigestOfTheScope(t *testing.T) {
 // testNamer keys the scope digest for tests. Production keys it with a subkey of
 // the per-machine salt (config.Repos.NameKey).
 func testNamer() Namer { return NewNamer([]byte("test scope key")) }
+
+// ptr is this file's nullable-field helper. The package's older tests take the
+// address of a local (&outcome); a table over eight nullable counts needs one
+// expression per row rather than one local per row.
+func ptr[T any](v T) *T { return &v }
+
+// nullableCounts names every nullable numeric field on Record beside a setter, so
+// a new one shows up here as a missing row rather than as untested arithmetic.
+func nullableCounts() []struct {
+	field string
+	set   func(*Record, *int64)
+} {
+	return []struct {
+		field string
+		set   func(*Record, *int64)
+	}{
+		{"duration_ms", func(r *Record, v *int64) { r.DurationMS = v }},
+		{"input_tokens", func(r *Record, v *int64) { r.InputTokens = v }},
+		{"output_tokens", func(r *Record, v *int64) { r.OutputTokens = v }},
+		{"cache_read_tokens", func(r *Record, v *int64) { r.CacheReadTokens = v }},
+		{"cache_creation_tokens", func(r *Record, v *int64) { r.CacheCreationTokens = v }},
+		{"thinking_tokens", func(r *Record, v *int64) { r.ThinkingTokens = v }},
+		{"tool_calls", func(r *Record, v *int64) { r.ToolCalls = v }},
+		{"builtin_tool_calls", func(r *Record, v *int64) { r.BuiltinToolCalls = v }},
+	}
+}
+
+// TestValidateRejectsANegativeSessionTotal is the fail-closed half of the session
+// grain's bounded-numeric contract: a count below zero is not a measurement of
+// anything, and a record carrying one is dropped rather than written (plan §3.4).
+func TestValidateRejectsANegativeSessionTotal(t *testing.T) {
+	for _, count := range nullableCounts() {
+		t.Run(count.field, func(t *testing.T) {
+			negative := validRecord()
+			count.set(&negative, ptr(int64(-1)))
+			if err := Validate(negative); err == nil {
+				t.Fatalf("Validate() accepted %s = -1", count.field)
+			}
+		})
+	}
+}
+
+// TestValidateAcceptsAZeroSessionTotal is the other half, and the one that is easy
+// to break by reaching for a truthiness check: a measured zero is a value. A
+// session that invoked no primitive is the plan §2.7 baseline, so the zero has to
+// survive both validation and serialisation.
+func TestValidateAcceptsAZeroSessionTotal(t *testing.T) {
+	for _, count := range nullableCounts() {
+		t.Run(count.field, func(t *testing.T) {
+			zero := validRecord()
+			count.set(&zero, ptr(int64(0)))
+			if err := Validate(zero); err != nil {
+				t.Fatalf("Validate() error = %v for %s = 0", err, count.field)
+			}
+			encoded, err := Marshal(zero)
+			if err != nil {
+				t.Fatalf("Marshal() error = %v", err)
+			}
+			if want := `"` + count.field + `":0`; !strings.Contains(string(encoded), want) {
+				t.Fatalf("Marshal() = %s, want it to contain %s", encoded, want)
+			}
+		})
+	}
+}
+
+// TestMarshalRendersAnUnreportedTotalAsNull keeps unreported distinguishable from
+// zero on disk. Neither field carries omitempty for this reason: a reader of the
+// spool has to be able to tell "the harness said nothing" from "the harness said
+// none", and an absent key reads as the latter (ADR-0005 applied to counts).
+func TestMarshalRendersAnUnreportedTotalAsNull(t *testing.T) {
+	encoded, err := Marshal(validRecord())
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	for _, count := range nullableCounts() {
+		if want := `"` + count.field + `":null`; !strings.Contains(string(encoded), want) {
+			t.Fatalf("Marshal() = %s, want it to contain %s", encoded, want)
+		}
+	}
+}
+
+// TestIsSessionGrain enumerates the whole Kind enum explicitly rather than
+// testing the two members that answer true: a Kind added later has to appear here
+// as a missing row, because the consequence of getting it wrong is silent — a
+// phantom primitive in every report, or a session that stops being counted.
+func TestIsSessionGrain(t *testing.T) {
+	sessionGrain := []Kind{KindSessionStart, KindSessionEnd}
+	invocationGrain := []Kind{
+		KindSkill, KindSubagent, KindMCPTool, KindMCPServer,
+		KindCommand, KindPlugin, KindBuiltinTool, KindHook,
+	}
+	for _, kind := range sessionGrain {
+		if !IsSessionGrain(kind) {
+			t.Fatalf("IsSessionGrain(%q) = false, want true", kind)
+		}
+	}
+	for _, kind := range invocationGrain {
+		if IsSessionGrain(kind) {
+			t.Fatalf("IsSessionGrain(%q) = true, want false", kind)
+		}
+	}
+	if len(sessionGrain)+len(invocationGrain) != 10 {
+		t.Fatal("the Kind enum changed size; add the new member to one of the two lists")
+	}
+}

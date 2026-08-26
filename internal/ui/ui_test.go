@@ -47,6 +47,34 @@ func TestHandlerRendersEmptyState(t *testing.T) {
 	}
 }
 
+// TestHandlerDoesNotClaimAnEmptyStoreForASessionWithNoPrimitiveUse is the plan §2.7
+// baseline at the dashboard. A session that invoked no primitive contributes nothing
+// to Invocations by design, so a gate keyed on Invocations alone hides the whole view
+// behind an empty state for a store that holds a terminal session_end — the exact
+// population the session grain exists to expose.
+func TestHandlerDoesNotClaimAnEmptyStoreForASessionWithNoPrimitiveUse(t *testing.T) {
+	source := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	if _, err := source.Append([]record.Record{sessionEnd("session-1")}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	response := httptest.NewRecorder()
+	Handler(source, inventory.New(filepath.Join(t.TempDir(), "primitives.json"))).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := response.Body.String()
+	if strings.Contains(body, "No primitive inventory or terminal events yet") {
+		t.Fatalf("dashboard called a store holding a session_end empty: %s", body)
+	}
+	for _, want := range []string{"Distinct sessions", ">1<"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard is missing %q: %s", want, body)
+		}
+	}
+	// The tile counts this session, so it cannot go on calling its population
+	// "with primitive activity" — this one had none.
+	if strings.Contains(body, "with primitive activity") {
+		t.Fatalf("session tile still claims every counted session had primitive activity: %s", body)
+	}
+}
+
 func TestHandlerExcludesBuiltinToolsFromPrimitiveTable(t *testing.T) {
 	source := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
 	ok := record.OutcomeOK
@@ -108,6 +136,13 @@ func TestHandlerShowsAvailablePrimitivesWithoutUsage(t *testing.T) {
 
 func event(id string, outcome *record.Outcome) record.Record {
 	return record.Record{SchemaVersion: record.SchemaVersion, EventID: record.DeriveEventID("claude-code", record.Identifier(id)), Timestamp: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC), Harness: "claude-code", SessionID: "session-1", Repo: "0123456789abcdef0123456789abcdef", Kind: record.KindSkill, Name: "review", Invoker: record.InvokerModel, Outcome: outcome}
+}
+
+// sessionEnd is a session that invoked nothing: no outcome, no duration, and zero
+// counted calls (ADR-0002's session grain).
+func sessionEnd(sessionID record.Identifier) record.Record {
+	var zero int64
+	return record.Record{SchemaVersion: record.SchemaVersion, EventID: record.DeriveEventID("claude-code", sessionID+"\x1esession_end"), Timestamp: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC), Harness: "claude-code", SessionID: sessionID, Repo: "0123456789abcdef0123456789abcdef", Kind: record.KindSessionEnd, Name: "session", Invoker: record.InvokerAuto, ToolCalls: &zero, BuiltinToolCalls: &zero}
 }
 
 func TestListenBindsLoopbackOnly(t *testing.T) {

@@ -103,6 +103,27 @@ func TestRenderShowsHelpfulEmptyState(t *testing.T) {
 	}
 }
 
+// TestRenderDoesNotClaimAnEmptyStoreForASessionWithNoPrimitiveUse is the plan §2.7
+// baseline at the renderer. A session that invoked no primitive contributes nothing
+// to Invocations by design, so a gate keyed on Invocations alone calls the store
+// empty and prints "No terminal events yet." over a terminal session_end that was
+// read, written, and delivered — while `wake` root reports the same session as
+// observed. The session population is the one this report exists to expose.
+func TestRenderDoesNotClaimAnEmptyStoreForASessionWithNoPrimitiveUse(t *testing.T) {
+	instant := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	var output bytes.Buffer
+	if err := Render(&output, metrics.Aggregate([]record.Record{sessionEndRecord("session-1", instant)}), nil, Options{}); err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	text := output.String()
+	if strings.Contains(text, "No terminal events yet") {
+		t.Fatalf("report called a store holding a session_end empty:\n%s", text)
+	}
+	if !strings.Contains(text, "Last observed: 2026-08-13T12:00:00Z") {
+		t.Fatalf("report did not show the observed session:\n%s", text)
+	}
+}
+
 func TestRenderLabelsAbsentActivityWithoutAZeroTimestamp(t *testing.T) {
 	var output bytes.Buffer
 	available := []inventory.Usage{{Harness: "claude-code", Kind: record.KindSkill, Name: "unused"}}
@@ -241,5 +262,24 @@ func reportRecord(id string, outcome *record.Outcome) record.Record {
 		Name:          "review",
 		Invoker:       record.InvokerModel,
 		Outcome:       outcome,
+	}
+}
+
+// sessionEndRecord is a session that invoked nothing: no outcome, no duration, and
+// zero counted calls (ADR-0002's session grain).
+func sessionEndRecord(sessionID record.Identifier, at time.Time) record.Record {
+	var zero int64
+	return record.Record{
+		SchemaVersion:    record.SchemaVersion,
+		EventID:          record.DeriveEventID("claude-code", sessionID+"\x1esession_end"),
+		Timestamp:        at,
+		Harness:          "claude-code",
+		SessionID:        sessionID,
+		Repo:             "0123456789abcdef0123456789abcdef",
+		Kind:             record.KindSessionEnd,
+		Name:             "session",
+		Invoker:          record.InvokerAuto,
+		ToolCalls:        &zero,
+		BuiltinToolCalls: &zero,
 	}
 }

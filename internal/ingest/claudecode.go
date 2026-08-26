@@ -52,10 +52,13 @@ type Result struct {
 // names is the key a scoped primitive reference is digested under, and travels
 // with the resolver because both come from the same consent boundary (ADR-0020).
 //
-// stale carries ADR-0015's staleness threshold from the caller that owns config;
-// this package does not read config (plan §6.2).
-func ClaudeCode(reader io.Reader, resolve claudecode.Resolver, names record.Namer, stale claudecode.Staleness, destination *store.Store) (Result, error) {
-	derived, err := claudecode.Read(reader, resolve, names, stale)
+// stale carries ADR-0015's staleness threshold and idle carries ADR-0034's
+// session-end inference threshold, both from the caller that owns config; this
+// package does not read config (plan §6.2). They are two thresholds answering two
+// questions — when an unterminated call is given up on, and when a session id is
+// believed finished — and each zero value disables only its own rule.
+func ClaudeCode(reader io.Reader, resolve claudecode.Resolver, names record.Namer, stale claudecode.Staleness, idle claudecode.Idleness, destination *store.Store) (Result, error) {
+	derived, err := claudecode.Read(reader, resolve, names, stale, idle)
 	if err != nil {
 		return Result{}, err
 	}
