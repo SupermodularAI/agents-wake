@@ -214,7 +214,7 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 			}
 			return
 		}
-		observeSessionGrain(grains, entry, resolve)
+		observeSessionGrain(grains, 0, entry, resolve)
 		switch event, status := entry.attributedSkillCandidate(resolve, names); status {
 		case callAccepted:
 			deferSkillCandidate(skillCandidates, skillRun{session: event.SessionID, name: event.Name}, 0, event)
@@ -364,7 +364,9 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, stale Stalenes
 	// Derived last, from result.Records as it now stands: the aggregate is a snapshot
 	// of what this scan made terminal (ADR-0034 §3), which is every completed call,
 	// every interrupted one, and every Shape-A fallback appended above.
-	result.Records = append(result.Records, resolveSessionEnds(grains, sessions, judgedIdle, result.Records)...)
+	tally := invocationTally{}
+	tally.observe(result.Records)
+	result.Records = append(result.Records, resolveSessionEnds(grains, sessions, judgedIdle, &tally)...)
 	return result, nil
 }
 
