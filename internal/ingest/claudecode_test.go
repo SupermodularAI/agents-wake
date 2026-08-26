@@ -110,11 +110,11 @@ func TestClaudeCodeIsIdempotent(t *testing.T) {
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
 	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
 
-	first, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, destination)
+	first, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, claudecode.Idleness{}, destination)
 	if err != nil {
 		t.Fatalf("first ClaudeCode() error = %v", err)
 	}
-	second, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, destination)
+	second, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, claudecode.Idleness{}, destination)
 	if err != nil {
 		t.Fatalf("second ClaudeCode() error = %v", err)
 	}
@@ -133,7 +133,7 @@ func TestClaudeCodePersistsBothToolCallsFromOneSourceEntry(t *testing.T) {
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
 	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
 
-	first, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, destination)
+	first, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, claudecode.Idleness{}, destination)
 	if err != nil {
 		t.Fatalf("first ClaudeCode() error = %v", err)
 	}
@@ -145,7 +145,7 @@ func TestClaudeCodePersistsBothToolCallsFromOneSourceEntry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
-	second, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, destination)
+	second, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, claudecode.Idleness{}, destination)
 	if err != nil {
 		t.Fatalf("second ClaudeCode() error = %v", err)
 	}
@@ -181,7 +181,7 @@ func TestClaudeCodeCountsARefusedSubagentCallWithoutWritingIt(t *testing.T) {
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
 	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
 
-	result, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, destination)
+	result, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, claudecode.Idleness{}, destination)
 	if err != nil {
 		t.Fatalf("ClaudeCode() error = %v", err)
 	}
@@ -215,7 +215,7 @@ func TestClaudeCodePersistsNoPathShapedValue(t *testing.T) {
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
 	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
 
-	result, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, destination)
+	result, err := ClaudeCode(strings.NewReader(input), resolve, names, claudecode.Staleness{}, claudecode.Idleness{}, destination)
 	if err != nil {
 		t.Fatalf("ClaudeCode() error = %v", err)
 	}
@@ -262,7 +262,7 @@ func TestClaudeCodeReportsOneSkillRunAsOneInvocation(t *testing.T) {
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
 	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
 
-	result, err := ClaudeCode(strings.NewReader(input), resolve, names, closingStaleness, destination)
+	result, err := ClaudeCode(strings.NewReader(input), resolve, names, closingStaleness, claudecode.Idleness{}, destination)
 	if err != nil {
 		t.Fatalf("ClaudeCode() error = %v", err)
 	}
@@ -301,7 +301,7 @@ func TestClaudeCodeReportsAShapeASkillRunAsOneInvocation(t *testing.T) {
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
 	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
 
-	first, err := ClaudeCode(strings.NewReader(input), resolve, names, closingStaleness, destination)
+	first, err := ClaudeCode(strings.NewReader(input), resolve, names, closingStaleness, claudecode.Idleness{}, destination)
 	if err != nil {
 		t.Fatalf("first ClaudeCode() error = %v", err)
 	}
@@ -328,7 +328,7 @@ func TestClaudeCodeReportsAShapeASkillRunAsOneInvocation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
-	second, err := ClaudeCode(strings.NewReader(input), resolve, names, closingStaleness, destination)
+	second, err := ClaudeCode(strings.NewReader(input), resolve, names, closingStaleness, claudecode.Idleness{}, destination)
 	if err != nil {
 		t.Fatalf("second ClaudeCode() error = %v", err)
 	}
@@ -355,7 +355,7 @@ func TestClaudeCodeNeverReportsASidechainTurnAsASkillInvocation(t *testing.T) {
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
 	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
 
-	result, err := ClaudeCode(strings.NewReader(input), resolve, names, closingStaleness, destination)
+	result, err := ClaudeCode(strings.NewReader(input), resolve, names, closingStaleness, claudecode.Idleness{}, destination)
 	if err != nil {
 		t.Fatalf("ClaudeCode() error = %v", err)
 	}
@@ -383,7 +383,7 @@ func TestClaudeCodeStillReportsOneSubagentRunAsOneInvocation(t *testing.T) {
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
 	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
 
-	result, err := ClaudeCode(strings.NewReader(input), resolve, names, closingStaleness, destination)
+	result, err := ClaudeCode(strings.NewReader(input), resolve, names, closingStaleness, claudecode.Idleness{}, destination)
 	if err != nil {
 		t.Fatalf("ClaudeCode() error = %v", err)
 	}
@@ -410,7 +410,7 @@ func TestClaudeCodeReportsTheAmbiguityCounterWithoutASecondInvocation(t *testing
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
 	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
 
-	result, err := ClaudeCode(strings.NewReader(input), resolve, names, closingStaleness, destination)
+	result, err := ClaudeCode(strings.NewReader(input), resolve, names, closingStaleness, claudecode.Idleness{}, destination)
 	if err != nil {
 		t.Fatalf("ClaudeCode() error = %v", err)
 	}
@@ -445,7 +445,7 @@ func TestClaudeCodeWritesAnInterruptedCallExactlyOnce(t *testing.T) {
 		Now:     time.Date(2026, 8, 13, 14, 0, 0, 0, time.UTC),
 	}
 
-	first, err := ClaudeCode(strings.NewReader(input), resolve, names, stale, destination)
+	first, err := ClaudeCode(strings.NewReader(input), resolve, names, stale, claudecode.Idleness{}, destination)
 	if err != nil {
 		t.Fatalf("first ClaudeCode() error = %v", err)
 	}
@@ -453,7 +453,7 @@ func TestClaudeCodeWritesAnInterruptedCallExactlyOnce(t *testing.T) {
 		t.Fatalf("first ClaudeCode() = %+v", first)
 	}
 
-	second, err := ClaudeCode(strings.NewReader(input), resolve, names, stale, destination)
+	second, err := ClaudeCode(strings.NewReader(input), resolve, names, stale, claudecode.Idleness{}, destination)
 	if err != nil {
 		t.Fatalf("second ClaudeCode() error = %v", err)
 	}

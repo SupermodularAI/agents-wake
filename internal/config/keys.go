@@ -56,9 +56,14 @@ func init() {
 		// calibration, which P3 owns. Neither value below is calibrated and
 		// neither may be described anywhere as if it were.
 		//
-		// 30m for an idle session: long enough that a lunch break does not
-		// split one session in two, short enough that a day's work is not one
-		// session.
+		// 30m for an idle session. The threshold decides when to believe a
+		// session id has finished, not how many records it produces: a
+		// session id is delimited once for its whole life and yields exactly
+		// one session_end, whatever gaps it contains (ADR-0034 §1). Too
+		// short and a session id is called finished while its user is still
+		// working, which is permanent — the record cannot be corrected once
+		// written (ADR-0015 rejects upsert, ADR-0004 deduplicates); too long
+		// and a day's work reports as one session that has not ended yet.
 		Key{
 			Name:        "session.idle_timeout",
 			Kind:        KindDuration,

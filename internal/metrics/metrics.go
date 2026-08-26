@@ -81,6 +81,13 @@ type Summary struct {
 // population USED PRIMITIVES lists below them; a session's ordinary tool calls
 // outnumber its primitive calls and would otherwise dominate every rate with
 // activity the primitive table never shows.
+//
+// Session-grain records (ADR-0002) are excluded from the same counts for a
+// different reason: they are not invocations of anything. One counts toward the
+// session population and the last-observed instant — which is what makes a session
+// with no primitive use visible at all, the plan §2.7 baseline — and toward nothing
+// else. Its Sessions figure therefore includes sessions no primitive row accounts
+// for, which is the point.
 func Aggregate(records []record.Record) Summary {
 	summary := Summary{Outcomes: make(map[record.Outcome]uint64)}
 	allSessions := make(map[record.Identifier]struct{})
@@ -88,7 +95,25 @@ func Aggregate(records []record.Record) Summary {
 	var known, unknown, failures uint64
 
 	for _, event := range records {
-		if !record.IsTerminal(event) || event.Kind == record.KindBuiltinTool {
+		if !record.IsTerminal(event) {
+			continue
+		}
+		// A session-grain record is evidence that a session existed and nothing else.
+		// It is the plan §2.7 baseline — a session with zero primitive use is exactly
+		// the row that makes every rate above it meaningful — so it counts toward the
+		// session population and the last-observed instant, and toward nothing else:
+		// not Invocations, not an outcome tally, and never a primitive of its own
+		// (ADR-0002, ADR-0006). A primitive named "session" would read as something the
+		// user invoked, and its absent outcome would be excluded from a rate it was
+		// never in the denominator of.
+		if record.IsSessionGrain(event.Kind) {
+			allSessions[event.SessionID] = struct{}{}
+			if event.Timestamp.After(summary.LastObserved) {
+				summary.LastObserved = event.Timestamp
+			}
+			continue
+		}
+		if event.Kind == record.KindBuiltinTool {
 			continue
 		}
 		summary.Invocations++

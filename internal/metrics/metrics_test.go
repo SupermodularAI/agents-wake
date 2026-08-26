@@ -95,3 +95,78 @@ func testRecord(source string, outcome *record.Outcome) record.Record {
 		Outcome:       outcome,
 	}
 }
+
+// TestAggregateCountsASessionEndAsASessionNotAnInvocation pins what a session-grain
+// record is evidence of: that a session existed, and nothing else. Counting it as an
+// invocation would put a primitive named "session" in every report and add a row to
+// every rate's denominator that nobody invoked (ADR-0002, ADR-0006).
+func TestAggregateCountsASessionEndAsASessionNotAnInvocation(t *testing.T) {
+	ok := record.OutcomeOK
+	summary := Aggregate([]record.Record{
+		testRecord("one", &ok),
+		sessionEndRecord("session-1", time.Date(2026, time.August, 13, 12, 5, 0, 0, time.UTC)),
+	})
+
+	if summary.Invocations != 1 {
+		t.Errorf("Invocations = %d, want 1", summary.Invocations)
+	}
+	if summary.Sessions != 1 {
+		t.Errorf("Sessions = %d, want 1", summary.Sessions)
+	}
+	if len(summary.Primitives) != 1 {
+		t.Fatalf("Primitives = %+v, want only the skill", summary.Primitives)
+	}
+	for _, primitive := range summary.Primitives {
+		if primitive.Name == "session" {
+			t.Fatalf("Primitives holds a phantom %q row: %+v", primitive.Name, primitive)
+		}
+	}
+	// A session reports no outcome, and that absence is not an unknown-outcome
+	// exclusion either: the rate is over invocations, and this was not one.
+	if summary.ErrorRate.Total() != 1 || summary.ErrorRate.Excluded() != 0 {
+		t.Errorf("ErrorRate = %+v, want the one invocation and nothing excluded", summary.ErrorRate)
+	}
+	// It does move the last-observed instant: the session was observed, later than
+	// the invocation inside it.
+	if want := time.Date(2026, time.August, 13, 12, 5, 0, 0, time.UTC); !summary.LastObserved.Equal(want) {
+		t.Errorf("LastObserved = %v, want %v", summary.LastObserved, want)
+	}
+}
+
+// TestAggregateCountsASessionWithNoInvocations is the plan §2.7 baseline made
+// observable end to end: a session that invoked no primitive is a row in the session
+// population, and it is exactly the row that makes every rate above it meaningful.
+func TestAggregateCountsASessionWithNoInvocations(t *testing.T) {
+	instant := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	summary := Aggregate([]record.Record{sessionEndRecord("session-1", instant)})
+
+	if summary.Sessions != 1 {
+		t.Errorf("Sessions = %d, want 1", summary.Sessions)
+	}
+	if summary.Invocations != 0 {
+		t.Errorf("Invocations = %d, want 0", summary.Invocations)
+	}
+	if len(summary.Primitives) != 0 {
+		t.Errorf("Primitives = %+v, want none", summary.Primitives)
+	}
+	if !summary.LastObserved.Equal(instant) {
+		t.Errorf("LastObserved = %v, want %v", summary.LastObserved, instant)
+	}
+}
+
+func sessionEndRecord(sessionID record.Identifier, at time.Time) record.Record {
+	var zero int64
+	return record.Record{
+		SchemaVersion:    record.SchemaVersion,
+		EventID:          record.DeriveEventID("claude-code", sessionID+"\x1esession_end"),
+		Timestamp:        at,
+		Harness:          "claude-code",
+		SessionID:        sessionID,
+		Repo:             "0123456789abcdef0123456789abcdef",
+		Kind:             record.KindSessionEnd,
+		Name:             "session",
+		Invoker:          record.InvokerAuto,
+		ToolCalls:        &zero,
+		BuiltinToolCalls: &zero,
+	}
+}
