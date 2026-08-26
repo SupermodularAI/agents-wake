@@ -126,7 +126,7 @@ func TestClaudeCodeIsIdempotent(t *testing.T) {
 
 func TestClaudeCodePersistsBothToolCallsFromOneSourceEntry(t *testing.T) {
 	input := strings.Join([]string{
-		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"},{"type":"tool_use","id":"call-2","name":"Task","input":{"subagent_type":"explorer"}}]}}`,
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"},{"type":"tool_use","id":"call-2","name":"Skill","input":{"skill":"pr-review"}}]}}`,
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false},{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}`,
 	}, "\n")
 	spool := filepath.Join(t.TempDir(), "events.ndjson")
@@ -172,9 +172,9 @@ func TestClaudeCodePersistsBothToolCallsFromOneSourceEntry(t *testing.T) {
 	}
 }
 
-func TestClaudeCodeCountsARefusedSubagentCallWithoutWritingIt(t *testing.T) {
+func TestClaudeCodeCountsARefusedCallWithoutWritingIt(t *testing.T) {
 	input := strings.Join([]string{
-		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Task"}]}}`,
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Skill","input":{"skill":"../secrets"}}]}}`,
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
 	spool := filepath.Join(t.TempDir(), "events.ndjson")
@@ -205,10 +205,9 @@ func TestClaudeCodePersistsNoPathShapedValue(t *testing.T) {
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","attributionSkill":"a/../secrets","attributionMcpServer":"plugin:a/../evil:tool","message":{"model":"C:/Users/me","content":[{"type":"tool_use","id":"call-2","name":"Bash"}]}}`,
 		`{"uuid":"entry-4","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:03Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}`,
-		// A directory-scoped subagent reference, carried on the Task call that is the
-		// subagent invocation: only the keyed digest of the scope may be persisted,
-		// never the path fragment it was derived from (ADR-0020).
-		`{"uuid":"entry-5","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:04Z","message":{"content":[{"type":"tool_use","id":"call-3","name":"Task","input":{"subagent_type":"apps/web:reviewer"}}]}}`,
+		// A directory-scoped primitive reference: only the keyed digest of the scope may
+		// be persisted, never the path fragment it was derived from (ADR-0020).
+		`{"uuid":"entry-5","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:04Z","message":{"content":[{"type":"tool_use","id":"call-3","name":"Skill","input":{"skill":"apps/web:reviewer"}}]}}`,
 		`{"uuid":"entry-6","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:05Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-3","is_error":false}]}}`,
 	}, "\n")
 	spool := filepath.Join(t.TempDir(), "events.ndjson")
@@ -367,32 +366,6 @@ func TestClaudeCodeNeverReportsASidechainTurnAsASkillInvocation(t *testing.T) {
 	}
 	if _, statErr := os.Stat(spool); !errors.Is(statErr, fs.ErrNotExist) {
 		t.Errorf("Stat(spool) error = %v, want the spool never created", statErr)
-	}
-}
-
-// T111's regression, at the layer that renders. A subagent run is described twice the
-// same way a skill run is, and the fix for the skill half must not change what the
-// subagent half already does: attributionAgent derives no record at all.
-func TestClaudeCodeStillReportsOneSubagentRunAsOneInvocation(t *testing.T) {
-	input := strings.Join([]string{
-		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-1","name":"Task","input":{"subagent_type":"explorer"}}]}}`,
-		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","attributionAgent":"explorer","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
-		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
-	}, "\n")
-	spool := filepath.Join(t.TempDir(), "events.ndjson")
-	destination := store.New(spool)
-	repo := record.Hash("0123456789abcdef0123456789abcdef")
-	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
-
-	result, err := ClaudeCode(strings.NewReader(input), resolve, names, closingStaleness, claudecode.Idleness{}, destination)
-	if err != nil {
-		t.Fatalf("ClaudeCode() error = %v", err)
-	}
-	if result.Written != 1 {
-		t.Fatalf("ClaudeCode() = %+v, want one record for one subagent run", result)
-	}
-	if got := invocationsOf(t, destination, filepath.Join(t.TempDir(), "primitives.json"), record.KindSubagent, "explorer"); got != 1 {
-		t.Errorf("inventory invocations = %d, want 1", got)
 	}
 }
 

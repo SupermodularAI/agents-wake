@@ -95,10 +95,11 @@ func TestReadDerivesTerminalAttributedSkill(t *testing.T) {
 	}
 }
 
-// An attributed end_turn entry is not a second subagent invocation. The Task call
-// that entered the subagent is the invocation, and the parent transcript carries it
-// as a paired tool_use/tool_result with an outcome; counting the attributed entry
-// too would report one run as two.
+// An entry carrying attributionAgent but no agentId is not a subagent transcript
+// entry, so no record is derived from it. A subagent invocation's record comes from
+// a transcript that declares an agent id, resolved at session close and keyed by
+// that id (ADR-0036 §2, subagent.go) — deriving one from an attributed entry as well
+// would report one run as two.
 func TestReadDerivesNoSubagentRecordFromAttributionAlone(t *testing.T) {
 	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionAgent":"sdlc-check-architecture","message":{"model":"sonnet","stop_reason":"end_turn"}}`
 	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
@@ -478,14 +479,14 @@ func TestReadKeepsUnknownOutcomeNull(t *testing.T) {
 func TestReadSkipsMalformedLine(t *testing.T) {
 	input := strings.Join([]string{
 		`not json`,
-		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Task","input":{"subagent_type":"explorer"}}]}}`,
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Skill","input":{"skill":"pr-review"}}]}}`,
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":true}]}}`,
 	}, "\n")
 	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
-	if result.Malformed != 1 || len(result.Records) != 1 || result.Records[0].Kind != record.KindSubagent {
+	if result.Malformed != 1 || len(result.Records) != 1 || result.Records[0].Kind != record.KindSkill {
 		t.Fatalf("Read() = %+v", result)
 	}
 }
@@ -493,7 +494,7 @@ func TestReadSkipsMalformedLine(t *testing.T) {
 // twoCallsInOneEntry is a transcript whose single tool_use entry carries two
 // calls, terminated together by one later entry. Claude Code emits this shape
 // whenever the model calls two tools in one assistant turn.
-const twoCallsInOneEntry = `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"},{"type":"tool_use","id":"call-2","name":"Task","input":{"subagent_type":"explorer"}}]}}
+const twoCallsInOneEntry = `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"},{"type":"tool_use","id":"call-2","name":"Skill","input":{"skill":"pr-review"}}]}}
 {"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false},{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}`
 
 func TestReadDerivesADistinctIDForEachToolCallInOneEntry(t *testing.T) {
@@ -591,7 +592,7 @@ func TestReadCountsAnOversizedLineWithoutRetainingIt(t *testing.T) {
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 		oversized,
-		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","message":{"content":[{"type":"tool_use","id":"call-2","name":"Task","input":{"subagent_type":"code-reviewer"}}]}}`,
+		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","message":{"content":[{"type":"tool_use","id":"call-2","name":"Skill","input":{"skill":"pr-review"}}]}}`,
 		`{"uuid":"entry-4","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:03Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}`,
 	}, "\n")
 
@@ -784,7 +785,7 @@ func TestReadDoesNotEmitAnEarlyResultForAnUnconsentedCall(t *testing.T) {
 func TestReadCountsARefusedNameWhoseResultArrivedFirst(t *testing.T) {
 	transcript := strings.Join([]string{
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
-		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Task"}]}}`,
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Skill","input":{"skill":"../secrets"}}]}}`,
 	}, "\n")
 	result, err := read(strings.NewReader(transcript), resolver, names, Staleness{})
 	if err != nil {
@@ -940,7 +941,7 @@ func parsedTime(t *testing.T, value string) time.Time {
 // opened in a single assistant turn, terminated one at a time by results written
 // in three different shapes, with an attribution-only bookkeeping entry in
 // between. Every payload carries a fragment nothing may retain.
-const mixedShapeTranscript = `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-1","name":"Bash"},{"type":"tool_use","id":"call-2","name":"Task","input":{"subagent_type":"code-reviewer"}},{"type":"tool_use","id":"call-3","name":"Skill","input":{"skill":"pr-review"}}]}}
+const mixedShapeTranscript = `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-1","name":"Bash"},{"type":"tool_use","id":"call-2","name":"mcp__atlassian__search"},{"type":"tool_use","id":"call-3","name":"Skill","input":{"skill":"pr-review"}}]}}
 {"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","toolUseResult":"total 12\nfile.go\n","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}
 {"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","toolUseResult":[{"type":"text","text":"reviewed"}],"message":{"content":[{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}
 {"uuid":"entry-4","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:03Z","message":{"model":"sonnet","stop_reason":"tool_use"}}
@@ -959,9 +960,9 @@ func TestReadTerminatesEveryCallInATranscriptShapedLikeARealOne(t *testing.T) {
 	// Matched by name rather than by position: which shape terminated which call is
 	// the point, and the assertion should not also depend on emission order.
 	want := map[record.Identifier]record.Outcome{
-		"Bash":          record.OutcomeOK,
-		"code-reviewer": record.OutcomeOK,
-		"pr-review":     record.OutcomeInterrupted,
+		"Bash":                   record.OutcomeOK,
+		"mcp__atlassian__search": record.OutcomeOK,
+		"pr-review":              record.OutcomeInterrupted,
 	}
 	got := map[record.Identifier]record.Outcome{}
 	for _, event := range result.Records {
@@ -1054,144 +1055,45 @@ func subagentCallTranscript(t *testing.T, subagentType string) string {
 	}, "\n")
 }
 
-func TestReadNamesASubagentCallByItsSubagentType(t *testing.T) {
-	input := strings.Join([]string{
-		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Task","input":{"subagent_type":"explorer"}},{"type":"tool_use","id":"call-2","name":"Task","input":{"subagent_type":"code-reviewer"}},{"type":"tool_use","id":"call-3","name":"Task","input":{"subagent_type":"general-purpose"}}]}}`,
-		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false},{"type":"tool_result","tool_use_id":"call-2","is_error":false},{"type":"tool_result","tool_use_id":"call-3","is_error":false}]}}`,
-	}, "\n")
-
-	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
-	if err != nil {
-		t.Fatalf("Read() error = %v", err)
+// ADR-0036 §2: the invoking tool_use and the subagent's own transcript are the same
+// logical event, and the transcript is the canonical source — so the invoking block
+// produces no primitive record of its own, neither a subagent record nor a
+// builtin_tool one. Both tool names are excluded: real transcripts carry "Agent"
+// (782 occurrences in ADR-0036's sample, 0 for "Task"), and "Task" stays recognised
+// for a transcript written by an older harness.
+//
+// It is a skip and not a refusal. A refusal is lost collection, which drives
+// doctor's "collects nothing"; a call Wake deliberately does not collect is a clean
+// zero and must not read as a fault.
+func TestReadDerivesNoRecordFromEitherSubagentToolName(t *testing.T) {
+	inputs := map[string]string{
+		"naming a subagent type": `,"input":{"subagent_type":"explorer"}`,
+		"naming an empty type":   `,"input":{"subagent_type":""}`,
+		"carrying no input":      ``,
 	}
-	if len(result.Records) != 3 || result.Malformed != 0 || result.Pending != 0 || result.Refused != 0 {
-		t.Fatalf("Read() = %+v, want one record per subagent invocation", result)
-	}
-	seen := map[record.Identifier]bool{}
-	for _, event := range result.Records {
-		if event.Name == "Task" {
-			t.Errorf("record is named after the tool, not the subagent: %+v", event)
+	for _, tool := range []string{"Agent", "Task"} {
+		for label, blockInput := range inputs {
+			transcript := strings.Join([]string{
+				fmt.Sprintf(`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","entrypoint":"cli","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-1","name":%q%s}]}}`, tool, blockInput),
+				`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","entrypoint":"cli","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+			}, "\n")
+			// Both staleness values, so the rule that resolves a buffered call cannot
+			// resurrect this one either: nothing was buffered to resolve.
+			for session, stale := range map[string]Staleness{"open session": {}, "closed session": closedSession} {
+				t.Run(fmt.Sprintf("%s %s, %s", tool, label, session), func(t *testing.T) {
+					result, err := read(strings.NewReader(transcript), resolver, names, stale)
+					if err != nil {
+						t.Fatalf("Read() error = %v", err)
+					}
+					if len(result.Records) != 0 {
+						t.Errorf("Read() records = %+v, want none: the subagent's own transcript is the source", result.Records)
+					}
+					if result.Refused != 0 || result.Pending != 0 || result.Malformed != 0 {
+						t.Errorf("Read() = %+v, want a clean zero — not a refusal, nothing buffered, no unusable line", result)
+					}
+				})
+			}
 		}
-		if event.Kind != record.KindSubagent {
-			t.Errorf("record kind = %q, want %q", event.Kind, record.KindSubagent)
-		}
-		if err := record.Validate(event); err != nil {
-			t.Errorf("Validate(%+v) error = %v", event, err)
-		}
-		seen[event.Name] = true
-	}
-	for _, want := range []record.Identifier{"explorer", "code-reviewer", "general-purpose"} {
-		if !seen[want] {
-			t.Errorf("no record named %q; got %v", want, seen)
-		}
-	}
-	if len(seen) != 3 {
-		t.Errorf("distinct names = %v, want exactly three", seen)
-	}
-}
-
-func TestReadCollapsesRepeatedSubagentInvocationsToOnePrimitive(t *testing.T) {
-	input := strings.Join([]string{
-		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Task","input":{"subagent_type":"explorer"}},{"type":"tool_use","id":"call-2","name":"Task","input":{"subagent_type":"explorer"}},{"type":"tool_use","id":"call-3","name":"Task","input":{"subagent_type":"code-reviewer"}}]}}`,
-		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false},{"type":"tool_result","tool_use_id":"call-2","is_error":false},{"type":"tool_result","tool_use_id":"call-3","is_error":false}]}}`,
-	}, "\n")
-
-	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
-	if err != nil {
-		t.Fatalf("Read() error = %v", err)
-	}
-	// The invocation grain first: two calls of one subagent stay two records with
-	// two distinct ids, so nothing is lost before aggregation collapses them.
-	if len(result.Records) != 3 {
-		t.Fatalf("Read() records = %+v, want one per invocation", result.Records)
-	}
-	var explorers []record.Record
-	for _, event := range result.Records {
-		if event.Name == "explorer" {
-			explorers = append(explorers, event)
-		}
-	}
-	if len(explorers) != 2 {
-		t.Fatalf("explorer records = %d, want 2", len(explorers))
-	}
-	if explorers[0].EventID == explorers[1].EventID {
-		t.Errorf("both explorer invocations derived the same event id %q", explorers[0].EventID)
-	}
-
-	// Then the primitive grain, through the real aggregation layer rather than by
-	// inspection.
-	summary := metrics.Aggregate(result.Records)
-	if len(summary.Primitives) != 2 {
-		t.Fatalf("Aggregate() primitives = %+v, want explorer and code-reviewer", summary.Primitives)
-	}
-	usage := map[record.Identifier]metrics.PrimitiveUsage{}
-	for _, primitive := range summary.Primitives {
-		usage[primitive.Name] = primitive
-	}
-	if got := usage["explorer"]; got.Invocations != 2 || got.Kind != record.KindSubagent {
-		t.Errorf("explorer usage = %+v, want 2 invocations of a subagent", got)
-	}
-	if got := usage["code-reviewer"]; got.Invocations != 1 || got.Kind != record.KindSubagent {
-		t.Errorf("code-reviewer usage = %+v, want 1 invocation of a subagent", got)
-	}
-}
-
-// One subagent run is one invocation, even though Claude Code's own storage
-// describes it twice: the parent's Task tool_use/tool_result pair, and the
-// attributed end_turn entry the subagent's own turn leaves behind. Both describe
-// the same logical event, so only one of them may become a record — the store's
-// collapse guarantee, and ADR-0002's invocation grain ("one call to a primitive").
-func TestReadCountsOneSubagentRunAsOneInvocation(t *testing.T) {
-	input := strings.Join([]string{
-		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-1","name":"Task","input":{"subagent_type":"explorer"}}]}}`,
-		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","attributionAgent":"explorer","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
-		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
-	}, "\n")
-
-	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
-	if err != nil {
-		t.Fatalf("Read() error = %v", err)
-	}
-	if len(result.Records) != 1 {
-		t.Fatalf("Read() records = %+v, want exactly one for one subagent run", result.Records)
-	}
-	// The surviving record is the paired one: it is the only source of the two that
-	// carries an outcome at all (ADR-0005), and the only one bounded by a start and
-	// an end rather than by a stop reason (ADR-0015).
-	event := result.Records[0]
-	if event.Kind != record.KindSubagent || event.Name != "explorer" || event.Outcome == nil || *event.Outcome != record.OutcomeOK {
-		t.Fatalf("record = %+v, want the terminated explorer call with its outcome", event)
-	}
-
-	summary := metrics.Aggregate(result.Records)
-	if len(summary.Primitives) != 1 || summary.Primitives[0].Invocations != 1 {
-		t.Errorf("Aggregate() primitives = %+v, want explorer with one invocation", summary.Primitives)
-	}
-}
-
-func TestReadDropsAndCountsASubagentCallWithNoType(t *testing.T) {
-	input := strings.Join([]string{
-		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Task"},{"type":"tool_use","id":"call-2","name":"Task","input":{"subagent_type":""}}]}}`,
-		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false},{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}`,
-	}, "\n")
-
-	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
-	if err != nil {
-		t.Fatalf("Read() error = %v", err)
-	}
-	if len(result.Records) != 0 {
-		t.Errorf("Read() records = %+v, want none: a nameless Task call is not collected as \"Task\"", result.Records)
-	}
-	// Nothing was buffered, so the later tool_result synthesises nothing.
-	if result.Pending != 0 {
-		t.Errorf("Pending = %d, want 0", result.Pending)
-	}
-	// A refused name is not an unusable line, so doctor's drift signal is untouched.
-	if result.Malformed != 0 {
-		t.Errorf("Malformed = %d, want 0", result.Malformed)
-	}
-	if result.Refused != 2 {
-		t.Errorf("Refused = %d, want 2", result.Refused)
 	}
 }
 
@@ -1201,8 +1103,8 @@ func TestReadDropsAndCountsASubagentCallWithNoType(t *testing.T) {
 // a repository Wake was never asked to read, and would never clear.
 func TestReadDoesNotCountARefusalInAnUnconsentedRepository(t *testing.T) {
 	for _, transcript := range []string{
-		subagentCallTranscript(t, ""),
-		subagentCallTranscript(t, "/usr/local/bin"),
+		skillCallTranscript(t, "/usr/local/bin"),
+		skillCallTranscript(t, "../secrets"),
 	} {
 		result, err := read(strings.NewReader(transcript), deny, names, Staleness{})
 		if err != nil {
@@ -1211,52 +1113,6 @@ func TestReadDoesNotCountARefusalInAnUnconsentedRepository(t *testing.T) {
 		if len(result.Records) != 0 || result.Refused != 0 {
 			t.Errorf("Read() = %+v, want no record and no refusal", result)
 		}
-	}
-}
-
-func TestReadDropsAndCountsSubagentCallsWithAHostileType(t *testing.T) {
-	for _, value := range hostileValues {
-		result, err := read(strings.NewReader(subagentCallTranscript(t, value)), resolver, names, Staleness{})
-		if err != nil {
-			t.Fatalf("Read() error = %v", err)
-		}
-		if len(result.Records) != 0 || result.Pending != 0 || result.Refused != 1 {
-			t.Errorf("Read(subagent_type=%q) = %+v", value, result)
-		}
-	}
-}
-
-func TestReadDerivesADirectoryScopedSubagentReference(t *testing.T) {
-	result, err := read(strings.NewReader(subagentCallTranscript(t, "apps/web:reviewer")), resolver, names, Staleness{})
-	if err != nil {
-		t.Fatalf("Read() error = %v", err)
-	}
-	if len(result.Records) != 1 {
-		t.Fatalf("Read() records = %+v", result.Records)
-	}
-	event := result.Records[0]
-	if event.Kind != record.KindSubagent {
-		t.Errorf("record kind = %q, want %q", event.Kind, record.KindSubagent)
-	}
-	name := string(event.Name)
-	if !strings.HasPrefix(name, "scope-") || !strings.HasSuffix(name, ":reviewer") {
-		t.Fatalf("record name = %q, want scope-<digest>:reviewer", name)
-	}
-	if strings.Contains(name, "apps") || strings.Contains(name, "web") {
-		t.Fatalf("record name retains a path fragment: %q", name)
-	}
-	if err := record.Validate(event); err != nil {
-		t.Fatalf("Validate() error = %v", err)
-	}
-}
-
-func TestReadDropsAScopedSubagentCallWithoutAScopeKey(t *testing.T) {
-	result, err := read(strings.NewReader(subagentCallTranscript(t, "apps/web:reviewer")), resolver, record.Namer{}, Staleness{})
-	if err != nil {
-		t.Fatalf("Read() error = %v", err)
-	}
-	if len(result.Records) != 0 || result.Pending != 0 || result.Refused != 1 {
-		t.Errorf("Read() = %+v, want the call dropped and counted, never named unkeyed", result)
 	}
 }
 
@@ -2149,9 +2005,15 @@ func TestReadDoesNotInterruptACallItNeverCollected(t *testing.T) {
 		"a session id outside the token domain": {
 			transcript: `{"uuid":"entry-1","sessionId":"` + strings.Repeat("s", 1024) + `","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
 		},
-		"a subagent call naming no subagent": {
-			transcript:  `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Task"}]}}`,
+		"a call whose primitive name the grammar refuses": {
+			transcript:  `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Skill","input":{"skill":"../secrets"}}]}}`,
 			wantRefused: 1,
+		},
+		// A subagent invocation is a clean zero rather than a refusal: the subagent's
+		// own transcript is the canonical source of that run, so this block was never
+		// Wake's to collect (ADR-0036 §2).
+		"a subagent invocation call": {
+			transcript: `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Agent","input":{"subagent_type":"explorer"}}]}}`,
 		},
 	}
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
