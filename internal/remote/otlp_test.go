@@ -1403,16 +1403,17 @@ func TestPayloadHasNoPathSeparator(t *testing.T) {
 var update = flag.Bool("update", false, "rewrite testdata/golden.json")
 
 // goldenBatch is the fixed input behind testdata/golden.json: a fully populated
-// record, a minimal one, and a denied one with no reported duration. The third
-// exists because it is the combination most likely to regress — UNSET status
-// that must not become OK, and an omitted duration attribute that must not
-// become zero.
+// record, a minimal one, a denied one with no reported duration, and the session's
+// trace root. The third exists because it is the combination most likely to regress —
+// UNSET status that must not become OK, and an omitted duration attribute that must
+// not become zero. The fourth is the only span that names the trace, so the one place
+// a reviewer can read exactly what leaves the machine shows that key too.
 func goldenBatch() []record.Record {
 	denied := fullRecord()
 	denied.EventID = record.DeriveEventID("claude-code", "source-event-3")
 	denied.Outcome = ptr(record.OutcomeDeniedUser)
 	denied.DurationMS = nil
-	return []record.Record{fullRecord(), validRecord(), denied}
+	return []record.Record{fullRecord(), validRecord(), denied, fullSessionEndRecord()}
 }
 
 // TestEncodeIsDeterministic pins the property the spool's replay safety rests
