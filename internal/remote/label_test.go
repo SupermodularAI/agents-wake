@@ -314,6 +314,43 @@ func TestFlushSendsTheRepoLabelForAConsentedRepository(t *testing.T) {
 	}
 }
 
+// TestFlushNamesTheTraceAfterTheRepository is DG-94 end to end through the real
+// internal/config path: a repository consented by `wake init` names the trace of every
+// session anchored in it, keyed to the id its own salt derives. The name rides on the
+// session_end span alone, so a batch carrying a whole session posts exactly one span
+// that names its trace.
+func TestFlushNamesTheTraceAfterTheRepository(t *testing.T) {
+	paths := testPaths(t)
+	receiver, endpoint := serve(t, http.StatusOK)
+	enable(t, paths, endpoint)
+	id, label := registerRepo(t, paths, "alpha", 3)
+
+	end := fullSessionEndRecord()
+	end.Repo = id
+	if _, err := store.New(eventsPath(paths)).Append([]record.Record{end}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+
+	if _, err := FlushReport(paths); err != nil {
+		t.Fatalf("FlushReport() error = %v", err)
+	}
+
+	named := 0
+	for i, attrs := range spanAttributesOf(t, receiver.request(t, 0).body) {
+		got, present := stringValueOf(t, attrs, "langfuse.trace.name")
+		if !present {
+			continue
+		}
+		named++
+		if got != label {
+			t.Errorf("span %d langfuse.trace.name = %q, want %q", i, got, label)
+		}
+	}
+	if named != 1 {
+		t.Errorf("%d posted spans name the trace, want exactly the session_end span", named)
+	}
+}
+
 // TestPreviewAndFlushAgreeOnTheRepoLabel is the byte-identity clause with a label
 // in play: `--dry-run` prints the exact bytes a flush would send, and that stops
 // being true the moment the two resolve labels differently (ADR-0030).
