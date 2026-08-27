@@ -152,7 +152,7 @@ func TestReadRejectsInconsistentFailureCounts(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "primitives.json")
 	// 2 invocations cannot hold 1 unknown and 2 failures: only 1 invocation is
 	// left "known" to have failed.
-	content := `{"version":1,"refreshed_at":"2026-08-13T12:00:00Z","primitives":[{"harness":"claude-code","kind":"skill","name":"flaky","invocations":2,"failures":2,"unknown":1,"last_used":"2026-08-13T12:00:00Z"}]}`
+	content := `{"version":2,"refreshed_at":"2026-08-13T12:00:00Z","primitives":[{"harness":"claude-code","kind":"skill","name":"flaky","repo":"0123456789abcdef0123456789abcdef","invocations":2,"failures":2,"unknown":1,"last_used":"2026-08-13T12:00:00Z"}]}`
 	if err := os.WriteFile(statePath, []byte(content), 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
@@ -163,7 +163,7 @@ func TestReadRejectsInconsistentFailureCounts(t *testing.T) {
 
 func TestReadRejectsAPathShapedPrimitiveName(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "primitives.json")
-	content := `{"version":1,"refreshed_at":"2026-08-13T12:00:00Z","primitives":[{"harness":"claude-code","kind":"skill","name":"usr/local/bin"}]}`
+	content := `{"version":2,"refreshed_at":"2026-08-13T12:00:00Z","primitives":[{"harness":"claude-code","kind":"skill","name":"usr/local/bin"}]}`
 	if err := os.WriteFile(statePath, []byte(content), 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
@@ -308,4 +308,130 @@ func outcomeRecord(id, name string, outcome *record.Outcome, timestamp time.Time
 	r := inventoryRecord(id, name, timestamp)
 	r.Outcome = outcome
 	return r
+}
+
+func repoRecord(id, name string, repo record.Hash, timestamp time.Time) record.Record {
+	r := inventoryRecord(id, name, timestamp)
+	r.Repo = repo
+	return r
+}
+
+// TestRefreshSplitsUsageByRepository is DG-93's grain change at the layer both
+// renderers read. metrics.Aggregate splitting per repository is not enough on its
+// own: derive joins discovery — which has no repository (ADR-0002) — against the
+// aggregate, and a join on a repo-less key would collapse the split straight back.
+func TestRefreshSplitsUsageByRepository(t *testing.T) {
+	first, second := record.Hash("0123456789abcdef0123456789abcdef"), record.Hash("fedcba9876543210fedcba9876543210")
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	events := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	if _, err := events.Append([]record.Record{
+		repoRecord("here", "used", first, at),
+		repoRecord("there", "used", second, at.Add(time.Minute)),
+	}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
+	discovered := Discovery{
+		Primitives:     []Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "used"}},
+		ProjectScanned: true,
+	}
+	if err := primitives.Refresh(events, discovered); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	items, err := primitives.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("inventory = %+v, want one row per repository", items)
+	}
+	repos := map[record.Hash]Usage{}
+	for _, usage := range items {
+		if usage.Name != "used" {
+			t.Fatalf("unexpected row %+v", usage)
+		}
+		repos[usage.Repo] = usage
+	}
+	for _, repo := range []record.Hash{first, second} {
+		usage, present := repos[repo]
+		if !present {
+			t.Fatalf("no row for repository %q: %+v", repo, items)
+		}
+		if usage.Invocations != 1 {
+			t.Fatalf("row %q invocations = %d, want 1", repo, usage.Invocations)
+		}
+	}
+}
+
+func TestRefreshLeavesAnUnusedPrimitiveWithoutARepository(t *testing.T) {
+	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
+	events := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	discovered := Discovery{
+		Primitives:     []Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "unused"}},
+		ProjectScanned: true,
+	}
+	if err := primitives.Refresh(events, discovered); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	items, err := primitives.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(items) != 1 || items[0].Repo != "" || items[0].Invocations != 0 {
+		t.Fatalf("inventory = %+v, want one repo-less row with no invocations", items)
+	}
+}
+
+func TestReadRefusesAUsedPrimitiveWithNoRepository(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "primitives.json")
+	content := `{"version":2,"refreshed_at":"2026-08-13T12:00:00Z","primitives":[{"harness":"claude-code","kind":"skill","name":"used","invocations":1,"last_used":"2026-08-13T12:00:00Z"}]}`
+	if err := os.WriteFile(statePath, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if _, err := New(statePath).Read(); err == nil {
+		t.Fatal("Read() accepted an invoked primitive with no repository")
+	}
+}
+
+func TestReadRefusesAnUnusedPrimitiveCarryingARepository(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "primitives.json")
+	content := `{"version":2,"refreshed_at":"2026-08-13T12:00:00Z","primitives":[{"harness":"claude-code","kind":"skill","name":"unused","repo":"0123456789abcdef0123456789abcdef","invocations":0}]}`
+	if err := os.WriteFile(statePath, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if _, err := New(statePath).Read(); err == nil {
+		t.Fatal("Read() accepted an uninvoked primitive carrying a repository")
+	}
+}
+
+func TestReadRefusesARepositoryThatIsNotAnId(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "primitives.json")
+	content := `{"version":2,"refreshed_at":"2026-08-13T12:00:00Z","primitives":[{"harness":"claude-code","kind":"skill","name":"used","repo":"/Users/someone/code","invocations":1,"last_used":"2026-08-13T12:00:00Z"}]}`
+	if err := os.WriteFile(statePath, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if _, err := New(statePath).Read(); err == nil {
+		t.Fatal("Read() accepted a path-shaped repository")
+	}
+}
+
+// TestReadTreatsAPreviousVersionSnapshotAsAnEmptyInventory pins the upgrade path:
+// the snapshot's row grain changed, so a file this build did not write says nothing
+// it can read — but it is derived, regenerable state, so `wake report` degrades to
+// an empty inventory rather than failing on an existing install's first run.
+func TestReadTreatsAPreviousVersionSnapshotAsAnEmptyInventory(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "primitives.json")
+	content := `{"version":1,"refreshed_at":"2026-08-13T12:00:00Z","primitives":[{"harness":"claude-code","kind":"skill","name":"used","invocations":1,"last_used":"2026-08-13T12:00:00Z"}]}`
+	if err := os.WriteFile(statePath, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	items, err := New(statePath).Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v, want a previous-version snapshot to degrade", err)
+	}
+	if items != nil {
+		t.Fatalf("Read() = %+v, want no inventory", items)
+	}
 }

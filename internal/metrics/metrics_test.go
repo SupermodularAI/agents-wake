@@ -195,3 +195,43 @@ func sessionEndRecord(sessionID record.Identifier, at time.Time) record.Record {
 		BuiltinToolCalls: &zero,
 	}
 }
+
+// TestAggregateSplitsOnePrimitivePerRepository is DG-93's grain change. Repo is a
+// property of the invocation (ADR-0002), so one primitive used in two repositories
+// is two rows, and each row's rate is over its own population (ADR-0006).
+func TestAggregateSplitsOnePrimitivePerRepository(t *testing.T) {
+	failed, ok := record.OutcomeError, record.OutcomeOK
+	first, second := record.Hash("0123456789abcdef0123456789abcdef"), record.Hash("fedcba9876543210fedcba9876543210")
+	failing, passing := testRecord("one", &failed), testRecord("two", &ok)
+	failing.Repo, passing.Repo = first, second
+
+	summary := Aggregate([]record.Record{failing, passing})
+
+	if len(summary.Primitives) != 2 {
+		t.Fatalf("primitive rows = %d, want 2 (one per repository)", len(summary.Primitives))
+	}
+	byRepo := map[record.Hash]PrimitiveUsage{}
+	for _, primitive := range summary.Primitives {
+		byRepo[primitive.Repo] = primitive
+	}
+	for _, repo := range []record.Hash{first, second} {
+		primitive, present := byRepo[repo]
+		if !present {
+			t.Fatalf("no row for repository %q", repo)
+		}
+		if primitive.Invocations != 1 {
+			t.Fatalf("row %q invocations = %d, want 1", repo, primitive.Invocations)
+		}
+	}
+	// Each row's rate is over its own repository's population, not the whole one.
+	if percent, rated := byRepo[first].ErrorRate.Percent(); !rated || percent != 100 {
+		t.Fatalf("failing row rate = %v (rated %t), want 100", percent, rated)
+	}
+	if percent, rated := byRepo[second].ErrorRate.Percent(); !rated || percent != 0 {
+		t.Fatalf("passing row rate = %v (rated %t), want 0", percent, rated)
+	}
+	// The summary-level figures span every repository and are unchanged by the split.
+	if summary.Invocations != 2 || summary.ErrorRate.Denominator() != 2 {
+		t.Fatalf("summary = %d invocations, denominator %d; want 2 and 2", summary.Invocations, summary.ErrorRate.Denominator())
+	}
+}
