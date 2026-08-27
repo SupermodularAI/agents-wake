@@ -120,10 +120,10 @@ const (
 
 	// maxSpanAttributes is the size of the frozen span attribute key set. It
 	// only sizes an allocation, but keeping it beside the constants makes a
-	// change to the key set visible in the same review. wake.repo_label and the
-	// twelve session-grain keys are all conditional, so this sizes the
-	// allocation for the widest span rather than for every span.
-	maxSpanAttributes = 34
+	// change to the key set visible in the same review. wake.repo_label,
+	// langfuse.trace.name and the twelve session-grain keys are all conditional,
+	// so this sizes the allocation for the widest span rather than for every span.
+	maxSpanAttributes = 35
 )
 
 // errEncode is deliberately valueless. A diagnostic that quoted the record it
@@ -158,6 +158,9 @@ type RepoLabels map[string]string
 //
 // labels is a flush-time projection and not part of the record: a label that does
 // not pass on the way out is omitted whole and never drops the span it belongs to.
+// The same label also names the trace, on the session_end span alone — the trace
+// root, and the only span of a session whose repository is the session's own
+// (ADR-0034 §1, ADR-0035 §2).
 func Encode(records []record.Record, labels RepoLabels) ([]byte, int, error) {
 	spans := make([]span, 0, len(records))
 	dropped := 0
@@ -277,6 +280,36 @@ func spanAttributes(r record.Record, labels RepoLabels) []keyValue {
 	// out of this file, which is what makes that claim checkable.
 	attrs = appendString(attrs, "wake.repo", string(r.Repo))
 	attrs = appendString(attrs, "wake.repo_label", labelFor(labels, r.Repo))
+	// langfuse.trace.name names the trace after the repository, so repo becomes a
+	// grouping dimension at the receiver instead of every trace being called
+	// session_end:session. It carries the same string wake.repo_label carries —
+	// the same labelFor, the same record.BoundedToken check, no second resolution
+	// and no second validation path (ADR-0033 §2, §3) — exactly as
+	// langfuse.session.id above duplicates wake.session_id under the key Langfuse
+	// groups by.
+	//
+	// The session_end span alone carries it, and that gate is the whole reason it
+	// is safe to set a trace-level attribute from a per-span encoder. A trace is
+	// one session (trace_id = harness ‖ session_id, ADR-0027); session_end is
+	// derived at most once per session id, ever (ADR-0034 §1), and is the one
+	// record ADR-0035 §2 leaves rootless. Every other record of the session
+	// resolves the repository from its own entry's cwd, and those can differ
+	// within one session id, so emitting from every span would let whichever span
+	// the receiver read last rename the trace — unrepairable, because we can never
+	// rebuild the receiver's store (ADR-0027).
+	//
+	// The branch is on Kind rather than on an absent ParentEventID because
+	// ADR-0035 §2 also leaves the parent absent when derivation genuinely fails
+	// for a non-root record: rootlessness-by-field is not a discriminator, and
+	// exactly-one-per-session is.
+	//
+	// A repository with no recorded label, or one whose label this build will not
+	// represent, emits nothing and the trace keeps its span-derived name: unnamed
+	// rather than mislabelled, because unknown is signalled by absence (ADR-0027)
+	// and never collapses into a definite value (ADR-0005).
+	if r.Kind == record.KindSessionEnd {
+		attrs = appendString(attrs, "langfuse.trace.name", labelFor(labels, r.Repo))
+	}
 	attrs = appendString(attrs, "wake.package", string(r.Package))
 	attrs = appendString(attrs, "wake.package_version", string(r.PackageVersion))
 	if r.Source != nil {

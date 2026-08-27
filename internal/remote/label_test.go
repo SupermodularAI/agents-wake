@@ -98,15 +98,18 @@ func TestRepoLabelTravelsBesideTheHash(t *testing.T) {
 // TestNoRecordedLabelEmitsNoLabelAttribute pins "absent, never blank". An empty
 // stringValue is indistinguishable at the receiver from a real value, so a
 // repository with nothing recorded sends the hash alone.
+//
+// The fixture is the trace root, so both projections of the label — wake.repo_label
+// and langfuse.trace.name — are in play under one set of cases.
 func TestNoRecordedLabelEmitsNoLabelAttribute(t *testing.T) {
 	for name, labels := range map[string]RepoLabels{
 		"a nil map":                    nil,
 		"an empty map":                 {},
 		"a map keyed by another repo":  {"ffffffffffffffffffffffffffffffff": "elsewhere"},
-		"a map holding an empty label": {string(fullRecord().Repo): ""},
+		"a map holding an empty label": {string(fullSessionEndRecord().Repo): ""},
 	} {
 		t.Run(name, func(t *testing.T) {
-			payload, dropped, err := Encode([]record.Record{fullRecord()}, labels)
+			payload, dropped, err := Encode([]record.Record{fullSessionEndRecord()}, labels)
 			if err != nil {
 				t.Fatalf("Encode() error = %v", err)
 			}
@@ -121,11 +124,13 @@ func TestNoRecordedLabelEmitsNoLabelAttribute(t *testing.T) {
 			if _, present := stringValueOf(t, attrs, "wake.repo"); !present {
 				t.Error("wake.repo is absent; the hashed id is unconditional")
 			}
-			if _, present := attrs["wake.repo_label"]; present {
-				t.Error("wake.repo_label was emitted with no label recorded; it must be absent, never blank")
-			}
-			if bytes.Contains(payload, []byte("wake.repo_label")) {
-				t.Error("the payload names wake.repo_label; the key itself must not appear when there is no label")
+			for _, key := range []string{"wake.repo_label", "langfuse.trace.name"} {
+				if _, present := attrs[key]; present {
+					t.Errorf("%s was emitted with no label recorded; it must be absent, never blank", key)
+				}
+				if bytes.Contains(payload, []byte(key)) {
+					t.Errorf("the payload names %q; the key itself must not appear when there is no label", key)
+				}
 			}
 		})
 	}
@@ -147,7 +152,8 @@ var labelCorpus = slices.Concat(hostileIdentifiers, []string{
 })
 
 // TestALabelThatFailsValidationEmitsNoLabelAttribute is the fail-closed half of
-// ADR-0033 §3. Every refusal produces the same output — no attribute — because a
+// ADR-0033 §3, run against the trace root so one corpus pass covers both projections
+// of the label. Every refusal produces the same output — no attribute — because a
 // truncated, escaped, or sanitised repository name is a wrong answer that looks
 // like a right one. A refused label never drops the span it belongs to.
 //
@@ -170,7 +176,7 @@ func TestALabelThatFailsValidationEmitsNoLabelAttribute(t *testing.T) {
 				admitted++
 			}
 
-			r := fullRecord()
+			r := fullSessionEndRecord()
 			payload, dropped, err := Encode([]record.Record{r}, RepoLabels{string(r.Repo): candidate})
 			if err != nil {
 				t.Fatalf("Encode() error = %v", err)
@@ -187,21 +193,24 @@ func TestALabelThatFailsValidationEmitsNoLabelAttribute(t *testing.T) {
 				t.Error("wake.repo is absent; a refused label must not cost the hash")
 			}
 
-			label, present := stringValueOf(t, attrs, "wake.repo_label")
-			if !passes {
-				if present {
-					t.Error("wake.repo_label was emitted for a label that fails validation")
+			for _, key := range []string{"wake.repo_label", "langfuse.trace.name"} {
+				label, present := stringValueOf(t, attrs, key)
+				if !passes {
+					if present {
+						t.Errorf("%s was emitted for a label that fails validation", key)
+					}
+					continue
 				}
-				if candidate != "" && bytes.Contains(payload, []byte(candidate)) {
-					t.Error("a refused label reached the payload")
+				if !present {
+					t.Errorf("%s is absent for a label that passes validation; a passing value is emitted, not dropped", key)
+					continue
 				}
-				return
+				if label != candidate {
+					t.Errorf("%s = %q, want %q verbatim; a passing value is never repaired", key, label, candidate)
+				}
 			}
-			if !present {
-				t.Fatal("wake.repo_label is absent for a label that passes validation; a passing value is emitted, not dropped")
-			}
-			if label != candidate {
-				t.Errorf("wake.repo_label = %q, want %q verbatim; a passing value is never repaired", label, candidate)
+			if !passes && candidate != "" && bytes.Contains(payload, []byte(candidate)) {
+				t.Error("a refused label reached the payload")
 			}
 		})
 	}
@@ -218,20 +227,23 @@ func TestALabelThatFailsValidationEmitsNoLabelAttribute(t *testing.T) {
 // fragment gets onto the wire. Nothing this encoder legitimately emits contains a
 // separator, so the assertion is over the whole payload (plan §3.4, BC-3).
 func TestNoPathSeparatorReachesThePayloadThroughALabel(t *testing.T) {
-	for _, hostile := range hostileIdentifiers {
-		if !strings.ContainsAny(hostile, `/\`) {
-			continue
+	// Both fixtures, so the check covers the trace root's projection of the label as
+	// well as wake.repo_label's.
+	for _, r := range []record.Record{fullRecord(), fullSessionEndRecord()} {
+		for _, hostile := range hostileIdentifiers {
+			if !strings.ContainsAny(hostile, `/\`) {
+				continue
+			}
+			t.Run(string(r.Kind)+"/"+strconv.Quote(hostile), func(t *testing.T) {
+				payload, _, err := Encode([]record.Record{r}, RepoLabels{string(r.Repo): hostile})
+				if err != nil {
+					t.Fatalf("Encode() error = %v", err)
+				}
+				if bytes.ContainsAny(payload, `/\`) {
+					t.Fatal("a path separator reached the payload through the repository label")
+				}
+			})
 		}
-		t.Run(strconv.Quote(hostile), func(t *testing.T) {
-			r := fullRecord()
-			payload, _, err := Encode([]record.Record{r}, RepoLabels{string(r.Repo): hostile})
-			if err != nil {
-				t.Fatalf("Encode() error = %v", err)
-			}
-			if bytes.ContainsAny(payload, `/\`) {
-				t.Fatal("a path separator reached the payload through the repository label")
-			}
-		})
 	}
 }
 
@@ -248,6 +260,22 @@ func TestLabelDoesNotWidenTheAlwaysPresentKeySet(t *testing.T) {
 	labelled := attributeKeys(attributesOf(t, encodeOneLabelled(t, validRecord(), testLabels()), "attributes"))
 	if !slices.Equal(labelled, want) {
 		t.Fatalf("labelled span attribute keys = %v, want the always-present set plus wake.repo_label: %v", labelled, want)
+	}
+
+	// The same at the trace root, where the label has a second projection: no label
+	// still means no key at all, even on the span that names the trace.
+	end := validRecord()
+	end.Kind, end.Name, end.Invoker = record.KindSessionEnd, "session", record.InvokerAuto
+
+	unlabelledRoot := attributeKeys(attributesOf(t, encodeOneLabelled(t, end, nil), "attributes"))
+	if !slices.Equal(unlabelledRoot, frozenAlwaysPresentKeys) {
+		t.Fatalf("unlabelled trace-root attribute keys = %v, always-present set = %v", unlabelledRoot, frozenAlwaysPresentKeys)
+	}
+
+	wantRoot := slices.Sorted(slices.Values(append(slices.Clone(frozenAlwaysPresentKeys), "wake.repo_label", "langfuse.trace.name")))
+	labelledRoot := attributeKeys(attributesOf(t, encodeOneLabelled(t, end, testLabels()), "attributes"))
+	if !slices.Equal(labelledRoot, wantRoot) {
+		t.Fatalf("labelled trace-root attribute keys = %v, want the always-present set plus both label projections: %v", labelledRoot, wantRoot)
 	}
 }
 
@@ -283,6 +311,43 @@ func TestFlushSendsTheRepoLabelForAConsentedRepository(t *testing.T) {
 		if got != label {
 			t.Errorf("span %d wake.repo_label = %q, want %q", i, got, label)
 		}
+	}
+}
+
+// TestFlushNamesTheTraceAfterTheRepository is DG-94 end to end through the real
+// internal/config path: a repository consented by `wake init` names the trace of every
+// session anchored in it, keyed to the id its own salt derives. The name rides on the
+// session_end span alone, so a batch carrying a whole session posts exactly one span
+// that names its trace.
+func TestFlushNamesTheTraceAfterTheRepository(t *testing.T) {
+	paths := testPaths(t)
+	receiver, endpoint := serve(t, http.StatusOK)
+	enable(t, paths, endpoint)
+	id, label := registerRepo(t, paths, "alpha", 3)
+
+	end := fullSessionEndRecord()
+	end.Repo = id
+	if _, err := store.New(eventsPath(paths)).Append([]record.Record{end}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+
+	if _, err := FlushReport(paths); err != nil {
+		t.Fatalf("FlushReport() error = %v", err)
+	}
+
+	named := 0
+	for i, attrs := range spanAttributesOf(t, receiver.request(t, 0).body) {
+		got, present := stringValueOf(t, attrs, "langfuse.trace.name")
+		if !present {
+			continue
+		}
+		named++
+		if got != label {
+			t.Errorf("span %d langfuse.trace.name = %q, want %q", i, got, label)
+		}
+	}
+	if named != 1 {
+		t.Errorf("%d posted spans name the trace, want exactly the session_end span", named)
 	}
 }
 
