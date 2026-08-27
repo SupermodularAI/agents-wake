@@ -12,6 +12,7 @@ import (
 	"github.com/SupermodularAI/agents-wake/internal/inventory"
 	"github.com/SupermodularAI/agents-wake/internal/metrics"
 	"github.com/SupermodularAI/agents-wake/internal/record"
+	"github.com/SupermodularAI/agents-wake/internal/repolabel"
 	"github.com/SupermodularAI/agents-wake/internal/store"
 	"github.com/SupermodularAI/agents-wake/internal/style"
 )
@@ -23,10 +24,17 @@ import (
 //
 // Pretty is internal/cli's call, not this package's: it knows whether stdout
 // is a terminal, this package only knows how to draw one either way.
+//
+// Labels is resolved by internal/cli and handed in for the same reason: this
+// package reads no config and no file, so the label map arrives as a value and
+// the readable name of a repository stays confined to internal/config
+// (ADR-0019, ADR-0033 §2's pattern). A nil map is valid — every repository then
+// shows its id.
 type Options struct {
 	Usage  bool
 	Unused bool
 	Pretty bool
+	Labels repolabel.Labels
 }
 
 // Print reads the local event and primitive stores and writes current metrics.
@@ -78,7 +86,7 @@ func Render(writer io.Writer, summary metrics.Summary, available []inventory.Usa
 		}
 	}
 	if options.Usage {
-		if err := primitiveUsage(writer, available, pretty); err != nil {
+		if err := primitiveUsage(writer, available, options.Labels, pretty); err != nil {
 			return err
 		}
 	}
@@ -87,7 +95,7 @@ func Render(writer io.Writer, summary metrics.Summary, available []inventory.Usa
 			return err
 		}
 	}
-	_, err := fmt.Fprintln(writer, "All figures are derived metadata; raw prompts, arguments, paths, and repository labels are never shown.")
+	_, err := fmt.Fprintln(writer, "All figures are derived metadata; raw prompts, arguments, and repository paths are never shown.")
 	return err
 }
 
@@ -145,16 +153,16 @@ func unusedOverview(writer io.Writer, available []inventory.Usage, pretty bool) 
 	return table.Flush()
 }
 
-func primitiveUsage(writer io.Writer, available []inventory.Usage, pretty bool) error {
+func primitiveUsage(writer io.Writer, available []inventory.Usage, labels repolabel.Labels, pretty bool) error {
 	if _, err := fmt.Fprintln(writer, "\n"+heading(pretty, "USED PRIMITIVES")); err != nil {
 		return err
 	}
-	rows := newTable("PRIMITIVE", "TYPE", "HARNESS", "LAST USED", "CALLS", "ERRORS")
+	rows := newTable("PRIMITIVE", "TYPE", "HARNESS", "REPO", "LAST USED", "CALLS", "ERRORS")
 	for _, usage := range available {
 		if usage.Invocations == 0 {
 			continue
 		}
-		rows.add(string(usage.Name), kind(usage.Kind), string(usage.Harness), usage.LastUsed.UTC().Format(time.RFC3339), fmt.Sprintf("%d", usage.Invocations), errorCell(usage))
+		rows.add(string(usage.Name), kind(usage.Kind), string(usage.Harness), labels.Display(usage.Repo), usage.LastUsed.UTC().Format(time.RFC3339), fmt.Sprintf("%d", usage.Invocations), errorCell(usage))
 	}
 	if len(rows.rows) == 0 {
 		_, err := fmt.Fprintln(writer, "No primitive activity observed.")
@@ -171,6 +179,9 @@ func unusedPrimitives(writer io.Writer, available []inventory.Usage, pretty bool
 	if _, err := fmt.Fprintln(writer, "\n"+heading(pretty, "UNUSED PRIMITIVES")); err != nil {
 		return err
 	}
+	// No REPO column here: an unused primitive has zero invocations, and a
+	// repository is a property of an invocation (ADR-0002), so there is nothing to
+	// put in the cell. A column of dashes is the empty column plan §4.5 forbids.
 	rows := newTable("PRIMITIVE", "TYPE", "HARNESS")
 	for _, usage := range available {
 		if usage.Invocations > 0 {

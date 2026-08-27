@@ -18,7 +18,10 @@ import (
 )
 
 const (
-	primitiveFileVersion = 1
+	// primitiveFileVersion is 2 because the snapshot's row grain changed: a row is
+	// now one primitive in one repository, not one primitive. A v1 file is a
+	// different shape, not a corrupt one, and Read answers accordingly.
+	primitiveFileVersion = 2
 	fileMode             = fs.FileMode(0o600)
 )
 
@@ -30,10 +33,16 @@ const (
 // rate can rebuild one with metrics.NewRatio(Failures, Invocations-Unknown,
 // Unknown, Invocations) — every terminal invocation is either known or
 // unknown, so those four counts are always consistent.
+//
+// Repo is the salted repository id, never a readable label: it is an identifier
+// like every other field here (ADR-0007, ADR-0019 §3). It is empty exactly when
+// there are no invocations, because a repository is a property of an invocation
+// (ADR-0002) and a primitive nothing invoked has none to name.
 type Usage struct {
 	Harness     record.Identifier `json:"harness"`
 	Kind        record.Kind       `json:"kind"`
 	Name        record.Identifier `json:"name"`
+	Repo        record.Hash       `json:"repo,omitempty"`
 	Invocations uint64            `json:"invocations"`
 	Failures    uint64            `json:"failures,omitempty"`
 	Unknown     uint64            `json:"unknown,omitempty"`
@@ -112,7 +121,10 @@ func (s *Store) available(discovered Discovery) []Primitive {
 }
 
 // Read returns the last successful inventory snapshot. A missing snapshot is an
-// empty inventory so existing installs gain this state file on their next refresh.
+// empty inventory so existing installs gain this state file on their next refresh,
+// and so is a snapshot written by another version of this file format: both mean
+// there is nothing here this build can read, and neither is a reason to fail a
+// command over derived state the next Refresh republishes.
 func (s *Store) Read() ([]Usage, error) {
 	raw, err := os.ReadFile(s.path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -122,8 +134,15 @@ func (s *Store) Read() ([]Usage, error) {
 		return nil, fmt.Errorf("reading primitive inventory: %w", err)
 	}
 	var snapshot primitiveFile
-	if err := json.Unmarshal(raw, &snapshot); err != nil || snapshot.Version != primitiveFileVersion || snapshot.RefreshedAt.IsZero() {
+	if err := json.Unmarshal(raw, &snapshot); err != nil || snapshot.RefreshedAt.IsZero() {
 		return nil, errors.New("invalid primitive inventory")
+	}
+	// A snapshot this build does not write is not a corrupt one: the row grain
+	// changed, so a file from another version says nothing this build can read. It
+	// is derived, regenerable local state — the next Refresh republishes it — so it
+	// answers like a missing snapshot rather than failing `wake report`.
+	if snapshot.Version != primitiveFileVersion {
+		return nil, nil
 	}
 	for _, usage := range snapshot.Primitives {
 		if !usage.valid() {
@@ -141,13 +160,21 @@ type primitiveFile struct {
 
 func derive(summary metrics.Summary, available []Primitive) []Usage {
 	observed := make(map[usageKey]Usage)
+	// repos is which repositories observed each identity, in first-seen order. The
+	// join below is on the identity — discovery has no repository to join on
+	// (ADR-0002) — while the rows it produces are per repository.
+	repos := make(map[identity][]record.Hash)
 	for _, primitive := range summary.Primitives {
 		if primitive.Kind == record.KindBuiltinTool {
 			continue
 		}
-		key := usageKey{harness: primitive.Harness, kind: primitive.Kind, name: primitive.Name}
-		usage := observed[key]
-		usage.Harness, usage.Kind, usage.Name = primitive.Harness, primitive.Kind, primitive.Name
+		id := identity{harness: primitive.Harness, kind: primitive.Kind, name: primitive.Name}
+		key := usageKey{identity: id, repo: primitive.Repo}
+		usage, seen := observed[key]
+		if !seen {
+			repos[id] = append(repos[id], primitive.Repo)
+		}
+		usage.Harness, usage.Kind, usage.Name, usage.Repo = primitive.Harness, primitive.Kind, primitive.Name, primitive.Repo
 		usage.Invocations += primitive.Invocations
 		usage.Failures += primitive.ErrorRate.Numerator()
 		usage.Unknown += primitive.ErrorRate.Excluded()
@@ -162,15 +189,29 @@ func derive(summary metrics.Summary, available []Primitive) []Usage {
 		if primitive.Kind == record.KindBuiltinTool {
 			continue
 		}
-		key := usageKey{harness: primitive.Harness, kind: primitive.Kind, name: primitive.Name}
-		usage := observed[key]
-		usage.Harness, usage.Kind, usage.Name = primitive.Harness, primitive.Kind, primitive.Name
-		// Fail closed: a name the record contract would refuse must not reach the
-		// snapshot either, whatever a caller handed us (ADR-0007, plan §3.4).
-		if !usage.valid() {
+		id := identity{harness: primitive.Harness, kind: primitive.Kind, name: primitive.Name}
+		seen := repos[id]
+		if len(seen) == 0 {
+			// Nothing invoked it, so it has no repository to name and belongs to the
+			// inventory grain alone.
+			usage := Usage{Harness: primitive.Harness, Kind: primitive.Kind, Name: primitive.Name}
+			// Fail closed: a name the record contract would refuse must not reach the
+			// snapshot either, whatever a caller handed us (ADR-0007, plan §3.4).
+			if !usage.valid() {
+				continue
+			}
+			items[usageKey{identity: id}] = usage
 			continue
 		}
-		items[key] = usage
+		for _, repo := range seen {
+			key := usageKey{identity: id, repo: repo}
+			usage := observed[key]
+			usage.Harness, usage.Kind, usage.Name, usage.Repo = primitive.Harness, primitive.Kind, primitive.Name, repo
+			if !usage.valid() {
+				continue
+			}
+			items[key] = usage
+		}
 	}
 	result := make([]Usage, 0, len(items))
 	for _, usage := range items {
@@ -180,15 +221,24 @@ func derive(summary metrics.Summary, available []Primitive) []Usage {
 		if left.Invocations != right.Invocations {
 			return -cmp.Compare(left.Invocations, right.Invocations)
 		}
-		return cmp.Or(cmp.Compare(string(left.Harness), string(right.Harness)), cmp.Compare(string(left.Kind), string(right.Kind)), cmp.Compare(string(left.Name), string(right.Name)))
+		return cmp.Or(cmp.Compare(string(left.Harness), string(right.Harness)), cmp.Compare(string(left.Kind), string(right.Kind)), cmp.Compare(string(left.Name), string(right.Name)), cmp.Compare(string(left.Repo), string(right.Repo)))
 	})
 	return result
 }
 
-type usageKey struct {
+// identity is a primitive as discovery knows it: the inventory grain, which
+// carries no repository (ADR-0002). derive joins on this.
+type identity struct {
 	harness record.Identifier
 	kind    record.Kind
 	name    record.Identifier
+}
+
+// usageKey is one snapshot row: an identity in one repository, or — for a
+// primitive with no invocations — in none.
+type usageKey struct {
+	identity
+	repo record.Hash
 }
 
 func (s *Store) write(primitives []Usage) error {
@@ -212,6 +262,16 @@ func (u Usage) valid() bool {
 		return false
 	}
 	if u.Unknown > u.Invocations || u.Failures > u.Invocations-u.Unknown {
+		return false
+	}
+	// Repo belongs to the invocation grain (ADR-0002): a row with invocations
+	// carries the salted id they were recorded under, and a row with none has no
+	// repository to name. Validated to the record contract's own rule so the
+	// snapshot cannot hold a repository field a record could not (ADR-0007).
+	if (u.Repo == "") != (u.Invocations == 0) {
+		return false
+	}
+	if u.Repo != "" && !record.ValidRepo(u.Repo) {
 		return false
 	}
 	return (u.Invocations == 0 && u.LastUsed.IsZero()) || (u.Invocations > 0 && !u.LastUsed.IsZero())

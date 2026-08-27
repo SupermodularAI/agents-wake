@@ -49,11 +49,17 @@ func (r Ratio) Percent() (float64, bool) {
 	return float64(r.numerator) / float64(r.denominator) * 100, true
 }
 
-// PrimitiveUsage is one primitive's observed activity.
+// PrimitiveUsage is one primitive's observed activity in one repository. Repo
+// is part of the grain, not a label on it: an invocation happened in exactly one
+// repository (ADR-0002), so a primitive used in two of them is two rows, each
+// with its own counts and its own rate denominator (ADR-0006). Repo is the
+// salted id, never a readable name — internal/repolabel is where a renderer
+// turns it into a cell.
 type PrimitiveUsage struct {
 	Name        record.Identifier
 	Kind        record.Kind
 	Harness     record.Identifier
+	Repo        record.Hash
 	Invoker     record.Invoker
 	ViaAgent    record.Identifier
 	Invocations uint64
@@ -140,10 +146,10 @@ func Aggregate(records []record.Record) Summary {
 			}
 		}
 
-		key := primitiveKey{name: event.Name, kind: event.Kind, harness: event.Harness, invoker: event.Invoker, viaAgent: event.ViaAgent}
+		key := primitiveKey{name: event.Name, kind: event.Kind, harness: event.Harness, repo: event.Repo, invoker: event.Invoker, viaAgent: event.ViaAgent}
 		accumulator := primitives[key]
 		if accumulator == nil {
-			accumulator = &primitiveAccumulator{PrimitiveUsage: PrimitiveUsage{Name: event.Name, Kind: event.Kind, Harness: event.Harness, Invoker: event.Invoker, ViaAgent: event.ViaAgent}, sessions: map[record.Identifier]struct{}{}}
+			accumulator = &primitiveAccumulator{PrimitiveUsage: PrimitiveUsage{Name: event.Name, Kind: event.Kind, Harness: event.Harness, Repo: event.Repo, Invoker: event.Invoker, ViaAgent: event.ViaAgent}, sessions: map[record.Identifier]struct{}{}}
 			primitives[key] = accumulator
 		}
 		accumulator.Invocations++
@@ -170,7 +176,7 @@ func Aggregate(records []record.Record) Summary {
 		summary.Primitives = append(summary.Primitives, accumulator.PrimitiveUsage)
 	}
 	slices.SortFunc(summary.Primitives, func(left, right PrimitiveUsage) int {
-		return cmp.Or(cmp.Compare(right.Invocations, left.Invocations), cmp.Compare(string(left.Harness), string(right.Harness)), cmp.Compare(string(left.Name), string(right.Name)), cmp.Compare(string(left.Invoker), string(right.Invoker)), cmp.Compare(string(left.ViaAgent), string(right.ViaAgent)))
+		return cmp.Or(cmp.Compare(right.Invocations, left.Invocations), cmp.Compare(string(left.Harness), string(right.Harness)), cmp.Compare(string(left.Name), string(right.Name)), cmp.Compare(string(left.Repo), string(right.Repo)), cmp.Compare(string(left.Invoker), string(right.Invoker)), cmp.Compare(string(left.ViaAgent), string(right.ViaAgent)))
 	})
 	return summary
 }
@@ -179,6 +185,7 @@ type primitiveKey struct {
 	name     record.Identifier
 	kind     record.Kind
 	harness  record.Identifier
+	repo     record.Hash
 	invoker  record.Invoker
 	viaAgent record.Identifier
 }

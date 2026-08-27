@@ -223,7 +223,7 @@ func Validate(r Record) error {
 	if r.Timestamp.IsZero() {
 		return errors.New("missing timestamp")
 	}
-	if !ValidHarness(r.Harness) || !validToken(r.SessionID) || !validRepoHash(r.Repo) || !validKind(r.Kind) || !ValidName(r.Name) || !validInvoker(r.Invoker) {
+	if !ValidHarness(r.Harness) || !validToken(r.SessionID) || !ValidRepo(r.Repo) || !validKind(r.Kind) || !ValidName(r.Name) || !validInvoker(r.Invoker) {
 		return errors.New("invalid required record field")
 	}
 	if !validOptionalName(r.Package) || !validOptionalName(r.ViaSkill) || !validOptionalName(r.ViaAgent) || !validOptionalName(r.Model) || !validOptionalName(r.Effort) || !validOptionalVersion(r.HarnessVersion) || !validOptionalVersion(r.PackageVersion) {
@@ -254,7 +254,11 @@ func Validate(r Record) error {
 
 func validSHA256(v Hash) bool { return len(v) == sha256.Size*2 && hexPattern.MatchString(string(v)) }
 
-func validRepoHash(v Hash) bool { return len(v) == 32 && hexPattern.MatchString(string(v)) }
+// ValidRepo reports whether v is a repository id: the salted, truncated digest
+// internal/config derives (ADR-0019 §3, §8). Exported because the derived
+// primitive snapshot validates the same field against the same rule, and two
+// spellings of one domain is the drift ValidName and ValidHarness exist to avoid.
+func ValidRepo(v Hash) bool { return len(v) == 32 && hexPattern.MatchString(string(v)) }
 
 func validKind(v Kind) bool {
 	switch v {
