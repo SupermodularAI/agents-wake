@@ -330,7 +330,11 @@ func resolveStaleCalls(pending map[callKey]call, sessions *SessionState, stale S
 	records := make([]derivation, 0, len(resolved))
 	for _, key := range resolved {
 		buffered := pending[key]
-		records = append(records, derivation{event: buffered.interrupted(), source: buffered.source})
+		records = append(records, derivation{
+			event:   buffered.interrupted(),
+			source:  buffered.source,
+			agentID: buffered.agentID,
+		})
 		delete(pending, key)
 	}
 	return records
@@ -650,6 +654,11 @@ type callKey struct {
 type derivation struct {
 	event  record.Record
 	source int
+	// agentID is the agent id of the transcript the record's entry belonged to,
+	// empty when it belonged to none. Only resolveStaleCalls sets it: a Shape-A
+	// fallback and a subagent record are ADR-0035 case 3 — a subagent is not
+	// attributed to itself (see subagentRun.subagent).
+	agentID record.Identifier
 }
 
 type call struct {
@@ -667,10 +676,17 @@ type call struct {
 	packageName record.Identifier
 	viaSkill    record.Identifier
 	viaAgent    record.Identifier
-	model       record.Identifier
-	invoker     record.Invoker
-	entrypoint  record.Entrypoint
-	repo        record.Hash
+	// agentID is the id of the subagent transcript this call's tool_use line was
+	// read from, empty when the entry declared none or declared one outside the
+	// token domain. It is ADR-0035 §2's case-1 key and ADR-0036 §2's — the agent id
+	// the transcript declares, never a ViaAgent name and never a lookup (ADR-0035
+	// §1). It is consumed into a derived parent id and never persisted: no record
+	// field carries it (ADR-0007).
+	agentID    record.Identifier
+	model      record.Identifier
+	invoker    record.Invoker
+	entrypoint record.Entrypoint
+	repo       record.Hash
 }
 
 // callStatus separates an invocation a validated field refused from one Wake
@@ -754,6 +770,13 @@ func (entry transcriptEntry) call(source int, block contentBlock, resolve Resolv
 	}
 	if packageName, ok := packageFromAttribution(entry.AttributionMCPServer); ok {
 		derived.packageName = packageName
+	}
+	// The same record.BoundedToken gate observeSubagentRun applies, so this call
+	// derives byte-identically the id subagentRun.subagent() derives — and an agentId
+	// outside the token domain is a clean zero that falls through the precedence
+	// rather than a refusal (ADR-0035 §2 case 1, ADR-0036 §2).
+	if agentID, err := record.BoundedToken(entry.AgentID); err == nil {
+		derived.agentID = agentID
 	}
 	return derived, callAccepted
 }

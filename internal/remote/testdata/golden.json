@@ -27,6 +27,7 @@
             {
               "traceId": "cabc45a4cd63272f28ec56efd4edf37a",
               "spanId": "437207fb22416c04",
+              "parentSpanId": "0eff906f628d95fa",
               "name": "skill:commit-message",
               "kind": 1,
               "startTimeUnixNano": "1787572800000000000",
@@ -35,7 +36,7 @@
                 {
                   "key": "wake.schema_version",
                   "value": {
-                    "intValue": "5"
+                    "intValue": "6"
                   }
                 },
                 {
@@ -252,7 +253,7 @@
                 {
                   "key": "wake.schema_version",
                   "value": {
-                    "intValue": "5"
+                    "intValue": "6"
                   }
                 },
                 {
@@ -317,6 +318,7 @@
             {
               "traceId": "cabc45a4cd63272f28ec56efd4edf37a",
               "spanId": "c18d940ef02dacd6",
+              "parentSpanId": "0eff906f628d95fa",
               "name": "skill:commit-message",
               "kind": 1,
               "startTimeUnixNano": "1787572800000000000",
@@ -325,7 +327,7 @@
                 {
                   "key": "wake.schema_version",
                   "value": {
-                    "intValue": "5"
+                    "intValue": "6"
                   }
                 },
                 {

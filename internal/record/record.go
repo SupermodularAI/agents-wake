@@ -29,7 +29,10 @@ import (
 // session-collapsed attributed entry (ADR-0036 §1, §3, §4) — which ADR-0004 classes as
 // a schema change for the same reason. It also changes which dimensions a session_end
 // carries for an unchanged id, because a user turn whose content is plain text now
-// yields an entry the session grain can date itself from.
+// yields an entry the session grain can date itself from. Version 6, unlike 4 and 5,
+// does add a dimension: a nullable parent_event_id, the event_id of a record's parent
+// invocation, derived from the child's own source event and never generated
+// (ADR-0035 §2).
 //
 // "Refused on read" is only half of that, and the half on its own is a silent
 // shrink: every consumer reads the spool through store.Entries, so a spool nobody
@@ -42,7 +45,7 @@ import (
 // delivery watermark, which stamps this number and starts over when it changes
 // (internal/remote). What a rebuild cannot recover is a period the harness has since
 // pruned: the store was the only surviving copy of it, and ADR-0014 accepts that.
-const SchemaVersion uint = 5
+const SchemaVersion uint = 6
 
 // ErrUnsupportedVersion is the one refusal from Validate a caller is meant to
 // recognise. Every other refusal means the record was never valid; this one means
@@ -144,12 +147,27 @@ type Record struct {
 	Source         *Source    `json:"source"`
 	ViaSkill       Identifier `json:"via_skill,omitempty"`
 	ViaAgent       Identifier `json:"via_agent,omitempty"`
-	Model          Identifier `json:"model,omitempty"`
-	Effort         Identifier `json:"effort,omitempty"`
-	Invoker        Invoker    `json:"invoker"`
-	Entrypoint     Entrypoint `json:"entrypoint,omitempty"`
-	Outcome        *Outcome   `json:"outcome"`
-	DurationMS     *int64     `json:"duration_ms"`
+	// ParentEventID is the event_id of this record's parent invocation, derived by
+	// the adapter from the child's own source event and never generated here
+	// (ADR-0004, ADR-0035 §2). It is a record id, so a bare Hash with omitempty
+	// rather than a pointer: the empty string is outside the hash domain, so it is
+	// already an unambiguous absence and a *Hash would add a nil-versus-empty
+	// distinction that means nothing. Absent only where derivation could establish
+	// none of ADR-0035 §2's three cases — never as the normal shape of a top-level
+	// call, which parents onto its session (ADR-0035 §2, §4). A session_end carries
+	// none: it is the trace root.
+	//
+	// No ancestor check lives here and none is added. Cycle-freedom is structural,
+	// not validated: the relation only ever points outward, toward a named
+	// primitive's own invocation or toward the session, so Validate stays per-record
+	// and pure (ADR-0035 §7).
+	ParentEventID Hash       `json:"parent_event_id,omitempty"`
+	Model         Identifier `json:"model,omitempty"`
+	Effort        Identifier `json:"effort,omitempty"`
+	Invoker       Invoker    `json:"invoker"`
+	Entrypoint    Entrypoint `json:"entrypoint,omitempty"`
+	Outcome       *Outcome   `json:"outcome"`
+	DurationMS    *int64     `json:"duration_ms"`
 
 	// The session grain's totals (ADR-0002, ADR-0034 §3). They are populated only
 	// on a session_end record and are nil on every invocation-grain record. All
@@ -194,6 +212,13 @@ func Validate(r Record) error {
 	}
 	if !validSHA256(r.EventID) {
 		return errors.New("invalid event id")
+	}
+	// Nullable, and checked by the same gate event_id gets when it is set: a parent
+	// is an id, so the domain is identical and the message is valueless (plan §4.2).
+	// A record whose parent link is malformed is dropped rather than written — fail
+	// closed, as every other refusal here is (ADR-0007).
+	if r.ParentEventID != "" && !validSHA256(r.ParentEventID) {
+		return errors.New("invalid parent event id")
 	}
 	if r.Timestamp.IsZero() {
 		return errors.New("missing timestamp")

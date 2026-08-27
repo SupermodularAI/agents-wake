@@ -74,14 +74,19 @@ type (
 		Code int `json:"code"`
 	}
 	span struct {
-		TraceID   string     `json:"traceId"`
-		SpanID    string     `json:"spanId"`
-		Name      string     `json:"name"`
-		Kind      int        `json:"kind"`
-		StartTime string     `json:"startTimeUnixNano"`
-		EndTime   string     `json:"endTimeUnixNano"`
-		Attrs     []keyValue `json:"attributes"`
-		Status    status     `json:"status"`
+		TraceID string `json:"traceId"`
+		SpanID  string `json:"spanId"`
+		// ParentSpanID sits here, immediately after SpanID, because field order is the
+		// JSON order and therefore part of the byte-determinism contract: the wire reads
+		// traceId, spanId, parentSpanId. omitempty so absence is absence rather than the
+		// all-zero id (ADR-0035 §8).
+		ParentSpanID string     `json:"parentSpanId,omitempty"`
+		Name         string     `json:"name"`
+		Kind         int        `json:"kind"`
+		StartTime    string     `json:"startTimeUnixNano"`
+		EndTime      string     `json:"endTimeUnixNano"`
+		Attrs        []keyValue `json:"attributes"`
+		Status       status     `json:"status"`
 	}
 )
 
@@ -180,11 +185,11 @@ func Encode(records []record.Record, labels RepoLabels) ([]byte, int, error) {
 // telemetry; every other omission is a representability failure, never a
 // judgement about the record's content.
 //
-// parentSpanId is deliberately absent in v1. ViaSkill and ViaAgent name a parent
-// primitive but not its event_id, and the encoder cannot invent the link without
-// a lookup this pure package must not perform. Emitting a fabricated parent id
-// would be worse than emitting none, so the span tree stays flat until a record
-// carries a real parent id — an ADR conversation, not an implementation detail.
+// The parent arrives on the record as a derived ParentEventID: the adapter
+// resolved it from the child's own source event, so the encoder performs no
+// lookup and invents nothing (ADR-0035 §6). It is emitted as span structure
+// under the same truncation and the same all-zero guard as traceId and spanId,
+// and a record with no parent emits no field at all.
 func encodeSpan(r record.Record, labels RepoLabels) (span, bool) {
 	// Validate on the way out as well as on the way in: the wire is subject to
 	// the same contract as the disk (ADR-0030), and this is the last point at
@@ -202,22 +207,27 @@ func encodeSpan(r record.Record, labels RepoLabels) (span, bool) {
 	if !ok {
 		return span{}, false
 	}
-	trace, id := traceID(r), spanID(r)
+	trace, id, parent := traceID(r), spanID(r), parentSpanID(r)
 	// OTLP rejects an all-zero trace or span id. Reaching one means a SHA-256
 	// prefix came out all zeroes — a ~2^-64 event — and the record is dropped
 	// and counted rather than emitted under a fabricated id.
-	if trace == zeroTraceID || id == zeroSpanID {
+	//
+	// The parent clause fires only on a parent that genuinely truncates to zeros:
+	// an absent parent is "", not the all-zero id, so a parentless record passes
+	// here and emits no field.
+	if trace == zeroTraceID || id == zeroSpanID || parent == zeroSpanID {
 		return span{}, false
 	}
 	return span{
-		TraceID:   trace,
-		SpanID:    id,
-		Name:      string(r.Kind) + ":" + string(r.Name),
-		Kind:      kindInternal,
-		StartTime: start,
-		EndTime:   end,
-		Attrs:     spanAttributes(r, labels),
-		Status:    status{Code: statusCode(r.Outcome)},
+		TraceID:      trace,
+		SpanID:       id,
+		ParentSpanID: parent,
+		Name:         string(r.Kind) + ":" + string(r.Name),
+		Kind:         kindInternal,
+		StartTime:    start,
+		EndTime:      end,
+		Attrs:        spanAttributes(r, labels),
+		Status:       status{Code: statusCode(r.Outcome)},
 	}, true
 }
 
@@ -438,6 +448,23 @@ func traceID(r record.Record) string {
 // Truncating is safe because record.Validate has already run and guarantees 64
 // lowercase hex characters. A span id is 8 bytes: the first 16 hex chars.
 func spanID(r record.Record) string { return string(r.EventID)[:16] }
+
+// parentSpanID is where a record's ParentEventID goes: the same 16-hex truncation
+// spanID applies, so a child's parentSpanId is byte-identical to its parent's
+// spanId and a receiver nests the two without a second convention (ADR-0035 §8).
+// It is span structure, not a wake.* attribute, so it does not pass through
+// spanAttributes and ADR-0027's frozen attribute-key guarantee is not stretched
+// to cover it.
+//
+// An absent parent returns "", which omitempty renders as an absent field.
+// Truncating is safe for the same reason spanID's is: record.Validate has already
+// run and guarantees 64 lowercase hex characters when the field is set.
+func parentSpanID(r record.Record) string {
+	if r.ParentEventID == "" {
+		return ""
+	}
+	return string(r.ParentEventID)[:16]
+}
 
 // spanTimes renders the record's Timestamp and DurationMS as proto3 JSON
 // decimal strings, reporting false when the pair is not representable.

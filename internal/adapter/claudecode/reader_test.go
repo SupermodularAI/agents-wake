@@ -33,7 +33,10 @@ func TestReadDerivesOnlyTerminalRecords(t *testing.T) {
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
 
-	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
+	// A closing Staleness rather than the zero value, because the entry carries an
+	// attributionSkill: ADR-0035 defers a skill-attributed call until its session has
+	// closed, so it is emitted from the close pass and not on sight of the tool_result.
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -43,6 +46,12 @@ func TestReadDerivesOnlyTerminalRecords(t *testing.T) {
 	event := result.Records[0]
 	if event.Kind != record.KindMCPTool || event.Package != "atlassian" || event.ViaSkill != "jira-work" || event.Outcome == nil || *event.Outcome != record.OutcomeOK {
 		t.Fatalf("record = %+v", event)
+	}
+	// "jira-work" has no invocation record in this transcript, so case 2 resolves
+	// nothing and the call parents onto the session span rather than onto an id no
+	// record carries (ADR-0035 §2, §6).
+	if want := sessionParent("session-1"); event.ParentEventID != want {
+		t.Errorf("ParentEventID = %q, want the session span %q", event.ParentEventID, want)
 	}
 }
 
@@ -548,20 +557,26 @@ func TestReadDoesNotCollideAToolCallWithATerminalRun(t *testing.T) {
 	if len(result.Records) != 2 {
 		t.Fatalf("Read() records = %+v, want a terminal run and a tool call", result.Records)
 	}
-	// The paired tool call is appended during the scan and the Shape-A fallback only
-	// after the session is judged closed, so the call comes first (ADR-0023 §3). The
+	// The order is the fallback first and the call second, which is the reverse of what
+	// it was before ADR-0035: the call carries an attributionSkill, so it is deferred
+	// past the fallback's own group and emitted once its parent is resolvable. The
 	// entry carries attributionSkill "pr-review" and a Bash tool_use with no Skill
 	// tool_use anywhere, so it is genuinely a run with no tool trace and the fallback
 	// is correct here.
-	call, run := result.Records[0], result.Records[1]
-	if call.Kind != record.KindBuiltinTool {
-		t.Errorf("first record is not the tool call: %+v", call)
-	}
+	run, call := result.Records[0], result.Records[1]
 	if run.Kind != record.KindSkill || run.Outcome != nil {
-		t.Errorf("second record is not the terminal skill run: %+v", run)
+		t.Errorf("first record is not the terminal skill run: %+v", run)
+	}
+	if call.Kind != record.KindBuiltinTool {
+		t.Errorf("second record is not the tool call: %+v", call)
 	}
 	if run.EventID == call.EventID {
 		t.Errorf("a tool call and a terminal run of the same entry share id %q", run.EventID)
+	}
+	// And the fallback is what the call parents onto: one record for the name, so
+	// case 2 resolves it (ADR-0035 §3).
+	if call.ParentEventID != run.EventID {
+		t.Errorf("ParentEventID = %q, want the terminal run %q", call.ParentEventID, run.EventID)
 	}
 }
 
@@ -1390,7 +1405,11 @@ func TestReadPreservesRealClaudeCodeIdentityFormats(t *testing.T) {
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
 
-	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
+	// A closing Staleness, because the entry carries both attribution fields: a
+	// skill-attributed call is emitted from the close pass under ADR-0035, not on
+	// sight of its tool_result. What the test is about — that every real field format
+	// survives the reader — is unchanged.
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}

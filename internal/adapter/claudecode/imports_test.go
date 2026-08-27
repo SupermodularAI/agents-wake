@@ -44,6 +44,15 @@ var frozenPackageImports = map[string][]string{
 		"github.com/SupermodularAI/agents-wake/internal/record",
 		"io",
 	},
+	// Parent resolution is on the derivation path and declares its capabilities here
+	// like every other file: two ordering helpers and the record type, no filesystem,
+	// no inventory and no config. The precedence is pure over values the reader
+	// already holds (ADR-0019 §1, ADR-0035 §2).
+	"parent.go": {
+		"cmp",
+		"github.com/SupermodularAI/agents-wake/internal/record",
+		"slices",
+	},
 	"session.go": {
 		"github.com/SupermodularAI/agents-wake/internal/record",
 		"time",

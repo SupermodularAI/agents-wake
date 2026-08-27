@@ -62,8 +62,20 @@ type Scan struct {
 	// skillsInvoked's reason — a tag can arrive in a different file from the attributed
 	// entry — and it holds bounded ids and nothing else (ADR-0007).
 	typedRuns map[skillRun]struct{}
-	tally     invocationTally
-	sources   []sourceTally
+	// deferred holds one entry per terminal record whose parent ADR-0035 §2 could not
+	// answer from its own entry — a record derived inside a subagent transcript, or
+	// one attributed to a skill. It is walk-scoped for the buffers' reason and one
+	// more: the ambiguity rule needs a session's final count of the records a skill
+	// name landed on, which no single source has. ADR-0015 rejects upsert, so a child
+	// waits here and is emitted once with its parent already set, never emitted first
+	// and corrected later.
+	deferred []deferredChild
+	// skills indexes the invocation records this walk derived per (session, skill
+	// name), so case 2 resolves against records that exist rather than against a
+	// second, independent lookup (ADR-0035 §3, §6).
+	skills  skillTargets
+	tally   invocationTally
+	sources []sourceTally
 }
 
 // sourceTally is what one scan knows about one source it read: what that source
@@ -116,6 +128,7 @@ func NewScan(resolve Resolver, names record.Namer, installed Installed, stale St
 		grains:          map[record.Identifier]*sessionGrain{},
 		subagents:       map[record.Identifier]*subagentRun{},
 		typedRuns:       map[skillRun]struct{}{},
+		skills:          skillTargets{},
 	}
 }
 
@@ -229,7 +242,10 @@ func (s *Scan) Read(reader io.Reader) (Result, error) {
 		// keyed on (session, name).
 		switch event, status := entry.typedInvocation(s.resolve, s.names, s.installed); status {
 		case tagAccepted:
-			result.Records = append(result.Records, event)
+			// Routed with no agent id: a typed invocation is a person's own turn —
+			// typedInvocation already excludes a sidechain copy — and the record carries
+			// no ViaSkill, so it is ADR-0035 case 3 by construction.
+			s.route(&result.Records, event, source, "")
 			s.typedRuns[skillRun{session: event.SessionID, name: event.Name}] = struct{}{}
 		case tagNotInstalled:
 			result.SkippedTypedInvocations++
@@ -273,7 +289,7 @@ func (s *Scan) Read(reader io.Reader) (Result, error) {
 					key := callKey{session: pendingCall.sessionID, id: pendingCall.id}
 					if early, terminated := s.earlyResults[key]; terminated {
 						delete(s.earlyResults, key)
-						result.Records = append(result.Records, pendingCall.complete(early))
+						s.route(&result.Records, pendingCall.complete(early), source, pendingCall.agentID)
 					} else {
 						s.pending[key] = pendingCall
 					}
@@ -300,7 +316,7 @@ func (s *Scan) Read(reader io.Reader) (Result, error) {
 					continue
 				}
 				delete(s.pending, key)
-				result.Records = append(result.Records, pendingCall.complete(resultOf(entry, block)))
+				s.route(&result.Records, pendingCall.complete(resultOf(entry, block)), source, pendingCall.agentID)
 			}
 		}
 	})
@@ -398,7 +414,11 @@ func (s *Scan) Read(reader io.Reader) (Result, error) {
 //
 // This is the one place the session-close determination is resolved for a walk, and
 // resolveSessionSkills is called exactly once from it: ADR-0035 §3's parent-id
-// resolution consumes that single determination rather than forking a second one.
+// resolution consumes that single determination rather than forking a second one. It
+// consumes it through the skill index, which observes the records the determination
+// produces — the Shape-A fallback it emits, the Skill tool_use record it dropped
+// against, and the typed record ADR-0036 §4 narrows it with — rather than re-asking
+// which skills the session invoked.
 //
 // The two thresholds stay separate and so do the two predicates (ADR-0023 §3,
 // ADR-0034): scan.stale_call_timeout through SessionState.Closed for the buffered
@@ -415,35 +435,89 @@ func (s *Scan) Read(reader io.Reader) (Result, error) {
 // tallies.
 func (s *Scan) Close() Result {
 	result := Result{}
-	// Today's order exactly, so a one-source walk serialises character-for-character
-	// as it did before: interrupted calls, then Shape-A fallbacks, then session_end.
+	// Today's order for the groups that existed before: interrupted calls, then
+	// Shape-A fallbacks, then subagent runs, then the deferred children, then
+	// session_end. A walk carrying no deferred child serialises exactly as it did.
+	// Every group below goes through route rather than appending directly, so a record
+	// this resolution derives is parented on exactly the terms one derived inside Read
+	// is — and crediting moves from unconditional-per-derivation to at-append, so a
+	// deferred child is credited exactly once, in the deferred pass.
 	for _, derived := range resolveStaleCalls(s.pending, s.sessions, s.stale) {
-		result.Records = append(result.Records, derived.event)
-		s.credit(derived.source)
 		result.Interrupted++
+		if s.route(&result.Records, derived.event, derived.source, derived.agentID) {
+			s.credit(derived.source)
+		}
 	}
 	fallbacks, ambiguous := resolveSessionSkills(s.skillCandidates, s.skillsInvoked, s.typedRuns, s.sessions, s.stale)
 	for _, derived := range fallbacks {
-		result.Records = append(result.Records, derived.event)
-		s.credit(derived.source)
+		// A Shape-A fallback carries neither ViaSkill nor ViaAgent and belongs to no
+		// subagent transcript, so it routes with a literal empty agent id and is case 3 —
+		// stated the same way the subagent group below states it, rather than by passing
+		// a derivation field resolveSessionSkills never sets.
+		if s.route(&result.Records, derived.event, derived.source, "") {
+			s.credit(derived.source)
+		}
 	}
 	// After the two existing groups, so those two serialise in exactly today's order
 	// and a walk carrying no subagent run is byte-for-byte unchanged — and before the
 	// tally below, so a subagent record counts toward its session's ToolCalls exactly
 	// as a call terminated inside a source does.
-	subagents, refusedSources := resolveSubagentRuns(s.subagents, s.sessions, s.stale)
+	subagents, refusedSources, emitted := resolveSubagentRuns(s.subagents, s.sessions, s.stale)
 	for _, derived := range subagents {
-		result.Records = append(result.Records, derived.event)
-		s.credit(derived.source)
+		// Routed with an empty agent id deliberately: a subagent record is ADR-0035 case
+		// 3 and never case 1 of itself — subagent() populates neither ViaSkill nor
+		// ViaAgent, because a subagent is not attributed to itself.
+		if s.route(&result.Records, derived.event, derived.source, "") {
+			s.credit(derived.source)
+		}
 	}
 	for _, source := range refusedSources {
 		s.refuse(source)
 	}
 	result.RefusedSubagentRuns = len(refusedSources)
+	// After the three groups above, so every record that could be a case-2 parent has
+	// been observed into the skill index and every subagent run has been resolved or
+	// refused — which is what makes the precedence's "will this record ever exist"
+	// question answerable (ADR-0035 §6). s.subagents holds whatever the pass above did
+	// not resolve, so a child of a still-open run is deferred rather than reparented.
+	children := resolveDeferredChildren(s.deferred, s.sessions, s.stale, parentage{
+		subagents: emitted,
+		buffered:  s.subagents,
+		skills:    s.skills,
+	})
 	// Folded before the session grain reads the tally, so a call this resolution made
-	// terminal counts toward its session's totals exactly as a call terminated inside
-	// a source does.
+	// terminal counts toward its session's totals exactly as a call terminated inside a
+	// source does (ADR-0034 §3).
+	//
+	// The two batches are disjoint and together they are everything this walk derived:
+	// result.Records holds no deferred child yet — the append below is what puts them
+	// there — and s.deferred holds every one of them, emitted by the pass above or not.
+	// So each record is counted exactly once.
+	//
+	// A child the pass above did not emit is counted anyway, and that is the point.
+	// The two thresholds are separate keys with separate defaults —
+	// scan.stale_call_timeout at 24h for the deferred pass, session.idle_timeout at 30m
+	// for the session grain (internal/config/keys.go) — so on a real machine the scan
+	// that derives a session's one and only session_end routinely runs while that
+	// session's children are still buffered. Counting only the emitted ones would write
+	// tool_calls: 0 for every session that used a skill or a subagent, which is the
+	// common case and not an edge, and it would be permanent: ADR-0034 §3 is
+	// first-write-wins, ADR-0015 rejects upsert and ADR-0004 deduplicates the correction
+	// away. ADR-0034 §3's snapshot excludes a call this scan has not derived; a deferred
+	// child is derived, and only its emission is waiting.
 	s.tally.observe(result.Records)
+	for _, child := range s.deferred {
+		s.tally.observeOne(child.event)
+	}
+	// Drained like every other buffer this pass resolves, so a second Close resolves
+	// nothing further and reports the same totals rather than counting these twice.
+	// Nothing changes between two Closes, so a child this pass left buffered would not
+	// have been emitted by the next one either.
+	s.deferred = nil
+	for _, derived := range children {
+		result.Records = append(result.Records, derived.event)
+		s.credit(derived.source)
+	}
 	for _, end := range resolveSessionEnds(s.grains, s.sessions, s.idle, &s.tally) {
 		result.Records = append(result.Records, end)
 		// Credited to every source that fed the session, not to one: the record is the
@@ -475,6 +549,29 @@ func (s *Scan) markBlind(seen map[record.Identifier]struct{}) {
 	for sessionID := range seen {
 		s.sessions.MarkBlind(sessionID)
 	}
+}
+
+// route sends one derived terminal record either to this walk's output with its
+// parent already set, or to the deferred buffer. It reports whether the record was
+// emitted now.
+//
+// The skill index is updated either way, because a record that is itself deferred can
+// still be another record's case-2 parent. A deferred record of a closed session is
+// emitted in the same Close pass as any child that points at it, so the target exists
+// whenever the child does (ADR-0035 §6).
+func (s *Scan) route(records *[]record.Record, event record.Record, source int,
+	agentID record.Identifier) bool {
+	s.skills.observe(event)
+	if agentID == "" && event.ViaSkill == "" {
+		// Case 3, pure from (harness, session id) and independent of whether the
+		// session_end has been written yet, so a top-level primitive is parented the
+		// instant it is derived rather than left rootless (ADR-0035 §2, §4).
+		event.ParentEventID = sessionParent(event.SessionID)
+		*records = append(*records, event)
+		return true
+	}
+	s.deferred = append(s.deferred, deferredChild{event: event, source: source, agentID: agentID})
+	return false
 }
 
 // credit records that the post-walk resolution attributed a record back to one

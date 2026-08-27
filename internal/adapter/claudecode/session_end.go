@@ -360,22 +360,31 @@ type invocationTally struct {
 	builtin map[record.Identifier]int64
 }
 
-// observe folds one batch of derived records into the tally. The predicate is the
-// one invocationCounts applied before it: a session-grain record is not an
-// invocation and counts toward neither number.
+// observe folds one batch of derived records into the tally.
 func (t *invocationTally) observe(records []record.Record) {
 	for _, event := range records {
-		if record.IsSessionGrain(event.Kind) {
-			continue
-		}
-		if t.total == nil {
-			t.total = map[record.Identifier]int64{}
-			t.builtin = map[record.Identifier]int64{}
-		}
-		t.total[event.SessionID]++
-		if event.Kind == record.KindBuiltinTool {
-			t.builtin[event.SessionID]++
-		}
+		t.observeOne(event)
+	}
+}
+
+// observeOne folds a single derived record into the tally. The predicate is the
+// one invocationCounts applied before it: a session-grain record is not an
+// invocation and counts toward neither number.
+//
+// It takes one record rather than a slice so that a record this walk derived can be
+// counted from the buffer it is waiting in, without that buffer first being copied
+// into a slice the tally would then have to hold (see Scan.Close's deferred pass).
+func (t *invocationTally) observeOne(event record.Record) {
+	if record.IsSessionGrain(event.Kind) {
+		return
+	}
+	if t.total == nil {
+		t.total = map[record.Identifier]int64{}
+		t.builtin = map[record.Identifier]int64{}
+	}
+	t.total[event.SessionID]++
+	if event.Kind == record.KindBuiltinTool {
+		t.builtin[event.SessionID]++
 	}
 }
 
@@ -394,6 +403,13 @@ func (t *invocationTally) observe(records []record.Record) {
 // so a call still buffered because scan.stale_call_timeout has not elapsed is
 // simply not in it, exactly as ADR-0034 §3 describes. There is no waiting, no
 // backfill and no reconciliation pass.
+//
+// "Not yet derived" is the line, not "not yet emitted". A terminal record whose
+// emission is waiting only on the parent link — ADR-0035's deferred child — has been
+// derived, and Scan.Close folds it in from the buffer it waits in. It has to: the
+// two gates are different keys with different defaults, so between them this would
+// otherwise report a permanent zero for every session that used a skill or a
+// subagent (see Scan.Close).
 //
 // The tally spans the whole walk rather than one source, which is what makes the
 // aggregate the union's: after ADR-0036 a session's invocations are spread over its
@@ -428,6 +444,12 @@ func resolveSessionEnds(grains map[record.Identifier]*sessionGrain, sessions *Se
 // the wire, never OK (ADR-0005). ToolCalls and BuiltinToolCalls are always
 // present, including at zero: this scan counted them, and a measured zero is the
 // plan §2.7 baseline.
+//
+// ParentEventID is deliberately unset, and it is the only record for which that is
+// deliberate rather than a failure to establish one. A session_end is the one record
+// ADR-0035 §2 leaves rootless: it is the trace root every other record of the session
+// reaches through case 3, whose id is this record's own — derived from
+// sessionEndSourceEvent whether or not this record has been written yet (§4).
 func (g *sessionGrain) sessionEnd(sessionID record.Identifier, toolCalls, builtinToolCalls int64) record.Record {
 	return record.Record{
 		SchemaVersion:       record.SchemaVersion,
