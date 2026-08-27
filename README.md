@@ -172,8 +172,8 @@ collector, such as [Langfuse](https://cloud.langfuse.com). The capability
 ships in every build and stays off until you configure it:
 
 ```sh
-wake remote set                                              # at a terminal: prompts for the URL and both keys
-wake remote set https://cloud.langfuse.com/api/public/otel   # scripted: credential on stdin as public:secret
+wake remote set                                                        # at a terminal: prompts for the URL and both keys
+wake remote set https://cloud.langfuse.com/api/public/otel/v1/traces   # scripted: credential on stdin as public:secret
 wake remote on
 wake remote flush
 wake remote status
