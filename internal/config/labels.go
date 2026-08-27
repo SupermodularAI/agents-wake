@@ -4,9 +4,12 @@ package config
 // build is willing to resolve against, keyed by repository id.
 //
 // It is the projection ADR-0033 authorises and nothing wider: the label's value,
-// never the root, never an alias, never the boundary. projects.json itself still
-// never travels as a file — only these values do, and only at flush time, exactly
-// the way the hashed id already does.
+// never the root, never an alias, never the boundary. Two callers project it, and
+// neither widens that: the OTLP encoder, which puts the value on the wire at flush
+// time (ADR-0033 §2), and the local renderers' repository column, which is the
+// readable-names purpose this local map was created for (ADR-0014 § Decision).
+// projects.json itself still never travels as a file — only these values do, the
+// way the hashed id already does.
 //
 // It reads and never writes, and it reads the salt through readSalt rather than
 // loadOrCreateSalt: remote.PreviewFlush documents that `--dry-run` writes

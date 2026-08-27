@@ -8,6 +8,7 @@ import (
 
 	"github.com/SupermodularAI/agents-wake/internal/config"
 	"github.com/SupermodularAI/agents-wake/internal/inventory"
+	"github.com/SupermodularAI/agents-wake/internal/repolabel"
 	"github.com/SupermodularAI/agents-wake/internal/store"
 	"github.com/SupermodularAI/agents-wake/internal/style"
 	"github.com/SupermodularAI/agents-wake/internal/ui"
@@ -61,5 +62,7 @@ func runServe(cmd *cobra.Command, port int) error {
 	// From the bound listener's own address, so the message can only name a port
 	// something is actually listening on.
 	_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Serving dashboard at http://"+listener.Addr().String())
-	return ui.Serve(listener, events, primitives)
+	// Resolved once, here: internal/cli is the only layer holding
+	// config.Paths, and the dashboard never reads the file itself.
+	return ui.Serve(listener, events, primitives, repolabel.Labels(config.ProjectLabels(paths)))
 }
