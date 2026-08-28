@@ -79,8 +79,8 @@ func BoundedVersion(value string) (Version, error) {
 //
 // The key is why this is a type rather than a function. A scoped reference's scope
 // is a repository path fragment, and its digest is persisted into the spool — the
-// same bytes that leave the machine under the remote build tag (ADR-0012,
-// ADR-0017). A plain hash of a path is not one-way: the input space is a handful
+// same bytes that leave the machine when remote delivery is enabled (ADR-0027,
+// ADR-0030). A plain hash of a path is not one-way: the input space is a handful
 // of directory names, so it is recoverable from a wordlist. Keying it is the
 // standard this project already applies to the one other path-derived value it
 // persists, the repository id (config.Repos.NameKey, ADR-0019 §3, ADR-0020).

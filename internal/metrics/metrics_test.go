@@ -95,3 +95,143 @@ func testRecord(source string, outcome *record.Outcome) record.Record {
 		Outcome:       outcome,
 	}
 }
+
+// TestAggregateCountsASessionEndAsASessionNotAnInvocation pins what a session-grain
+// record is evidence of: that a session existed, and nothing else. Counting it as an
+// invocation would put a primitive named "session" in every report and add a row to
+// every rate's denominator that nobody invoked (ADR-0002, ADR-0006).
+func TestAggregateCountsASessionEndAsASessionNotAnInvocation(t *testing.T) {
+	ok := record.OutcomeOK
+	summary := Aggregate([]record.Record{
+		testRecord("one", &ok),
+		sessionEndRecord("session-1", time.Date(2026, time.August, 13, 12, 5, 0, 0, time.UTC)),
+	})
+
+	if summary.Invocations != 1 {
+		t.Errorf("Invocations = %d, want 1", summary.Invocations)
+	}
+	if summary.Sessions != 1 {
+		t.Errorf("Sessions = %d, want 1", summary.Sessions)
+	}
+	if len(summary.Primitives) != 1 {
+		t.Fatalf("Primitives = %+v, want only the skill", summary.Primitives)
+	}
+	for _, primitive := range summary.Primitives {
+		if primitive.Name == "session" {
+			t.Fatalf("Primitives holds a phantom %q row: %+v", primitive.Name, primitive)
+		}
+	}
+	// A session reports no outcome, and that absence is not an unknown-outcome
+	// exclusion either: the rate is over invocations, and this was not one.
+	if summary.ErrorRate.Total() != 1 || summary.ErrorRate.Excluded() != 0 {
+		t.Errorf("ErrorRate = %+v, want the one invocation and nothing excluded", summary.ErrorRate)
+	}
+	// It does move the last-observed instant: the session was observed, later than
+	// the invocation inside it.
+	if want := time.Date(2026, time.August, 13, 12, 5, 0, 0, time.UTC); !summary.LastObserved.Equal(want) {
+		t.Errorf("LastObserved = %v, want %v", summary.LastObserved, want)
+	}
+}
+
+// TestAggregateCountsASessionWithNoInvocations is the plan §2.7 baseline made
+// observable end to end: a session that invoked no primitive is a row in the session
+// population, and it is exactly the row that makes every rate above it meaningful.
+func TestAggregateCountsASessionWithNoInvocations(t *testing.T) {
+	instant := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	summary := Aggregate([]record.Record{sessionEndRecord("session-1", instant)})
+
+	if summary.Sessions != 1 {
+		t.Errorf("Sessions = %d, want 1", summary.Sessions)
+	}
+	if summary.Invocations != 0 {
+		t.Errorf("Invocations = %d, want 0", summary.Invocations)
+	}
+	if len(summary.Primitives) != 0 {
+		t.Errorf("Primitives = %+v, want none", summary.Primitives)
+	}
+	if !summary.LastObserved.Equal(instant) {
+		t.Errorf("LastObserved = %v, want %v", summary.LastObserved, instant)
+	}
+}
+
+// TestSummaryObserved pins the question every renderer's empty state actually asks:
+// did the store hold anything terminal at all? Asking it as "Invocations == 0" was
+// true only while an invocation was the sole thing a record could be; the session
+// grain made it a renderer bug, twice over, so the answer lives here beside the
+// counts instead of being re-derived per renderer.
+func TestSummaryObserved(t *testing.T) {
+	ok := record.OutcomeOK
+	instant := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name    string
+		records []record.Record
+		want    bool
+	}{
+		{name: "nothing", records: nil},
+		{name: "an invocation", records: []record.Record{testRecord("one", &ok)}, want: true},
+		{name: "a session with no primitive use", records: []record.Record{sessionEndRecord("session-1", instant)}, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := Aggregate(test.records).Observed(); got != test.want {
+				t.Errorf("Observed() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func sessionEndRecord(sessionID record.Identifier, at time.Time) record.Record {
+	var zero int64
+	return record.Record{
+		SchemaVersion:    record.SchemaVersion,
+		EventID:          record.DeriveEventID("claude-code", sessionID+"\x1esession_end"),
+		Timestamp:        at,
+		Harness:          "claude-code",
+		SessionID:        sessionID,
+		Repo:             "0123456789abcdef0123456789abcdef",
+		Kind:             record.KindSessionEnd,
+		Name:             "session",
+		Invoker:          record.InvokerAuto,
+		ToolCalls:        &zero,
+		BuiltinToolCalls: &zero,
+	}
+}
+
+// TestAggregateSplitsOnePrimitivePerRepository is DG-93's grain change. Repo is a
+// property of the invocation (ADR-0002), so one primitive used in two repositories
+// is two rows, and each row's rate is over its own population (ADR-0006).
+func TestAggregateSplitsOnePrimitivePerRepository(t *testing.T) {
+	failed, ok := record.OutcomeError, record.OutcomeOK
+	first, second := record.Hash("0123456789abcdef0123456789abcdef"), record.Hash("fedcba9876543210fedcba9876543210")
+	failing, passing := testRecord("one", &failed), testRecord("two", &ok)
+	failing.Repo, passing.Repo = first, second
+
+	summary := Aggregate([]record.Record{failing, passing})
+
+	if len(summary.Primitives) != 2 {
+		t.Fatalf("primitive rows = %d, want 2 (one per repository)", len(summary.Primitives))
+	}
+	byRepo := map[record.Hash]PrimitiveUsage{}
+	for _, primitive := range summary.Primitives {
+		byRepo[primitive.Repo] = primitive
+	}
+	for _, repo := range []record.Hash{first, second} {
+		primitive, present := byRepo[repo]
+		if !present {
+			t.Fatalf("no row for repository %q", repo)
+		}
+		if primitive.Invocations != 1 {
+			t.Fatalf("row %q invocations = %d, want 1", repo, primitive.Invocations)
+		}
+	}
+	// Each row's rate is over its own repository's population, not the whole one.
+	if percent, rated := byRepo[first].ErrorRate.Percent(); !rated || percent != 100 {
+		t.Fatalf("failing row rate = %v (rated %t), want 100", percent, rated)
+	}
+	if percent, rated := byRepo[second].ErrorRate.Percent(); !rated || percent != 0 {
+		t.Fatalf("passing row rate = %v (rated %t), want 0", percent, rated)
+	}
+	// The summary-level figures span every repository and are unchanged by the split.
+	if summary.Invocations != 2 || summary.ErrorRate.Denominator() != 2 {
+		t.Fatalf("summary = %d invocations, denominator %d; want 2 and 2", summary.Invocations, summary.ErrorRate.Denominator())
+	}
+}

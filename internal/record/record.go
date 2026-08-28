@@ -15,8 +15,44 @@ import (
 	"time"
 )
 
-// SchemaVersion identifies the on-disk record contract.
-const SchemaVersion uint = 1
+// SchemaVersion identifies the on-disk record contract. Adding a dimension bumps
+// it (ADR-0007), and a bump is a rebuild rather than a migration: the store is a
+// derived index, so a record of any other version is refused on read and the spool
+// that holds it is discarded and re-derived from the harness's own history
+// (ADR-0015). Version 2 added entrypoint; version 3 added the session grain's
+// nullable totals. Version 4 added no field: it changes how a subagent invocation's
+// event_id is derived — from the subagent's own transcript rather than from the
+// invoking tool call (ADR-0036 §2) — which ADR-0004 classes as a schema change all
+// the same, because a stored id no build can re-derive is a record no rescan can
+// deduplicate. Version 5 adds no field either: it changes how a typed invocation's
+// event_id is derived — from the entry carrying the command tag rather than from a
+// session-collapsed attributed entry (ADR-0036 §1, §3, §4) — which ADR-0004 classes as
+// a schema change for the same reason. It also changes which dimensions a session_end
+// carries for an unchanged id, because a user turn whose content is plain text now
+// yields an entry the session grain can date itself from. Version 6, unlike 4 and 5,
+// does add a dimension: a nullable parent_event_id, the event_id of a record's parent
+// invocation, derived from the child's own source event and never generated
+// (ADR-0035 §2).
+//
+// "Refused on read" is only half of that, and the half on its own is a silent
+// shrink: every consumer reads the spool through store.Entries, so a spool nobody
+// rebuilt would report the post-upgrade subset as the whole truth. The other half
+// is the scan the user asks for, which discards a spool carrying a foreign version
+// before it appends to it and re-derives the whole history in its place — the scan a
+// hook fires collects inside each repository's recorded boundary (ADR-0025), so it
+// reports the count and leaves the drop to the one that can put the records back
+// (internal/activation, health.Scan.StaleRecords and StaleRebuilt). The third is the
+// delivery watermark, which stamps this number and starts over when it changes
+// (internal/remote). What a rebuild cannot recover is a period the harness has since
+// pruned: the store was the only surviving copy of it, and ADR-0014 accepts that.
+const SchemaVersion uint = 6
+
+// ErrUnsupportedVersion is the one refusal from Validate a caller is meant to
+// recognise. Every other refusal means the record was never valid; this one means
+// an earlier build wrote it correctly under a contract this build does not read, and
+// the answer to it is a rebuild rather than a skip. It carries no field and no
+// value — only which of the two situations this is (plan §4.2).
+var ErrUnsupportedVersion = errors.New("unsupported schema version")
 
 var (
 	versionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+:-]{0,127}$`)
@@ -67,6 +103,19 @@ const (
 	InvokerAuto  Invoker = "auto"
 )
 
+// Entrypoint is how the harness process itself was started: a person at a
+// terminal, or an SDK driving it. It is Wake's own vocabulary, not a harness's —
+// an adapter maps its harness's spelling onto these members and is never allowed
+// to pass an unrecognised one through (ADR-0005, ADR-0007). Absent is the zero
+// value: the harness reported nothing, which is never one of the members.
+type Entrypoint string
+
+const (
+	EntrypointCLI       Entrypoint = "cli"
+	EntrypointSDKPython Entrypoint = "sdk_python"
+	EntrypointSDKCLI    Entrypoint = "sdk_cli"
+)
+
 // Outcome is nullable on Record. Nil means the harness did not report one.
 type Outcome string
 
@@ -98,11 +147,46 @@ type Record struct {
 	Source         *Source    `json:"source"`
 	ViaSkill       Identifier `json:"via_skill,omitempty"`
 	ViaAgent       Identifier `json:"via_agent,omitempty"`
-	Model          Identifier `json:"model,omitempty"`
-	Effort         Identifier `json:"effort,omitempty"`
-	Invoker        Invoker    `json:"invoker"`
-	Outcome        *Outcome   `json:"outcome"`
-	DurationMS     *int64     `json:"duration_ms"`
+	// ParentEventID is the event_id of this record's parent invocation, derived by
+	// the adapter from the child's own source event and never generated here
+	// (ADR-0004, ADR-0035 §2). It is a record id, so a bare Hash with omitempty
+	// rather than a pointer: the empty string is outside the hash domain, so it is
+	// already an unambiguous absence and a *Hash would add a nil-versus-empty
+	// distinction that means nothing. Absent only where derivation could establish
+	// none of ADR-0035 §2's three cases — never as the normal shape of a top-level
+	// call, which parents onto its session (ADR-0035 §2, §4). A session_end carries
+	// none: it is the trace root.
+	//
+	// No ancestor check lives here and none is added. Cycle-freedom is structural,
+	// not validated: the relation only ever points outward, toward a named
+	// primitive's own invocation or toward the session, so Validate stays per-record
+	// and pure (ADR-0035 §7).
+	ParentEventID Hash       `json:"parent_event_id,omitempty"`
+	Model         Identifier `json:"model,omitempty"`
+	Effort        Identifier `json:"effort,omitempty"`
+	Invoker       Invoker    `json:"invoker"`
+	Entrypoint    Entrypoint `json:"entrypoint,omitempty"`
+	Outcome       *Outcome   `json:"outcome"`
+	DurationMS    *int64     `json:"duration_ms"`
+
+	// The session grain's totals (ADR-0002, ADR-0034 §3). They are populated only
+	// on a session_end record and are nil on every invocation-grain record. All
+	// nullable, and none carries omitempty: nil means the harness reported nothing,
+	// which is never 0 (ADR-0005 applied to counts), so an unreported total has to
+	// serialise as null rather than vanish. Bounded numerics only — a total cannot
+	// carry a secret (ADR-0007).
+	InputTokens         *int64 `json:"input_tokens"`
+	OutputTokens        *int64 `json:"output_tokens"`
+	CacheReadTokens     *int64 `json:"cache_read_tokens"`
+	CacheCreationTokens *int64 `json:"cache_creation_tokens"`
+	// ThinkingTokens is the session's reasoning-token total under whatever the
+	// harness calls it: Claude Code reports it as usage.output_tokens_details
+	// .thinking_tokens, opencode as tokens_reasoning. The field is named after the
+	// quantity so a second adapter maps onto it rather than adding a field named
+	// after one harness.
+	ThinkingTokens   *int64 `json:"thinking_tokens"`
+	ToolCalls        *int64 `json:"tool_calls"`
+	BuiltinToolCalls *int64 `json:"builtin_tool_calls"`
 }
 
 // DeriveEventID derives a stable identifier from the harness and its source
@@ -124,19 +208,29 @@ func Marshal(r Record) ([]byte, error) {
 // Validate checks the persisted privacy and format contract.
 func Validate(r Record) error {
 	if r.SchemaVersion != SchemaVersion {
-		return errors.New("unsupported schema version")
+		return ErrUnsupportedVersion
 	}
 	if !validSHA256(r.EventID) {
 		return errors.New("invalid event id")
 	}
+	// Nullable, and checked by the same gate event_id gets when it is set: a parent
+	// is an id, so the domain is identical and the message is valueless (plan §4.2).
+	// A record whose parent link is malformed is dropped rather than written — fail
+	// closed, as every other refusal here is (ADR-0007).
+	if r.ParentEventID != "" && !validSHA256(r.ParentEventID) {
+		return errors.New("invalid parent event id")
+	}
 	if r.Timestamp.IsZero() {
 		return errors.New("missing timestamp")
 	}
-	if !ValidHarness(r.Harness) || !validToken(r.SessionID) || !validRepoHash(r.Repo) || !validKind(r.Kind) || !ValidName(r.Name) || !validInvoker(r.Invoker) {
+	if !ValidHarness(r.Harness) || !validToken(r.SessionID) || !ValidRepo(r.Repo) || !validKind(r.Kind) || !ValidName(r.Name) || !validInvoker(r.Invoker) {
 		return errors.New("invalid required record field")
 	}
 	if !validOptionalName(r.Package) || !validOptionalName(r.ViaSkill) || !validOptionalName(r.ViaAgent) || !validOptionalName(r.Model) || !validOptionalName(r.Effort) || !validOptionalVersion(r.HarnessVersion) || !validOptionalVersion(r.PackageVersion) {
 		return errors.New("invalid optional record field")
+	}
+	if r.Entrypoint != "" && !validEntrypoint(r.Entrypoint) {
+		return errors.New("invalid entrypoint")
 	}
 	if r.Source != nil && !validSource(*r.Source) {
 		return errors.New("invalid source")
@@ -144,15 +238,27 @@ func Validate(r Record) error {
 	if r.Outcome != nil && !validOutcome(*r.Outcome) {
 		return errors.New("invalid outcome")
 	}
-	if r.DurationMS != nil && *r.DurationMS < 0 {
-		return errors.New("invalid duration")
+	// One loop over every nullable count, message deliberately valueless (plan
+	// §4.2). A count below zero measures nothing, so the record is dropped rather
+	// than written (fail closed).
+	for _, count := range []*int64{
+		r.DurationMS, r.InputTokens, r.OutputTokens, r.CacheReadTokens,
+		r.CacheCreationTokens, r.ThinkingTokens, r.ToolCalls, r.BuiltinToolCalls,
+	} {
+		if count != nil && *count < 0 {
+			return errors.New("invalid count")
+		}
 	}
 	return nil
 }
 
 func validSHA256(v Hash) bool { return len(v) == sha256.Size*2 && hexPattern.MatchString(string(v)) }
 
-func validRepoHash(v Hash) bool { return len(v) == 32 && hexPattern.MatchString(string(v)) }
+// ValidRepo reports whether v is a repository id: the salted, truncated digest
+// internal/config derives (ADR-0019 §3, §8). Exported because the derived
+// primitive snapshot validates the same field against the same rule, and two
+// spellings of one domain is the drift ValidName and ValidHarness exist to avoid.
+func ValidRepo(v Hash) bool { return len(v) == 32 && hexPattern.MatchString(string(v)) }
 
 func validKind(v Kind) bool {
 	switch v {
@@ -169,6 +275,13 @@ func validSource(v Source) bool {
 
 func validInvoker(v Invoker) bool {
 	return v == InvokerUser || v == InvokerModel || v == InvokerAuto
+}
+
+// validEntrypoint is a membership check, not a shape check. A bounded-token
+// pattern would accept a future harness value such as "sdk-ts" and let an
+// unmapped dimension through; the allowlist is the enum itself.
+func validEntrypoint(v Entrypoint) bool {
+	return v == EntrypointCLI || v == EntrypointSDKPython || v == EntrypointSDKCLI
 }
 
 func validOutcome(v Outcome) bool {
@@ -202,6 +315,15 @@ func IsFailure(outcome Outcome) bool {
 // IsTerminal reports whether a record is suitable for the invocation store.
 func IsTerminal(r Record) bool {
 	return r.Kind != KindSessionStart
+}
+
+// IsSessionGrain reports whether a kind describes a whole session rather than one
+// invocation inside it (ADR-0002's session grain). A session-grain record belongs
+// in the store and on the wire, but never in an invocation count: counting one
+// would put a phantom primitive in every report and add a row to every rate's
+// denominator that nobody invoked (ADR-0006).
+func IsSessionGrain(kind Kind) bool {
+	return kind == KindSessionStart || kind == KindSessionEnd
 }
 
 // NormalizedTimestamp strips monotonic clock data before persistence.

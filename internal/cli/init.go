@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,12 +18,31 @@ func init() { commands = append(commands, newInitCmd) }
 
 func newInitCmd() *cobra.Command {
 	var full bool
-	cmd := &cobra.Command{Use: "init", Short: "Enable local Claude Code collection for this project", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		pretty := ttyOutput(cmd)
-		root, err := config.DiscoverRootForRegistration()
-		if err != nil {
+	var global bool
+	cmd := &cobra.Command{Use: "init [path]", Short: "Enable local Claude Code collection for this project", Args: func(c *cobra.Command, args []string) error {
+		// Plain init keeps cobra.NoArgs exactly, error text included; only --global
+		// takes a path. Widening the rule for both would let a typo consent a
+		// directory the user never named.
+		if !global {
+			return cobra.NoArgs(c, args)
+		}
+		if err := cobra.MaximumNArgs(1)(c, args); err != nil {
 			return err
 		}
+		// An empty argument is refused here rather than resolved anywhere: it is a
+		// directory the user did not name, and it is not the same request as naming
+		// no directory at all. `wake init -g "$DEVDIR"` with DEVDIR unset is the
+		// invocation this is about — a script or an alias, where the disclosure
+		// scrolls past unread — and reading it as "no argument" would consent the
+		// whole home directory as a side effect of an empty string. Refusing at parse
+		// time means nothing is printed and nothing is written. The message names the
+		// requirement and carries no path, there being none to carry.
+		if len(args) == 1 && args[0] == "" {
+			return errors.New("--global needs a directory to consent; an empty path names none")
+		}
+		return nil
+	}, RunE: func(cmd *cobra.Command, args []string) error {
+		pretty := ttyOutput(cmd)
 		paths, err := config.ResolvePaths()
 		if err != nil {
 			return err
@@ -34,6 +54,33 @@ func newInitCmd() *cobra.Command {
 		claudeDir, err := config.ClaudeCodeDir()
 		if err != nil {
 			return err
+		}
+		// Which directory gets consented is a decision below this layer either way, and
+		// both halves of it are resolved by name: config.DefaultGlobalRoot answers what
+		// `-g` with no argument means, and config.DiscoverRootForRegistration answers
+		// what plain `init` consents from the directory it asks for itself. Nothing under
+		// internal/cli resolves the home directory or starts a process (ADR-0001,
+		// TestInternalCliResolvesNoHomeDirectory,
+		// TestInitCommandRunsNoProcessAndDiscoversNoRootItself).
+		var root, boundary string
+		if global {
+			// Keyed off the count and not off the value: the default is what naming no
+			// directory means, and an argument that happens to be empty is not that
+			// request. Args refuses one before this runs, and this stays written so the
+			// widening cannot come back through a change up there.
+			if len(args) == 0 {
+				boundary, err = config.DefaultGlobalRoot()
+				if err != nil {
+					return err
+				}
+			} else {
+				boundary = args[0]
+			}
+		} else {
+			root, err = config.DiscoverRootForRegistration("", "")
+			if err != nil {
+				return err
+			}
 		}
 		// The banner is purely cosmetic — the one line this command prints that
 		// carries no disclosure and nothing ADR-0010 requires a reader to see — so
@@ -57,29 +104,54 @@ func newInitCmd() *cobra.Command {
 		// the sentence below, so the answer to "will my spool be touched" is plain
 		// either way, and --full is named in the output that used to just do it.
 		//
+		// config.toml appears only without --global, and that asymmetry is the point: a
+		// boundary is recorded in the project table and writes no config key (ADR-0032
+		// §2), so naming config.toml there would be a disclosure that over-states what
+		// the command does — as wrong as one that omits a file it writes. The list is
+		// built conditionally rather than trimmed, so both directions stay honest.
+		//
 		// Every other file init writes is here, including the two it writes without
 		// being asked: the salt config.OpenRepos creates on first need, and the
 		// primitive inventory refreshInventory always rewrites. A disclosure that
 		// listed only the interesting files would be a consent step that under-states
 		// what the command does, which is the direction that matters (ADR-0010).
 		spool := filepath.Join(paths.DataDir, "events.ndjson")
-		modifies := []string{
-			paths.ConfigFile,
+		modifies := []string{}
+		if !global {
+			modifies = append(modifies, paths.ConfigFile)
+		}
+		modifies = append(modifies,
 			paths.SaltFile,
 			paths.ProjectsFile,
 			paths.PrimitivesFile,
 			paths.HealthFile,
 			filepath.Join(claudeDir, "settings.json"),
-		}
+		)
 		// Forward-only is stated as what will not happen, and stated about the
 		// triggers as well as about this call: the hooks written below run
 		// `wake ingest` at every session start, and a user told only that "init" does
 		// not import history would reasonably expect the trigger to (ADR-0025 is what
 		// makes this sentence true rather than a hope).
-		history := fmt.Sprintf("Existing Claude Code history will not be imported, so %s is not written; the session triggers this installs collect only what happens from now on. Run \"wake init --full\" to import it now.", spool)
+		//
+		// The command named as the way back is the one that would actually import the
+		// history being described. Naming the plain one under --global would send
+		// someone who consented a whole boundary to a command that imports one
+		// project's history.
+		backfill := `"wake init --full"`
+		if global {
+			backfill = `"wake init --global --full"`
+		}
+		sentences := []string{fmt.Sprintf("Existing Claude Code history will not be imported, so %s is not written; the session triggers this installs collect only what happens from now on. Run %s to import it now.", spool, backfill)}
 		if full {
 			modifies = append(modifies, spool)
-			history = "Existing Claude Code history will be imported now."
+			sentences = []string{"Existing Claude Code history will be imported now."}
+		}
+		if global {
+			// The boundary is the one path this sentence may carry: it is the path the
+			// user typed, and the consent being asked for is about exactly it. No
+			// repository path, label or log content appears — the repositories under it
+			// are not known yet, and the ones that become known are never printed.
+			sentences = append(sentences, fmt.Sprintf("Wake will consent every project under %s, and will register each repository it finds there in %s as sessions run in it — including repositories created later.", boundary, paths.ProjectsFile))
 		}
 		// Dimmed rather than left plain: a column of paths is the part of the
 		// disclosure a reader's eye should move past quickly, not the part fighting
@@ -90,18 +162,27 @@ func newInitCmd() *cobra.Command {
 			listed[i] = style.Paint(pretty, style.Dim, path)
 		}
 		// One Fprintf, so a write that fails cannot leave half a disclosure on screen.
-		// The blank line keeps the sentence from reading as a sixth path in a column of
-		// paths, since it carries one of its own.
-		if _, discloseErr := fmt.Fprintf(cmd.OutOrStdout(), "%s\n%s\n\n%s\n", style.Heading(pretty, "Wake will modify:"), strings.Join(listed, "\n"), history); discloseErr != nil {
+		// The blank line keeps the sentences from reading as further paths in a column
+		// of paths, since they carry paths of their own.
+		if _, discloseErr := fmt.Fprintf(cmd.OutOrStdout(), "%s\n%s\n\n%s\n", style.Heading(pretty, "Wake will modify:"), strings.Join(listed, "\n"), strings.Join(sentences, "\n\n")); discloseErr != nil {
 			return discloseErr
 		}
 		label := "Enabling Claude Code collection"
-		if full {
+		switch {
+		case global && full:
+			label = "Importing Claude Code history under the collection boundary"
+		case global:
+			label = "Recording the collection boundary"
+		case full:
 			label = "Importing Claude Code history"
 		}
 		var written int
 		spinErr := style.WithSpinner(cmd.OutOrStdout(), pretty, label, func() error {
 			var initErr error
+			if global {
+				written, initErr = activation.InitGlobal(paths, boundary, claudeDir, self, full)
+				return initErr
+			}
 			written, initErr = activation.Init(paths, root, claudeDir, self, full)
 			return initErr
 		})
@@ -112,7 +193,12 @@ func newInitCmd() *cobra.Command {
 		// of terminal events (ADR-0015), and reporting 0 of them on a path that never
 		// looked would read as an import that found nothing.
 		confirmation := "Claude Code collection enabled; collection starts now. Run \"wake init --full\" or \"wake ingest\" to import existing history.\n"
-		if full {
+		switch {
+		case global && full:
+			confirmation = fmt.Sprintf("Collection boundary recorded; imported %s.\n", terminalEvents(written))
+		case global:
+			confirmation = fmt.Sprintf("Collection boundary recorded at %s; every project under it is consented and registered as it is used.\n", boundary)
+		case full:
 			confirmation = fmt.Sprintf("Claude Code collection enabled; imported %s.\n", terminalEvents(written))
 		}
 		check := style.Paint(pretty, style.Green, "✓")
@@ -123,5 +209,6 @@ func newInitCmd() *cobra.Command {
 		return err
 	}}
 	cmd.Flags().BoolVar(&full, "full", false, "also import this project's existing Claude Code history now")
+	cmd.Flags().BoolVarP(&global, "global", "g", false, "consent every project under a directory (default the home directory), registering each as it is used")
 	return cmd
 }

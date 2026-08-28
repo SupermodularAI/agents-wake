@@ -76,6 +76,13 @@ fmt-check: ## Fail if anything is unformatted
 
 # The verify gate. AGENTS.md points at this target, and CI runs the same steps —
 # one door in, so a green local run means a green CI run.
+#
+# There is no second tagged run any more, because there is no build tag: ADR-0030
+# ships remote delivery in every binary, so these four steps see the whole tree.
+# No `build` step is added in the dropped run's place — `vet` and `test` both
+# compile every package including cmd/wake, leaving only the link step, which
+# CI's build job performs for all four platforms. Adding one would make this
+# target write dist/ as a side effect it does not have today.
 validate: fmt-check vet lint test ## The verify gate; must pass before a PR
 
 tidy: ## Tidy the main module

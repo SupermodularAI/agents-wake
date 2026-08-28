@@ -62,9 +62,49 @@ func newDoctorCmd() *cobra.Command {
 // invocation total, which is why it stands apart from the counts above it rather than
 // being folded into any of them.
 //
+// The two collection-boundary lines sit beside the refused-entry count because they
+// are the same family — what registration could not do — and they are two lines for
+// the same reason pending and interrupted are: a directory that is gone is an honest
+// zero, since there is nothing left there to read, and a registration that was refused
+// is collection that was lost. Neither moves the state word below, and the refused one
+// not moving it is a decision argued in Diagnose: every scan re-observes the same
+// directory and refuses it again, so a state word driven by that counter could never
+// change back. These lines are what report the loss, which is why they are printed
+// whatever the state word says.
+//
+// The refused-subagent-run line sits beside the refused-call count for the same
+// family reason, and it is a second line rather than part of that count because the two
+// are read differently below: a call refused while a source was read is what a harness
+// renaming a primitive's identity field looks like, and it moves the state word. A
+// subagent run refused for want of a name is lost collection too, but it is a standing
+// fact about a transcript — ADR-0036 §2 refuses to name those runs, and every scan
+// re-reads the whole history and refuses the same ones — so it deliberately does not,
+// for the reason Diagnose argues. This line is what reports the loss, which is why it
+// prints whatever the state word says.
+//
+// The stale-record count and the store-rebuild word are two lines for the same reason:
+// the count says how many records the store holds that this build cannot read, and the
+// word says whether anything has re-derived them. The scan that found them may not have
+// been allowed to — the one a hook fires collects inside each repository's recorded
+// boundary (ADR-0025), so it would re-derive less than it deleted — and the word is
+// what keeps the count from reading as the report of a rebuild that never happened. It
+// is the one line here that names a command, because it is the one state whose remedy
+// is a command the user has to type.
+//
+// They live in this function because every health.Scan counter does; the boundary's own
+// state word needs the project table, which this function knows nothing about, so it
+// arrives through the seam instead (doctor_boundary.go).
+//
 // The interpretation of these counters lives in health.Diagnose, because
 // internal/cli only parses and prints (ADR-0001, plan §6.2). This function is the
 // print loop and holds no decision about what the numbers mean.
+//
+// The skipped-typed-invocation line prints whatever the state word says, and it is not
+// part of the refused-call count. ADR-0036 §3 keeps the two apart: a refused call is
+// lost collection and blinds the integration state, while a tag naming something this
+// machine has no primitive for was never Wake's to collect. Every scan re-skips the
+// same built-ins, so a state word following that count could never change again — the
+// line is how it is reported instead.
 func writeDiagnosis(out io.Writer, paths config.Paths, claudeDir string) error {
 	report, readErr := health.New(paths.HealthFile).Read()
 
@@ -110,17 +150,32 @@ func writeDiagnosis(out io.Writer, paths config.Paths, claudeDir string) error {
 		{"parse errors", report.Scan.ParseErrors},
 		{"skipped transcripts", report.Scan.Skipped},
 		{"events written", report.Scan.EventsWritten},
+		{"records from an earlier schema version", report.Scan.StaleRecords},
 		{"refused project entries", report.Scan.RefusedProjects},
+		{"global boundary directories gone", report.Scan.BoundarySkipped},
+		{"global boundary registrations refused", report.Scan.BoundaryRefused},
 		{"refused calls", report.Scan.RefusedCalls},
+		{"refused subagent runs", report.Scan.RefusedSubagentRuns},
 		{"pending calls", report.Scan.PendingCalls},
 		{"interrupted calls", report.Scan.InterruptedCalls},
 		{"ambiguous skill runs", report.Scan.AmbiguousSkillRuns},
+		{"skipped typed invocations", report.Scan.SkippedTypedInvocations},
 	} {
 		if _, err := fmt.Fprintf(out, "%s: %d\n", line.key, line.value); err != nil {
 			return err
 		}
 	}
 
-	_, err := fmt.Fprintf(out, "integration: %s\n", diagnosis.State)
-	return err
+	if _, err := fmt.Fprintf(out, "store rebuild: %s\n", diagnosis.StoreRebuild); err != nil {
+		return err
+	}
+
+	if _, err := fmt.Fprintf(out, "integration: %s\n", diagnosis.State); err != nil {
+		return err
+	}
+
+	// The seam, after every line this function owns: a feature with extra
+	// diagnosis to add appends a section from its own init() rather than
+	// editing this file (extensions.go).
+	return writeDiagnosisSections(out, paths)
 }

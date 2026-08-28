@@ -12,6 +12,7 @@ import (
 
 	"github.com/SupermodularAI/agents-wake/internal/inventory"
 	"github.com/SupermodularAI/agents-wake/internal/record"
+	"github.com/SupermodularAI/agents-wake/internal/repolabel"
 	"github.com/SupermodularAI/agents-wake/internal/store"
 )
 
@@ -27,7 +28,7 @@ func TestHandlerRendersStoredMetrics(t *testing.T) {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 	response := httptest.NewRecorder()
-	Handler(source, primitives).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	Handler(source, primitives, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d", response.Code)
 	}
@@ -41,9 +42,37 @@ func TestHandlerRendersStoredMetrics(t *testing.T) {
 
 func TestHandlerRendersEmptyState(t *testing.T) {
 	response := httptest.NewRecorder()
-	Handler(store.New(filepath.Join(t.TempDir(), "events.ndjson")), inventory.New(filepath.Join(t.TempDir(), "primitives.json"))).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	Handler(store.New(filepath.Join(t.TempDir(), "events.ndjson")), inventory.New(filepath.Join(t.TempDir(), "primitives.json")), nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "No primitive inventory or terminal events yet") {
 		t.Fatalf("empty dashboard = %d: %s", response.Code, response.Body.String())
+	}
+}
+
+// TestHandlerDoesNotClaimAnEmptyStoreForASessionWithNoPrimitiveUse is the plan §2.7
+// baseline at the dashboard. A session that invoked no primitive contributes nothing
+// to Invocations by design, so a gate keyed on Invocations alone hides the whole view
+// behind an empty state for a store that holds a terminal session_end — the exact
+// population the session grain exists to expose.
+func TestHandlerDoesNotClaimAnEmptyStoreForASessionWithNoPrimitiveUse(t *testing.T) {
+	source := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	if _, err := source.Append([]record.Record{sessionEnd("session-1")}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	response := httptest.NewRecorder()
+	Handler(source, inventory.New(filepath.Join(t.TempDir(), "primitives.json")), nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := response.Body.String()
+	if strings.Contains(body, "No primitive inventory or terminal events yet") {
+		t.Fatalf("dashboard called a store holding a session_end empty: %s", body)
+	}
+	for _, want := range []string{"Distinct sessions", ">1<"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard is missing %q: %s", want, body)
+		}
+	}
+	// The tile counts this session, so it cannot go on calling its population
+	// "with primitive activity" — this one had none.
+	if strings.Contains(body, "with primitive activity") {
+		t.Fatalf("session tile still claims every counted session had primitive activity: %s", body)
 	}
 }
 
@@ -63,7 +92,7 @@ func TestHandlerExcludesBuiltinToolsFromPrimitiveTable(t *testing.T) {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 	response := httptest.NewRecorder()
-	Handler(source, primitives).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	Handler(source, primitives, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
 	body := response.Body.String()
 	if strings.Contains(body, ">Bash<") || !strings.Contains(body, ">pr-review<") {
 		t.Fatalf("primitive table did not filter built-ins: %s", body)
@@ -82,7 +111,7 @@ func TestHandlerShowsPerPrimitiveErrorCount(t *testing.T) {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 	response := httptest.NewRecorder()
-	Handler(source, primitives).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	Handler(source, primitives, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
 	body := response.Body.String()
 	if !strings.Contains(body, "Errors") || !strings.Contains(body, "2 (66.7%)") {
 		t.Fatalf("dashboard did not show review's per-primitive error count: %s", body)
@@ -97,7 +126,7 @@ func TestHandlerShowsAvailablePrimitivesWithoutUsage(t *testing.T) {
 	if err := primitives.Refresh(source, inventory.Discovery{Primitives: available, ProjectScanned: true}); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
-	Handler(source, primitives).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	Handler(source, primitives, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
 	body := response.Body.String()
 	for _, want := range []string{">available-skill<", "Unused primitives", "without any recorded activity"} {
 		if !strings.Contains(body, want) {
@@ -106,8 +135,88 @@ func TestHandlerShowsAvailablePrimitivesWithoutUsage(t *testing.T) {
 	}
 }
 
+// TestHandlerShowsARepositoryColumnPerRepository is DG-93 on the dashboard: the
+// same grain the terminal report renders, checked in the same change.
+func TestHandlerShowsARepositoryColumnPerRepository(t *testing.T) {
+	const labelled, unlabelled = "0123456789abcdef0123456789abcdef", "fedcba9876543210fedcba9876543210"
+	source := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	if _, err := source.Append([]record.Record{repoEvent("here", labelled), repoEvent("there", unlabelled)}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	primitives := inventory.New(filepath.Join(t.TempDir(), "primitives.json"))
+	discovered := inventory.Discovery{Primitives: []inventory.Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "review"}}, ProjectScanned: true}
+	if err := primitives.Refresh(source, discovered); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	response := httptest.NewRecorder()
+	Handler(source, primitives, repolabel.Labels{labelled: "agents-wake"}).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := response.Body.String()
+	for _, want := range []string{">Repo<", ">agents-wake<", ">repo-fedcba987654<"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard is missing %q: %s", want, body)
+		}
+	}
+}
+
+// TestHandlerShowsNoRepositoryColumnForUnusedPrimitives: the usage table has the
+// column, the unused table does not — an uninvoked primitive has no repository
+// (ADR-0002), so exactly one Repo header appears in a body rendering both tables.
+func TestHandlerShowsNoRepositoryColumnForUnusedPrimitives(t *testing.T) {
+	ok := record.OutcomeOK
+	source := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	if _, err := source.Append([]record.Record{event("one", &ok)}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	primitives := inventory.New(filepath.Join(t.TempDir(), "primitives.json"))
+	discovered := inventory.Discovery{Primitives: []inventory.Primitive{
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "review"},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "never-used"},
+	}, ProjectScanned: true}
+	if err := primitives.Refresh(source, discovered); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	response := httptest.NewRecorder()
+	Handler(source, primitives, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := response.Body.String()
+	for _, want := range []string{">review<", ">never-used<"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("dashboard did not render both tables (%q missing): %s", want, body)
+		}
+	}
+	if count := strings.Count(body, ">Repo<"); count != 1 {
+		t.Fatalf("Repo header count = %d, want 1 (the usage table only): %s", count, body)
+	}
+}
+
+func TestHandlerMakesNoClaimThatRepositoryLabelsAreNeverShown(t *testing.T) {
+	response := httptest.NewRecorder()
+	Handler(store.New(filepath.Join(t.TempDir(), "events.ndjson")), inventory.New(filepath.Join(t.TempDir(), "primitives.json")), nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := response.Body.String()
+	if strings.Contains(body, "repository labels") {
+		t.Fatalf("dashboard still claims repository labels are never shown: %s", body)
+	}
+	if !strings.Contains(body, "repository paths") {
+		t.Fatalf("dashboard dropped its claim about repository paths: %s", body)
+	}
+}
+
+func repoEvent(id string, repo record.Hash) record.Record {
+	r := event(id, nil)
+	r.Repo = repo
+	return r
+}
+
 func event(id string, outcome *record.Outcome) record.Record {
 	return record.Record{SchemaVersion: record.SchemaVersion, EventID: record.DeriveEventID("claude-code", record.Identifier(id)), Timestamp: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC), Harness: "claude-code", SessionID: "session-1", Repo: "0123456789abcdef0123456789abcdef", Kind: record.KindSkill, Name: "review", Invoker: record.InvokerModel, Outcome: outcome}
+}
+
+// sessionEnd is a session that invoked nothing: no outcome, no duration, and zero
+// counted calls (ADR-0002's session grain).
+func sessionEnd(sessionID record.Identifier) record.Record {
+	var zero int64
+	return record.Record{SchemaVersion: record.SchemaVersion, EventID: record.DeriveEventID("claude-code", sessionID+"\x1esession_end"), Timestamp: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC), Harness: "claude-code", SessionID: sessionID, Repo: "0123456789abcdef0123456789abcdef", Kind: record.KindSessionEnd, Name: "session", Invoker: record.InvokerAuto, ToolCalls: &zero, BuiltinToolCalls: &zero}
 }
 
 func TestListenBindsLoopbackOnly(t *testing.T) {
@@ -171,6 +280,7 @@ func TestPartialRequestDoesNotHoldTheConnection(t *testing.T) {
 	handler := Handler(
 		store.New(filepath.Join(t.TempDir(), "events.ndjson")),
 		inventory.New(filepath.Join(t.TempDir(), "primitives.json")),
+		nil,
 	)
 	go func() {
 		_ = serve(listener, handler, timeouts{Header: 50 * time.Millisecond, Read: 100 * time.Millisecond, Write: time.Second, Idle: 100 * time.Millisecond})

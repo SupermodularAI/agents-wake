@@ -40,7 +40,8 @@ type Staleness struct {
 func (s Staleness) enabled() bool { return s.Timeout > 0 && !s.Now.IsZero() }
 
 // SessionState is what one scan knows about the sessions it read: when each was
-// last active, and where in the source its earliest line sits.
+// last active, whether any source of it was read blind, and where in each source
+// its earliest line sits.
 //
 // It is the extension of the reader's existing pending-call buffer that ADR-0023
 // §2 asks for, at the session grain, and it is the one place the "this session is
@@ -48,47 +49,100 @@ func (s Staleness) enabled() bool { return s.Timeout > 0 && !s.Now.IsZero() }
 // if there is exactly one implementation of it. T121's ADR-0023 consumer calls
 // Closed here rather than deriving its own.
 //
+// It spans a whole walk, not one source. ADR-0036 establishes that Claude Code
+// splits one session id across several transcripts — the parent's file and one per
+// subagent — so liveness folded per file judges a session from a partial view.
+// Liveness is therefore walk-wide while byte offsets stay per source, which is why
+// the two folds have different grains below.
+//
 // It is in-memory scan state and nothing persists it: correctness comes from
 // event_id dedup, so losing it costs a slower scan and never wrong data
-// (ADR-0015). It holds a session id, a timestamp and a byte offset — no path, no
-// label and no transcript content (ADR-0007, ADR-0019, plan §4.2).
+// (ADR-0015). It holds a session id, a timestamp, a byte offset and a source
+// ordinal — no path, no label and no transcript content (ADR-0007, ADR-0019,
+// plan §4.2).
 //
 // The zero value is ready to use.
 type SessionState struct {
 	sessions map[record.Identifier]sessionActivity
+	offsets  map[sourceSession]int64
 }
 
-// sessionActivity is one session's two facts: the latest activity seen for it, and
-// the earliest byte offset any of its lines occupies.
+// sessionActivity is one session's walk-wide liveness: the latest activity seen
+// for it in any source, and whether any source carrying it was read blind.
 type sessionActivity struct {
 	lastActivity time.Time
-	firstOffset  int64
+	// blind marks a session some source of this scan could not be read completely
+	// for: that source held a line the reader could not rule out as the terminator
+	// of a buffered call. No rule that concludes silence may run for such a session
+	// — in that source or in any other — because the line it could not read may be
+	// exactly the evidence the session was alive (plan §3.3).
+	blind bool
 }
 
-// Observe folds one source line into its session's state. timestamp comes from the
-// transcript entry and offset from the line's position in the source.
+// sourceSession keys one session's earliest byte offset inside one source. The
+// source half is the ordinal the scan assigned that source in walk order, never a
+// path: an offset only means something relative to the file it was measured in,
+// and the reader is not allowed to know which file that is (ADR-0007, plan §4.2).
+type sourceSession struct {
+	source  int
+	session record.Identifier
+}
+
+// Observe folds one source line into its session's state. source is the ordinal of
+// the source being read, timestamp comes from the transcript entry and offset from
+// the line's position in that source.
 //
 // Latest activity is a max and earliest offset is a min rather than last-wins:
 // nothing in the format promises the entries are ordered, and a fold that depended
 // on the order could make two scans of one transcript disagree about one session.
-func (s *SessionState) Observe(sessionID record.Identifier, timestamp time.Time, offset int64) {
+//
+// The two folds have deliberately different grains. Latest activity is a max over
+// every source of the session, because a session writing in its parent transcript
+// is alive whatever its subagent files show (ADR-0036). The offset min is taken per
+// (source, session): a min over offsets measured in different files is a number
+// about nothing, and a cursor is per file.
+func (s *SessionState) Observe(source int, sessionID record.Identifier, timestamp time.Time, offset int64) {
 	if sessionID == "" || timestamp.IsZero() {
 		return
 	}
 	if s.sessions == nil {
 		s.sessions = map[record.Identifier]sessionActivity{}
 	}
-	activity, seen := s.sessions[sessionID]
-	if !seen {
-		s.sessions[sessionID] = sessionActivity{lastActivity: timestamp, firstOffset: offset}
-		return
+	if s.offsets == nil {
+		s.offsets = map[sourceSession]int64{}
 	}
-	if timestamp.After(activity.lastActivity) {
+	activity, seen := s.sessions[sessionID]
+	if !seen || timestamp.After(activity.lastActivity) {
 		activity.lastActivity = timestamp
 	}
-	if offset < activity.firstOffset {
-		activity.firstOffset = offset
+	s.sessions[sessionID] = activity
+
+	key := sourceSession{source: source, session: sessionID}
+	if first, held := s.offsets[key]; !held || offset < first {
+		s.offsets[key] = offset
 	}
+}
+
+// MarkBlind records that a source carrying this session held a line the reader
+// could not rule out as a terminator, so no rule that concludes silence may run
+// for it — in this source or in any other.
+//
+// The taint is per session rather than per walk because after ADR-0036 a session's
+// resolution spans every source that carries it: one source's blindness bears on
+// all of them, and only on them. A walk-wide switch would disable the staleness
+// rule and session_end derivation for every session on the machine over one
+// unreadable line.
+//
+// It marks only a session already observed. An unobserved session is never Closed
+// anyway — absence of evidence that a session is alive is not evidence it ended —
+// so there is nothing to hold back, and observing one here would invent activity
+// with no timestamp behind it.
+func (s *SessionState) MarkBlind(sessionID record.Identifier) {
+	activity, seen := s.sessions[sessionID]
+	if !seen {
+		return
+	}
+	activity.blind = true
 	s.sessions[sessionID] = activity
 }
 
@@ -111,33 +165,64 @@ func (s *SessionState) Closed(sessionID record.Identifier, stale Staleness) bool
 	return closed(activity, stale)
 }
 
-// CursorFloor reports how many observed sessions are still open and the earliest
-// byte offset any of them occupies.
+// OpenSessions counts observed sessions still open under stale, across every
+// source this scan read. It is walk-wide because liveness is: a session is open if
+// any of its sources shows recent activity (ADR-0036).
+func (s *SessionState) OpenSessions(stale Staleness) int {
+	open := 0
+	for _, activity := range s.sessions {
+		if !closed(activity, stale) {
+			open++
+		}
+	}
+	return open
+}
+
+// SourceFloor reports the earliest byte offset inside one source belonging to any
+// session still open — including a session open only because another source shows
+// recent activity for it.
 //
 // A future incremental cursor (T020, T102) must not advance past that offset:
 // ADR-0023 §5 generalizes ADR-0015's "a reader ... does not advance its cursor
-// past [an unterminated call]" from one call to one open session. The offset is
-// meaningful only when open is positive; it is zero otherwise, which floors a
-// caller that forgets to check at the start of the source — a slower scan, never
-// wrong data.
-func (s *SessionState) CursorFloor(stale Staleness) (open int, offset int64) {
-	for _, activity := range s.sessions {
-		if closed(activity, stale) {
+// past [an unterminated call]" from one call to one open session, and ADR-0036
+// widens the open-session question from one file to every file of the session. A
+// subagent transcript whose own lines all look quiet therefore keeps its floor
+// while the parent transcript shows the session running.
+//
+// open is false when this source holds no open session, in which case offset is
+// meaningless and is zero — which floors a caller that forgets to check at the
+// start of the source: a slower scan, never wrong data.
+func (s *SessionState) SourceFloor(source int, stale Staleness) (open bool, offset int64) {
+	for key, first := range s.offsets {
+		if key.source != source {
 			continue
 		}
-		if open == 0 || activity.firstOffset < offset {
-			offset = activity.firstOffset
+		if closed(s.sessions[key.session], stale) {
+			continue
 		}
-		open++
+		if !open || first < offset {
+			offset = first
+		}
+		open = true
 	}
 	return open, offset
 }
 
-// closed is the comparison itself, shared by both callers so there is one rule.
+// closed is the comparison itself, shared by every caller so there is one rule.
+//
+// A blind session is never closed, checked first: some source carrying it held a
+// line the reader could not rule out as a terminator, so its last activity is
+// known-understated rather than merely old, and concluding silence from that is
+// inferring a terminal outcome from blindness (plan §3.3). That check is what makes
+// the taint per session rather than per walk, while leaving resolveSessionSkills,
+// resolveStaleCalls and finishedSessions deciding exactly what they decided before.
 //
 // Strictly greater than the threshold: a session silent for exactly the threshold
 // is still open, which errs toward buffering.
 func closed(activity sessionActivity, stale Staleness) bool {
+	if activity.blind {
+		return false
+	}
 	if !stale.enabled() {
 		return false
 	}

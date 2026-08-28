@@ -7,6 +7,7 @@ import (
 
 	"github.com/SupermodularAI/agents-wake/internal/config"
 	"github.com/SupermodularAI/agents-wake/internal/inventory"
+	"github.com/SupermodularAI/agents-wake/internal/repolabel"
 	"github.com/SupermodularAI/agents-wake/internal/report"
 	"github.com/SupermodularAI/agents-wake/internal/store"
 	"github.com/SupermodularAI/agents-wake/internal/style"
@@ -43,7 +44,9 @@ func newReportCmd() *cobra.Command {
 			if refreshErr != nil {
 				return refreshErr
 			}
-			options := report.Options{Usage: usage, Unused: unused, Pretty: pretty}
+			// Resolved here because internal/cli is the only layer holding
+			// config.Paths: a renderer never reads the file the labels come from.
+			options := report.Options{Usage: usage, Unused: unused, Pretty: pretty, Labels: repolabel.Labels(config.ProjectLabels(paths))}
 			return report.Print(cmd.OutOrStdout(), events, primitives, options)
 		},
 	}

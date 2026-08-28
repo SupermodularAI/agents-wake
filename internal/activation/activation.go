@@ -61,17 +61,7 @@ const ingestLockName = "ingest.lock"
 // nobody measured and erase what an earlier import did find — the distinction ADR-0010
 // asks doctor to keep.
 func Init(paths config.Paths, root, claudeDir, executable string, full bool) (int, error) {
-	command, err := hookCommandFor(executable)
-	if err != nil {
-		return 0, err
-	}
-	// The refusals the settings file's shape decides say what the file's problem is
-	// and stop there, so the step that clears them is named here, by the command the
-	// user actually ran.
-	if settingsErr := checkSettingsShape(claudeDir); settingsErr != nil {
-		return 0, withSettingsFix(settingsErr, "then run wake init again")
-	}
-	repos, err := config.OpenRepos(paths)
+	repos, command, err := initPrologue(paths, claudeDir, executable)
 	if err != nil {
 		return 0, err
 	}
@@ -99,11 +89,79 @@ func Init(paths config.Paths, root, claudeDir, executable string, full bool) (in
 	if _, listErr := config.AddToList(paths, "scan.repos", id); listErr != nil {
 		return 0, listErr
 	}
+	return initEpilogue(paths, repos, claudeDir, command, root, full)
+}
+
+// InitGlobal records a machine-wide collection boundary and installs Wake's trigger.
+//
+// It registers no root of its own: the boundary encloses roots and is never one
+// (ADR-0032 §1, §7), and registering the directory the user stood in — most often the
+// home directory — would enclose every repository the boundary later discovers, which
+// ADR-0019 §5's nested-root refusal would then refuse. Every repository under it is
+// registered instead, under its own identity, as a scan first sees a session in it.
+//
+// It shares Init's prologue and epilogue exactly, so every refusal decidable from the
+// arguments alone is still raised before anything is written, and the trigger, the
+// hook counters and the inventory refresh are the same on both paths. What differs is
+// one call: Init registers a root, this records a boundary.
+//
+// full has the same meaning it has on Init, and the two facts it produces are
+// separate: the history under the boundary is imported now, and each repository the
+// import discovers still records the instant it was registered. The import is a
+// user-asked scan and ignores every recorded boundary already (ADR-0025), so nothing
+// needs clearing to make it work — clearing it would widen every later trigger's scan
+// with no disclosure behind it.
+func InitGlobal(paths config.Paths, boundary, claudeDir, executable string, full bool) (int, error) {
+	repos, command, err := initPrologue(paths, claudeDir, executable)
+	if err != nil {
+		return 0, err
+	}
+	if err := repos.SetGlobalRoot(boundary); err != nil {
+		return 0, err
+	}
+	// The boundary as the inventory root, which resolves to ProjectUnconsented
+	// (discoveryScope): the boundary is not a consented root, so project-local
+	// discovery is withheld for it. That is the honest answer rather than a gap —
+	// each repository under it gets project-local discovery once it is registered.
+	return initEpilogue(paths, repos, claudeDir, command, boundary, full)
+}
+
+// initPrologue raises every refusal decidable from the arguments alone and opens the
+// resolution table.
+//
+// It is the half of `init` that must run before anything is written, and it is shared
+// so the two entry points cannot drift on it: an installation that cannot host Wake's
+// trigger writes nothing at all, whether the user consented one repository or a whole
+// boundary.
+func initPrologue(paths config.Paths, claudeDir, executable string) (*config.Repos, string, error) {
+	command, err := hookCommandFor(executable)
+	if err != nil {
+		return nil, "", err
+	}
+	// The refusals the settings file's shape decides say what the file's problem is
+	// and stop there, so the step that clears them is named here, by the command the
+	// user actually ran.
+	if settingsErr := checkSettingsShape(claudeDir); settingsErr != nil {
+		return nil, "", withSettingsFix(settingsErr, "then run wake init again")
+	}
+	repos, err := config.OpenRepos(paths)
+	if err != nil {
+		return nil, "", err
+	}
+	return repos, command, nil
+}
+
+// initEpilogue installs the trigger and does whatever full asks for.
+//
+// inventoryRoot is the directory project-local primitive discovery is scoped to: the
+// consented root on Init's path, the boundary on InitGlobal's, where it resolves to
+// unconsented and withholds project-local discovery.
+func initEpilogue(paths config.Paths, repos *config.Repos, claudeDir, command, inventoryRoot string, full bool) (int, error) {
 	installed, err := installHooks(paths, claudeDir, command)
 	if err != nil {
-		// Wrapped for the same reason as the pre-check above: a file that changed
-		// shape in between is refused by the write's own read, and that refusal needs
-		// the same next step attached.
+		// Wrapped for the same reason as the pre-check in initPrologue: a file that
+		// changed shape in between is refused by the write's own read, and that refusal
+		// needs the same next step attached.
 		return 0, withSettingsFix(err, "then run wake init again")
 	}
 	counters := health.New(paths.HealthFile)
@@ -119,6 +177,13 @@ func Init(paths config.Paths, root, claudeDir, executable string, full bool) (in
 	}
 
 	events := store.New(filepath.Join(paths.DataDir, eventsFile))
+	// Once, before either branch. The walk is handed these names as data and the
+	// inventory snapshot below publishes the same pass, so discovery's cost — a read of
+	// every transcript under the harness directory for the consented root's listings —
+	// is paid one time (ADR-0016). Moving it ahead of the walk is behaviour-preserving:
+	// it reads installed primitives from disk, which the walk does not modify, and
+	// Refresh still reads the spool afterwards.
+	discovered := discoverPrimitives(repos, claudeDir, inventoryRoot)
 	if !full {
 		// No walk, and deliberately no scan record either. RecordScan replaces the
 		// scan counters wholesale (internal/health), so a zero-valued health.Scan
@@ -127,13 +192,14 @@ func Init(paths config.Paths, root, claudeDir, executable string, full bool) (in
 		// `wake ingest` actually found.
 		//
 		// Not calling the import is only half of forward-only; the other half is the
-		// boundary recorded above, which is what the trigger's own scan honours. The
-		// boundary is not a cursor and does not stand in for one: it says what the user
-		// consented to, never what has been seen, so re-scanning stays safe for the
+		// boundary recorded by the caller, which is what the trigger's own scan honours.
+		// The boundary is not a cursor and does not stand in for one: it says what the
+		// user consented to, never what has been seen, so re-scanning stays safe for the
 		// reason it always was (ADR-0004, ADR-0015).
-		return 0, refreshInventory(paths, repos, claudeDir, root, events)
+		return 0, refreshInventory(paths, events, discovered)
 	}
-	written, scan, err := importHistory(repos, claudeDir, events, staleness(paths), wholeHistory)
+	stale, idle := thresholds(paths)
+	written, scan, err := scanWithBoundary(paths, repos, claudeDir, events, installedFrom(discovered), stale, idle, wholeHistory)
 	// The counters are recorded whether the scan succeeded or not: a partial
 	// activation — hooks written, history import failed — is reported through
 	// doctor rather than repaired silently, and the counters are the report.
@@ -143,7 +209,7 @@ func Init(paths config.Paths, root, claudeDir, executable string, full bool) (in
 	if err != nil {
 		return written, err
 	}
-	return written, refreshInventory(paths, repos, claudeDir, root, events)
+	return written, refreshInventory(paths, events, discovered)
 }
 
 // Ingest imports available transcripts for consented repositories only.
@@ -174,14 +240,21 @@ func ingestScoped(paths config.Paths, claudeDir string, scope collectionScope) (
 		return 0, fmt.Errorf("resolving current directory: %w", err)
 	}
 	events := store.New(filepath.Join(paths.DataDir, eventsFile))
-	written, scan, err := importHistory(repos, claudeDir, events, staleness(paths), scope)
+	// One discovery for this command, shared by the walk and the refresh below, for the
+	// reason discoverPrimitives states.
+	discovered := discoverPrimitives(repos, claudeDir, root)
+	// Through the sequencer, so a user-asked scan picks up a repository the boundary
+	// encloses that no scan has seen a session in yet — requirement 6's "not only the
+	// ones present when --global ran".
+	stale, idle := thresholds(paths)
+	written, scan, err := scanWithBoundary(paths, repos, claudeDir, events, installedFrom(discovered), stale, idle, scope)
 	if recordErr := health.New(paths.HealthFile).RecordScan(scan); recordErr != nil && err == nil {
 		err = recordErr
 	}
 	if err != nil {
 		return written, err
 	}
-	return written, refreshInventory(paths, repos, claudeDir, root, events)
+	return written, refreshInventory(paths, events, discovered)
 }
 
 // Trigger is the scan the Claude Code hook causes, and it is single-flight: a
@@ -261,30 +334,42 @@ func Uninstall(paths config.Paths, claudeDir string, purge bool) (bool, error) {
 	return removed > 0, nil
 }
 
-// staleness resolves ADR-0015's staleness rule for one scan: the configured
-// threshold, and the instant to compare last activity against.
+// thresholds resolves the two rules one scan runs on: ADR-0015's staleness rule,
+// and ADR-0034's session-end inference. Each is a configured threshold plus the
+// instant to compare last activity against.
 //
-// scan.stale_call_timeout is the only threshold read, and it governs both the
-// interrupted emission and the session-close determination the reader shares with
-// its other caller — ADR-0023 §3: "no second threshold is introduced".
-// session.idle_timeout is a different tunable (ADR-0014's session-end inference,
-// for the session grain's ended_at) and is deliberately not read here.
+// Two keys, two rules, no overlap. scan.stale_call_timeout governs the interrupted
+// emission and the session-close determination the reader shares with its other
+// caller — ADR-0023 §3's "no second threshold is introduced" holds for *that* rule,
+// and this does not introduce one into it. session.idle_timeout answers a different
+// question about a different record: when a session id is believed finished, so the
+// session grain's one record can be derived (ADR-0034 §1). Neither value is
+// calibrated (ADR-0014), and nothing derived from either is reported as a duration.
+//
+// One config.Load and one clock for the whole scan, so both rules judge every
+// session against the same instant. Each key is resolved independently: a
+// session.idle_timeout this build cannot read derives no session_end without
+// disabling the staleness rule, and the other way round.
 //
 // A config file this build cannot read, or a value it cannot use, leaves the rule
-// disabled rather than guessing a threshold: emitting interrupted too early is
-// permanent (ADR-0015 rejects upsert, ADR-0004 deduplicates), so a scan that cannot
-// read its own threshold buffers instead. The value is uncalibrated and provisional
-// (ADR-0014), which is why nothing derived from it is reported as a duration.
-func staleness(paths config.Paths) claudecode.Staleness {
+// disabled rather than guessing a threshold. Both records are permanent once
+// written — ADR-0015 rejects upsert and ADR-0004 deduplicates the correction away —
+// so a scan that cannot read its own threshold defers instead.
+func thresholds(paths config.Paths) (claudecode.Staleness, claudecode.Idleness) {
 	settings, err := config.Load(paths)
 	if err != nil {
-		return claudecode.Staleness{}
+		return claudecode.Staleness{}, claudecode.Idleness{}
 	}
-	timeout, usable, err := settings.Duration("scan.stale_call_timeout")
-	if err != nil || !usable {
-		return claudecode.Staleness{}
+	now := time.Now().UTC()
+	stale := claudecode.Staleness{}
+	if timeout, usable, err := settings.Duration("scan.stale_call_timeout"); err == nil && usable {
+		stale = claudecode.Staleness{Timeout: timeout, Now: now}
 	}
-	return claudecode.Staleness{Timeout: timeout, Now: time.Now().UTC()}
+	idle := claudecode.Idleness{}
+	if timeout, usable, err := settings.Duration("session.idle_timeout"); err == nil && usable {
+		idle = claudecode.Idleness{Timeout: timeout, Now: now}
+	}
+	return stale, idle
 }
 
 // collectionScope decides which of a consented repository's events one scan may
@@ -316,10 +401,19 @@ const (
 // judged against the same table and the same boundaries (ADR-0019 §1). The id is
 // returned even when the answer is no: the reader ignores it, and computing it
 // unconditionally keeps this function a pure question about consent.
-func resolverFor(repos *config.Repos, scope collectionScope) claudecode.Resolver {
+//
+// discover is where a working directory the recorded global root encloses is noted, and
+// noting is all that happens: no git, no os.Stat, no registration on this path
+// (ADR-0032 §5). Registering here would judge two events of one scan against two
+// different tables. It is nil when there is nothing to collect for, and observe treats
+// a nil collector as a no-op.
+func resolverFor(repos *config.Repos, scope collectionScope, discover *boundaryDiscovery) claudecode.Resolver {
 	return func(cwd string, at time.Time) (record.Hash, bool) {
 		identity, err := repos.Identify(cwd)
 		if err != nil || !identity.Matched {
+			if err == nil {
+				discover.observe(cwd)
+			}
 			return record.Hash(identity.ID), false
 		}
 		if scope == wholeHistory {
@@ -347,10 +441,20 @@ var importHistory = ingestHistory
 // rather than an error that breaks the command (plan §4.3). Swallowed and
 // uncounted, though, they are indistinguishable from a machine with no history —
 // which is the confusion ADR-0010 asks doctor to end.
-func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Store, stale claudecode.Staleness, scope collectionScope) (int, health.Scan, error) {
+func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Store, installed claudecode.Installed, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope, discover *boundaryDiscovery) (int, health.Scan, error) {
 	written := 0
 	scan := health.Scan{At: time.Now().UTC(), RefusedProjects: repos.DroppedEntries()}
-	resolve := resolverFor(repos, scope)
+	resolve := resolverFor(repos, scope, discover)
+	// One scan for the whole walk, not one per transcript. Claude Code writes one
+	// session id into several files — the parent's and one per subagent — so a reader
+	// whose session state died with each file judged every session from a partial view:
+	// it closed a session another file showed running and wrote one partial session_end
+	// per file instead of one per session, permanently, because ADR-0015 rejects upsert
+	// and ADR-0004 deduplicates the correction away (ADR-0036 §Consequences).
+	//
+	// The Namer is hoisted with it. It was already constant across the walk — it is
+	// derived from the one name key — so building it once is the same value.
+	transcripts := ingest.NewClaudeCodeScan(resolve, record.NewNamer(repos.NameKey()), installed, stale, idle, destination)
 	err := filepath.WalkDir(filepath.Join(claudeDir, "projects"), func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			// "Not there" arrives by this same route as "could not be read":
@@ -374,50 +478,95 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 			return nil
 		}
 		defer file.Close()
-		result, ingestErr := ingest.ClaudeCode(file, resolve, record.NewNamer(repos.NameKey()), stale, destination)
+		result, ingestErr := transcripts.Read(file)
 		if ingestErr != nil {
 			scan.ParseErrors++
 			return nil
 		}
 		scan.ParseErrors += result.Malformed
-		// A call the reader could not name is collection that was lost: the primitive
-		// was invoked, the line was perfectly readable, and no number carries it.
+		// An invocation a validated field refused — the reader could not name the
+		// primitive, or the entrypoint carried a value outside Wake's vocabulary — is
+		// collection that was lost: the primitive was invoked, the line was perfectly
+		// readable, and no number carries it.
 		// Counted here so doctor can say so — a harness renaming the field a
 		// primitive's identity lives in would otherwise stop collection in silence
 		// while doctor still reported "collecting" (plan §3.3, §12).
 		scan.RefusedCalls += result.Refused
-		// Two different facts, deliberately two counters. Pending is a call whose
-		// session may still be running — transient, and not a fault. Interrupted is a
-		// call whose session went quiet past the threshold, so the invocation is now
-		// in the store carrying the outcome that says it never finished (ADR-0015).
-		// Neither is lost collection, so neither joins doctor's "collects nothing" arm.
-		scan.PendingCalls += result.Pending
-		scan.InterruptedCalls += result.Interrupted
-		// Uncertainty, not lost collection and not an invocation: the record is in the
-		// store, and this says how many further attributed runs for the same session and
-		// skill it stood in for (ADR-0023).
-		scan.AmbiguousSkillRuns += result.AmbiguousSkillRuns
-		if result.Parsed == 0 && result.Refused == 0 {
-			// Read successfully and yielded no terminal event — most often because
-			// its working directory belongs to no consented repository, sometimes
-			// because every call in it is still unterminated and not yet stale
-			// (ADR-0015) — a transcript whose stale calls did resolve has parsed
-			// records and is not skipped. Either way it is a clean zero, not a
-			// failure, and the two must not share a counter. A transcript whose every
-			// call was refused is deliberately not one of those: doctor reports
-			// Skipped as an honest zero, and that transcript is the opposite of one.
-			scan.Skipped++
-		}
+		// A typed invocation whose name is not a primitive this machine has. It is a clean
+		// zero rather than lost collection — a typed CLI built-in was never Wake's to
+		// collect — but it is reported rather than silent, because the injected set is
+		// fallible (ADR-0036 §3). Added per source, like RefusedCalls: the tag is judged
+		// entirely within the line it is on, so Close has no half to contribute.
+		scan.SkippedTypedInvocations += result.SkippedTypedInvocations
+		// Pending, Interrupted, AmbiguousSkillRuns and Skipped are deliberately not
+		// folded here. None of the four is knowable from one transcript any more: a call
+		// unterminated in this file may be terminated in the next, and a session quiet
+		// here may be running there. The scan answers all four once, below.
 		scan.EventsWritten += result.Written
 		written += result.Written
 		return nil
 	})
-	if errors.Is(err, fs.ErrNotExist) {
-		// No projects directory at all: nothing was there to read, which is a clean
-		// zero rather than something unreadable.
-		return written, scan, nil
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		// A truncated walk has not seen every source of every session, so resolving now
+		// would judge a session closed from a partial view — permanently, since ADR-0015
+		// rejects upsert and ADR-0004 deduplicates the correction away. Deferring to the
+		// next scan costs a slower scan and never a wrong record.
+		return written, scan, err
 	}
-	return written, scan, err
+	// Resolved once, over the union of every transcript the walk read. With no projects
+	// directory at all this read no source, so it derives nothing and store.Append on
+	// an empty slice creates no spool — the same clean zero that arm reported before.
+	final, closeErr := transcripts.Close()
+	if closeErr != nil {
+		return written, scan, closeErr
+	}
+	// A subagent transcript that declares no usable name is refused at the closure
+	// boundary, not while its own lines are read (ADR-0036 §2, ADR-0015), so leaving it
+	// unfolded would report lost collection as a clean zero — the silence plan §3.3 and
+	// §12 exist to prevent.
+	//
+	// Assigned, not added: only the closure boundary judges a subagent run, so there is
+	// no per-source half to add to — the shape Pending and Interrupted below already
+	// have.
+	//
+	// Its own counter rather than RefusedCalls, because doctor reads the two
+	// differently. RefusedCalls is what a source's own line could not be used for, and a
+	// harness renaming the field a primitive's identity lives in is exactly that, so it
+	// blinds the integration state. This one is a standing fact about a transcript that
+	// no scan will ever see differently — ADR-0036 §2 refuses to name those runs and
+	// there is no incremental cursor, so every scan refuses the same ones again — and
+	// folding it into that arm would put every machine that runs subagents permanently
+	// into "collects nothing" while thousands of records are written (health.Diagnose).
+	scan.RefusedSubagentRuns = final.RefusedSubagentRuns
+	// Two different facts, deliberately two counters. Pending is a call whose session
+	// may still be running — transient, and not a fault. Interrupted is a call whose
+	// session went quiet past the threshold, so the invocation is now in the store
+	// carrying the outcome that says it never finished (ADR-0015). Neither is lost
+	// collection, so neither joins doctor's "collects nothing" arm.
+	scan.PendingCalls = final.Pending
+	scan.InterruptedCalls = final.Interrupted
+	// Uncertainty, not lost collection and not an invocation: the record is in the
+	// store, and this says how many further attributed runs for the same session and
+	// skill it stood in for (ADR-0023).
+	scan.AmbiguousSkillRuns = final.AmbiguousSkillRuns
+	// A transcript read successfully that yielded no terminal event — most often
+	// because its working directory belongs to no consented repository, sometimes
+	// because every call in it is still unterminated and not yet stale (ADR-0015). It
+	// is a clean zero, not a failure, and the two must not share a counter. A
+	// transcript whose every call was refused is deliberately not one of those: doctor
+	// reports Skipped as an honest zero, and that transcript is the opposite of one.
+	//
+	// The decision moved out of the walk callback because it stopped being answerable
+	// there. After ADR-0036 a transcript's contribution can resolve after the walk — a
+	// stale call given up on, a share of a session's session_end totals — so "parsed
+	// nothing and refused nothing" at the end of its own read no longer separates an
+	// honest zero from a deferral. SkippedSources is the counter that does: it credits
+	// each source with what it derived, what it refused, and what the resolution
+	// attributed back to it.
+	scan.Skipped = final.SkippedSources
+	scan.EventsWritten += final.Written
+	written += final.Written
+	return written, scan, nil
 }
 
 // DiscoveryScope resolves which Claude Code discovery paths cwd may read.
@@ -456,9 +605,40 @@ func discoveryScope(repos *config.Repos, claudeDir, cwd string) (inventory.Scope
 	return inventory.Scope{ClaudeDir: claudeDir, Root: root, Project: inventory.ProjectConsented}, names
 }
 
-func refreshInventory(paths config.Paths, repos *config.Repos, claudeDir, root string, events *store.Store) error {
+// discoverPrimitives runs Claude Code's primitive discovery once for one command.
+//
+// One pass, two consumers: the ingest walk, which is handed the installed names as data
+// because ADR-0036 §3 admits a typed invocation's name only if the machine has a
+// primitive under it and ADR-0019 §1 forbids the reader from looking; and the persisted
+// inventory snapshot refreshInventory publishes afterwards. One pass rather than two
+// because discovery reads every transcript under the harness directory for the consented
+// root's listings (inventory.scanListings), and the hook-fired scan may not pay for that
+// twice (ADR-0016).
+//
+// This is the caller's side of ADR-0019 §1's line: the filesystem is read here, and what
+// crosses into the adapter is a value. Discovery returns no error — an unreadable source
+// contributes nothing — so a partial inventory costs a typed invocation on the skip
+// counter and never a failure (plan §4.3).
+func discoverPrimitives(repos *config.Repos, claudeDir, root string) inventory.Discovery {
 	scope, names := discoveryScope(repos, claudeDir, root)
-	return inventory.New(paths.PrimitivesFile).Refresh(events, inventory.ClaudeCodeInScope(scope, names))
+	return inventory.ClaudeCodeInScope(scope, names)
+}
+
+// installedFrom folds one discovery into the lookup the Claude Code reader is handed.
+//
+// The harness field is dropped rather than filtered: this discovery is Claude Code's
+// own, so every primitive in it is that harness's. Nothing but a bounded name and a kind
+// crosses (ADR-0007).
+func installedFrom(discovered inventory.Discovery) claudecode.Installed {
+	primitives := make([]claudecode.InstalledPrimitive, 0, len(discovered.Primitives))
+	for _, primitive := range discovered.Primitives {
+		primitives = append(primitives, claudecode.InstalledPrimitive{Name: primitive.Name, Kind: primitive.Kind})
+	}
+	return claudecode.NewInstalled(primitives)
+}
+
+func refreshInventory(paths config.Paths, events *store.Store, discovered inventory.Discovery) error {
+	return inventory.New(paths.PrimitivesFile).Refresh(events, discovered)
 }
 
 // AllRepoRoots resolves the Namer together with the canonical root of every

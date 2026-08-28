@@ -14,20 +14,17 @@ import (
 //	func init() { register(Key{Name: "ui.default_window", ...}) }
 //
 // Registration is an append from a separate file for the same mechanical reason
-// internal/cli/registry.go uses one for subcommands, and one more besides.
-// ADR-0012 compiles remote delivery out rather than configuring it off, so
-// T090's remote.* group arrives as a build-tagged file — keys_remote.go with
-// `//go:build remote` — and the default build must expose none of those keys. A
-// closed literal here would force T090 to edit this file and guard the entries
-// some other way, which is precisely the "configured off" shape ADR-0012
-// rejects.
+// internal/cli/registry.go uses one for subcommands: a closed literal here would
+// make every key group a shared-file edit, so two lanes adding unrelated keys in
+// parallel would conflict on the same line for no design reason. keys.go and
+// keys_remote.go each own their own group and neither touches this file.
 //
 // Access is unsynchronised by design: init() runs before any goroutine of ours,
 // and nothing appends afterwards.
 var keys []Key
 
 // Kind is how a setting's value is spelled, and therefore how it is validated.
-// There are two because the seven keys need two: a duration (possibly a sentinel
+// There are two because the eight keys need two: a duration (possibly a sentinel
 // word) or a list of strings.
 type Kind int
 

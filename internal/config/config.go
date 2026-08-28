@@ -1,5 +1,5 @@
 // Package config owns every location and every setting this tool has, and it is
-// the only package that touches the two sensitive files behind them.
+// the only package that touches the three sensitive files behind them.
 //
 // It answers three questions and nothing else:
 //
@@ -9,7 +9,12 @@
 //   - what the settings are — the key registry, with Load, Get and Set over
 //     config.toml;
 //   - which repository an observed working directory belongs to — OpenRepos and
-//     Identify, over a salted hash of a consented root (ADR-0019).
+//     Identify, over a salted hash of a consented root (ADR-0019) — and, since
+//     ADR-0032, whether the machine-wide collection boundary encloses that
+//     directory at all: SetGlobalRoot, WithinGlobalRoot and
+//     RegisterUnderGlobalRoot, over a keyed digest of the recorded boundary. The
+//     boundary answers consent, never identity: nothing resolves to it, and it is
+//     recorded beside the table rather than in it.
 //
 // All access to repo-salt and projects.json stays inside this package. Those two
 // files are the only ones in the system holding a secret and real repository

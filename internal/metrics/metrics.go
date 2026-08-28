@@ -49,11 +49,17 @@ func (r Ratio) Percent() (float64, bool) {
 	return float64(r.numerator) / float64(r.denominator) * 100, true
 }
 
-// PrimitiveUsage is one primitive's observed activity.
+// PrimitiveUsage is one primitive's observed activity in one repository. Repo
+// is part of the grain, not a label on it: an invocation happened in exactly one
+// repository (ADR-0002), so a primitive used in two of them is two rows, each
+// with its own counts and its own rate denominator (ADR-0006). Repo is the
+// salted id, never a readable name — internal/repolabel is where a renderer
+// turns it into a cell.
 type PrimitiveUsage struct {
 	Name        record.Identifier
 	Kind        record.Kind
 	Harness     record.Identifier
+	Repo        record.Hash
 	Invoker     record.Invoker
 	ViaAgent    record.Identifier
 	Invocations uint64
@@ -72,6 +78,15 @@ type Summary struct {
 	Primitives   []PrimitiveUsage
 }
 
+// Observed reports whether the aggregate saw any terminal record at all. It is the
+// question a renderer's empty state means to ask, and it lives here because the
+// answer is not "Invocations == 0": a session-grain record is terminal evidence that
+// counts toward Sessions and nothing else (see Aggregate), so a session with zero
+// primitive use — the plan §2.7 baseline — has been observed while every invocation
+// count is still zero. Re-deriving this per renderer is what made `wake report` and
+// the dashboard claim an empty store over exactly that session.
+func (s Summary) Observed() bool { return s.Invocations > 0 || s.Sessions > 0 }
+
 // Aggregate derives the MVP's metrics from terminal records. Unknown outcomes
 // remain usage evidence but are excluded from health-rate denominators.
 //
@@ -81,6 +96,13 @@ type Summary struct {
 // population USED PRIMITIVES lists below them; a session's ordinary tool calls
 // outnumber its primitive calls and would otherwise dominate every rate with
 // activity the primitive table never shows.
+//
+// Session-grain records (ADR-0002) are excluded from the same counts for a
+// different reason: they are not invocations of anything. One counts toward the
+// session population and the last-observed instant — which is what makes a session
+// with no primitive use visible at all, the plan §2.7 baseline — and toward nothing
+// else. Its Sessions figure therefore includes sessions no primitive row accounts
+// for, which is the point.
 func Aggregate(records []record.Record) Summary {
 	summary := Summary{Outcomes: make(map[record.Outcome]uint64)}
 	allSessions := make(map[record.Identifier]struct{})
@@ -88,7 +110,25 @@ func Aggregate(records []record.Record) Summary {
 	var known, unknown, failures uint64
 
 	for _, event := range records {
-		if !record.IsTerminal(event) || event.Kind == record.KindBuiltinTool {
+		if !record.IsTerminal(event) {
+			continue
+		}
+		// A session-grain record is evidence that a session existed and nothing else.
+		// It is the plan §2.7 baseline — a session with zero primitive use is exactly
+		// the row that makes every rate above it meaningful — so it counts toward the
+		// session population and the last-observed instant, and toward nothing else:
+		// not Invocations, not an outcome tally, and never a primitive of its own
+		// (ADR-0002, ADR-0006). A primitive named "session" would read as something the
+		// user invoked, and its absent outcome would be excluded from a rate it was
+		// never in the denominator of.
+		if record.IsSessionGrain(event.Kind) {
+			allSessions[event.SessionID] = struct{}{}
+			if event.Timestamp.After(summary.LastObserved) {
+				summary.LastObserved = event.Timestamp
+			}
+			continue
+		}
+		if event.Kind == record.KindBuiltinTool {
 			continue
 		}
 		summary.Invocations++
@@ -106,10 +146,10 @@ func Aggregate(records []record.Record) Summary {
 			}
 		}
 
-		key := primitiveKey{name: event.Name, kind: event.Kind, harness: event.Harness, invoker: event.Invoker, viaAgent: event.ViaAgent}
+		key := primitiveKey{name: event.Name, kind: event.Kind, harness: event.Harness, repo: event.Repo, invoker: event.Invoker, viaAgent: event.ViaAgent}
 		accumulator := primitives[key]
 		if accumulator == nil {
-			accumulator = &primitiveAccumulator{PrimitiveUsage: PrimitiveUsage{Name: event.Name, Kind: event.Kind, Harness: event.Harness, Invoker: event.Invoker, ViaAgent: event.ViaAgent}, sessions: map[record.Identifier]struct{}{}}
+			accumulator = &primitiveAccumulator{PrimitiveUsage: PrimitiveUsage{Name: event.Name, Kind: event.Kind, Harness: event.Harness, Repo: event.Repo, Invoker: event.Invoker, ViaAgent: event.ViaAgent}, sessions: map[record.Identifier]struct{}{}}
 			primitives[key] = accumulator
 		}
 		accumulator.Invocations++
@@ -136,7 +176,7 @@ func Aggregate(records []record.Record) Summary {
 		summary.Primitives = append(summary.Primitives, accumulator.PrimitiveUsage)
 	}
 	slices.SortFunc(summary.Primitives, func(left, right PrimitiveUsage) int {
-		return cmp.Or(cmp.Compare(right.Invocations, left.Invocations), cmp.Compare(string(left.Harness), string(right.Harness)), cmp.Compare(string(left.Name), string(right.Name)), cmp.Compare(string(left.Invoker), string(right.Invoker)), cmp.Compare(string(left.ViaAgent), string(right.ViaAgent)))
+		return cmp.Or(cmp.Compare(right.Invocations, left.Invocations), cmp.Compare(string(left.Harness), string(right.Harness)), cmp.Compare(string(left.Name), string(right.Name)), cmp.Compare(string(left.Repo), string(right.Repo)), cmp.Compare(string(left.Invoker), string(right.Invoker)), cmp.Compare(string(left.ViaAgent), string(right.ViaAgent)))
 	})
 	return summary
 }
@@ -145,6 +185,7 @@ type primitiveKey struct {
 	name     record.Identifier
 	kind     record.Kind
 	harness  record.Identifier
+	repo     record.Hash
 	invoker  record.Invoker
 	viaAgent record.Identifier
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/SupermodularAI/agents-wake/internal/inventory"
 	"github.com/SupermodularAI/agents-wake/internal/metrics"
 	"github.com/SupermodularAI/agents-wake/internal/record"
+	"github.com/SupermodularAI/agents-wake/internal/repolabel"
 	"github.com/SupermodularAI/agents-wake/internal/store"
 )
 
@@ -25,7 +26,13 @@ var page = template.Must(template.ParseFS(assets, "dashboard.html"))
 // Handler serves a server-rendered dashboard. Every request reads the event
 // spool and the latest primitive snapshot, so hook-driven refreshes appear
 // without restarting the dashboard.
-func Handler(source *store.Store, primitives *inventory.Store) http.Handler {
+//
+// labels is resolved once by the caller rather than per request: a renderer may
+// not read the file it comes from (ADR-0019 confines that to internal/config).
+// So a repository consented to while the dashboard is running shows its id
+// rather than its new label until the next `wake serve` — deliberate, and never
+// blank (repolabel.Display's contract). A nil map is valid.
+func Handler(source *store.Store, primitives *inventory.Store, labels repolabel.Labels) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/" {
 			http.NotFound(writer, request)
@@ -46,7 +53,7 @@ func Handler(source *store.Store, primitives *inventory.Store) http.Handler {
 			return
 		}
 		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := page.Execute(writer, view(metrics.Aggregate(records), available)); err != nil {
+		if err := page.Execute(writer, view(metrics.Aggregate(records), available, labels)); err != nil {
 			return
 		}
 	})
@@ -77,8 +84,8 @@ func Listen(port int) (net.Listener, error) {
 
 // Serve serves the dashboard over an already-bound listener, with every request
 // phase bounded.
-func Serve(listener net.Listener, source *store.Store, primitives *inventory.Store) error {
-	return serve(listener, Handler(source, primitives), defaultTimeouts())
+func Serve(listener net.Listener, source *store.Store, primitives *inventory.Store, labels repolabel.Labels) error {
+	return serve(listener, Handler(source, primitives, labels), defaultTimeouts())
 }
 
 // serve exists so a test can bound the phases in milliseconds instead of seconds.
@@ -108,10 +115,10 @@ type dashboardView struct {
 	Unused       []primitiveView
 }
 
-type primitiveView struct{ Name, Kind, Harness, LastUsed, Invocations, Errors string }
+type primitiveView struct{ Name, Kind, Harness, Repo, LastUsed, Invocations, Errors string }
 
-func view(summary metrics.Summary, available []inventory.Usage) dashboardView {
-	result := dashboardView{Empty: summary.Invocations == 0 && len(available) == 0, Invocations: number(summary.Invocations), Sessions: number(summary.Sessions), ErrorRate: rate(summary.ErrorRate), ErrorDetail: ratioDetail(summary.ErrorRate)}
+func view(summary metrics.Summary, available []inventory.Usage, labels repolabel.Labels) dashboardView {
+	result := dashboardView{Empty: !summary.Observed() && len(available) == 0, Invocations: number(summary.Invocations), Sessions: number(summary.Sessions), ErrorRate: rate(summary.ErrorRate), ErrorDetail: ratioDetail(summary.ErrorRate)}
 	if !summary.LastObserved.IsZero() {
 		result.Updated = "Last observed " + summary.LastObserved.Local().Format("2006-01-02 15:04")
 		result.LastObserved = summary.LastObserved.Local().Format("Jan 02")
@@ -120,7 +127,7 @@ func view(summary metrics.Summary, available []inventory.Usage) dashboardView {
 		result.LastObserved = "-"
 	}
 	for _, primitive := range available {
-		view := primitiveView{Name: string(primitive.Name), Kind: strings.ReplaceAll(string(primitive.Kind), "_", " "), Harness: string(primitive.Harness), Invocations: number(primitive.Invocations)}
+		view := primitiveView{Name: string(primitive.Name), Kind: strings.ReplaceAll(string(primitive.Kind), "_", " "), Harness: string(primitive.Harness), Repo: labels.Display(primitive.Repo), Invocations: number(primitive.Invocations)}
 		if primitive.Invocations == 0 {
 			result.Unused = append(result.Unused, view)
 			continue

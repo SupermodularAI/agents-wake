@@ -4,6 +4,8 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -48,6 +50,60 @@ func TestOutcomeHasNoSuccessZeroValue(t *testing.T) {
 	}
 }
 
+func TestEntrypointHasNoDefaultMember(t *testing.T) {
+	for _, member := range []Entrypoint{EntrypointCLI, EntrypointSDKPython, EntrypointSDKCLI} {
+		if Entrypoint("") == member {
+			t.Fatalf("zero Entrypoint must not mean %q", member)
+		}
+	}
+}
+
+func TestValidateAcceptsEveryEntrypointMember(t *testing.T) {
+	for _, member := range []Entrypoint{EntrypointCLI, EntrypointSDKPython, EntrypointSDKCLI} {
+		candidate := validRecord()
+		candidate.Entrypoint = member
+		if err := Validate(candidate); err != nil {
+			t.Errorf("Validate() rejected Entrypoint = %q: %v", member, err)
+		}
+	}
+}
+
+func TestValidateAcceptsAnAbsentEntrypoint(t *testing.T) {
+	candidate := validRecord()
+	if candidate.Entrypoint != "" {
+		t.Fatalf("validRecord() presets Entrypoint = %q", candidate.Entrypoint)
+	}
+	// Both halves of "absence is omission" (C5), asserted directly rather than
+	// through Marshal's internal validation: absence validates, and it leaves no key.
+	if err := Validate(candidate); err != nil {
+		t.Fatalf("Validate() rejected an absent entrypoint: %v", err)
+	}
+	encoded, err := Marshal(candidate)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if strings.Contains(string(encoded), "entrypoint") {
+		t.Fatalf("Marshal() emitted an absent entrypoint: %s", encoded)
+	}
+}
+
+func TestValidateRejectsAnUnknownEntrypoint(t *testing.T) {
+	values := []string{"sdk-py", "sdk-cli", "sdk-ts", "CLI", "cli ", "vscode", "sdk_py"}
+	for _, value := range hostileIdentifiers {
+		if value == "" {
+			continue
+		}
+		values = append(values, value)
+	}
+	for _, value := range values {
+		candidate := validRecord()
+		candidate.Entrypoint = Entrypoint(value)
+		if err := Validate(candidate); err == nil {
+			t.Errorf("Validate() accepted Entrypoint = %q", value)
+		}
+	}
+}
+
 func TestMarshalIsDeterministic(t *testing.T) {
 	record := validRecord()
 	first, err := Marshal(record)
@@ -86,6 +142,49 @@ func validRecord() Record {
 		Name:          "review",
 		Invoker:       InvokerModel,
 		Outcome:       &outcome,
+	}
+}
+
+// TestValidateNamesAnUnreadableSchemaVersion pins the one refusal a caller has to
+// be able to tell apart. Everything else Validate refuses is a record that was
+// always invalid; a foreign version is a record an earlier build wrote correctly,
+// and the store rebuilds for it rather than silently reading past it.
+func TestValidateNamesAnUnreadableSchemaVersion(t *testing.T) {
+	stale := validRecord()
+	stale.SchemaVersion = SchemaVersion - 1
+	if err := Validate(stale); !errors.Is(err, ErrUnsupportedVersion) {
+		t.Fatalf("Validate() error = %v, want ErrUnsupportedVersion", err)
+	}
+
+	future := validRecord()
+	future.SchemaVersion = SchemaVersion + 1
+	if err := Validate(future); !errors.Is(err, ErrUnsupportedVersion) {
+		t.Fatalf("Validate() on a future version error = %v, want ErrUnsupportedVersion", err)
+	}
+
+	// A record of this version that is invalid for any other reason must not be
+	// mistaken for one, or a scan would rebuild the whole spool over one bad line.
+	broken := validRecord()
+	broken.Name = "contains space"
+	if err := Validate(broken); err == nil || errors.Is(err, ErrUnsupportedVersion) {
+		t.Fatalf("Validate() error = %v, want a refusal that is not ErrUnsupportedVersion", err)
+	}
+}
+
+// TestDecodeCarriesTheVersionRefusal covers the path that matters: the store reads
+// lines through Decode, so the sentinel has to survive its wrapping.
+func TestDecodeCarriesTheVersionRefusal(t *testing.T) {
+	stale := validRecord()
+	stale.SchemaVersion = SchemaVersion - 1
+	line, err := json.Marshal(stale)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if _, err := Decode(line); !errors.Is(err, ErrUnsupportedVersion) {
+		t.Fatalf("Decode() error = %v, want ErrUnsupportedVersion", err)
+	}
+	if _, err := Decode([]byte("not json")); errors.Is(err, ErrUnsupportedVersion) {
+		t.Fatal("Decode() reported unreadable JSON as a foreign schema version")
 	}
 }
 
@@ -382,3 +481,198 @@ func TestDerivedNameCarriesTheKeyedHMACSHA256DigestOfTheScope(t *testing.T) {
 // testNamer keys the scope digest for tests. Production keys it with a subkey of
 // the per-machine salt (config.Repos.NameKey).
 func testNamer() Namer { return NewNamer([]byte("test scope key")) }
+
+// ptr is this file's nullable-field helper. The package's older tests take the
+// address of a local (&outcome); a table over eight nullable counts needs one
+// expression per row rather than one local per row.
+func ptr[T any](v T) *T { return &v }
+
+// nullableCounts names every nullable numeric field on Record beside a setter, so
+// a new one shows up here as a missing row rather than as untested arithmetic.
+func nullableCounts() []struct {
+	field string
+	set   func(*Record, *int64)
+} {
+	return []struct {
+		field string
+		set   func(*Record, *int64)
+	}{
+		{"duration_ms", func(r *Record, v *int64) { r.DurationMS = v }},
+		{"input_tokens", func(r *Record, v *int64) { r.InputTokens = v }},
+		{"output_tokens", func(r *Record, v *int64) { r.OutputTokens = v }},
+		{"cache_read_tokens", func(r *Record, v *int64) { r.CacheReadTokens = v }},
+		{"cache_creation_tokens", func(r *Record, v *int64) { r.CacheCreationTokens = v }},
+		{"thinking_tokens", func(r *Record, v *int64) { r.ThinkingTokens = v }},
+		{"tool_calls", func(r *Record, v *int64) { r.ToolCalls = v }},
+		{"builtin_tool_calls", func(r *Record, v *int64) { r.BuiltinToolCalls = v }},
+	}
+}
+
+// TestValidateRejectsANegativeSessionTotal is the fail-closed half of the session
+// grain's bounded-numeric contract: a count below zero is not a measurement of
+// anything, and a record carrying one is dropped rather than written (plan §3.4).
+func TestValidateRejectsANegativeSessionTotal(t *testing.T) {
+	for _, count := range nullableCounts() {
+		t.Run(count.field, func(t *testing.T) {
+			negative := validRecord()
+			count.set(&negative, ptr(int64(-1)))
+			if err := Validate(negative); err == nil {
+				t.Fatalf("Validate() accepted %s = -1", count.field)
+			}
+		})
+	}
+}
+
+// TestValidateAcceptsAZeroSessionTotal is the other half, and the one that is easy
+// to break by reaching for a truthiness check: a measured zero is a value. A
+// session that invoked no primitive is the plan §2.7 baseline, so the zero has to
+// survive both validation and serialisation.
+func TestValidateAcceptsAZeroSessionTotal(t *testing.T) {
+	for _, count := range nullableCounts() {
+		t.Run(count.field, func(t *testing.T) {
+			zero := validRecord()
+			count.set(&zero, ptr(int64(0)))
+			if err := Validate(zero); err != nil {
+				t.Fatalf("Validate() error = %v for %s = 0", err, count.field)
+			}
+			encoded, err := Marshal(zero)
+			if err != nil {
+				t.Fatalf("Marshal() error = %v", err)
+			}
+			if want := `"` + count.field + `":0`; !strings.Contains(string(encoded), want) {
+				t.Fatalf("Marshal() = %s, want it to contain %s", encoded, want)
+			}
+		})
+	}
+}
+
+// TestMarshalRendersAnUnreportedTotalAsNull keeps unreported distinguishable from
+// zero on disk. Neither field carries omitempty for this reason: a reader of the
+// spool has to be able to tell "the harness said nothing" from "the harness said
+// none", and an absent key reads as the latter (ADR-0005 applied to counts).
+func TestMarshalRendersAnUnreportedTotalAsNull(t *testing.T) {
+	encoded, err := Marshal(validRecord())
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	for _, count := range nullableCounts() {
+		if want := `"` + count.field + `":null`; !strings.Contains(string(encoded), want) {
+			t.Fatalf("Marshal() = %s, want it to contain %s", encoded, want)
+		}
+	}
+}
+
+// TestIsSessionGrain enumerates the whole Kind enum explicitly rather than
+// testing the two members that answer true: a Kind added later has to appear here
+// as a missing row, because the consequence of getting it wrong is silent — a
+// phantom primitive in every report, or a session that stops being counted.
+func TestIsSessionGrain(t *testing.T) {
+	sessionGrain := []Kind{KindSessionStart, KindSessionEnd}
+	invocationGrain := []Kind{
+		KindSkill, KindSubagent, KindMCPTool, KindMCPServer,
+		KindCommand, KindPlugin, KindBuiltinTool, KindHook,
+	}
+	for _, kind := range sessionGrain {
+		if !IsSessionGrain(kind) {
+			t.Fatalf("IsSessionGrain(%q) = false, want true", kind)
+		}
+	}
+	for _, kind := range invocationGrain {
+		if IsSessionGrain(kind) {
+			t.Fatalf("IsSessionGrain(%q) = true, want false", kind)
+		}
+	}
+	if len(sessionGrain)+len(invocationGrain) != 10 {
+		t.Fatal("the Kind enum changed size; add the new member to one of the two lists")
+	}
+}
+
+// TestValidateAcceptsAnAbsentParentEventID pins the nullable half of ADR-0035 §2:
+// a record derivation could establish no parent for validates, and so does the one
+// record that is deliberately rootless (a session_end, the trace root).
+func TestValidateAcceptsAnAbsentParentEventID(t *testing.T) {
+	candidate := validRecord()
+	if candidate.ParentEventID != "" {
+		t.Fatalf("validRecord() presets ParentEventID = %q", candidate.ParentEventID)
+	}
+	if err := Validate(candidate); err != nil {
+		t.Fatalf("Validate() rejected an absent parent event id: %v", err)
+	}
+}
+
+func TestValidateAcceptsADerivedParentEventID(t *testing.T) {
+	candidate := validRecord()
+	candidate.ParentEventID = DeriveEventID("claude-code", "parent-source")
+	if err := Validate(candidate); err != nil {
+		t.Fatalf("Validate() rejected a derived parent event id: %v", err)
+	}
+}
+
+// TestValidateRejectsAMalformedParentEventID is the fail-closed half: the parent is
+// an id, so it gets the same validSHA256 gate event_id gets, and a record that fails
+// it is dropped rather than written (ADR-0007, C12).
+func TestValidateRejectsAMalformedParentEventID(t *testing.T) {
+	values := []string{
+		"deadbeef",
+		strings.Repeat("A", 64),
+		strings.Repeat("f", 63),
+		strings.Repeat("f", 65),
+		strings.Repeat("g", 64),
+	}
+	for _, value := range hostileIdentifiers {
+		if value == "" {
+			// The empty value is absence, which the test above asserts is accepted.
+			continue
+		}
+		values = append(values, value)
+	}
+	for _, value := range values {
+		candidate := validRecord()
+		candidate.ParentEventID = Hash(value)
+		err := Validate(candidate)
+		if err == nil {
+			t.Errorf("Validate() accepted ParentEventID = %q", value)
+			continue
+		}
+		if errors.Is(err, ErrUnsupportedVersion) {
+			t.Errorf("Validate() refused ParentEventID = %q as a version problem: %v", value, err)
+		}
+		if _, err := Marshal(candidate); err == nil {
+			t.Errorf("Marshal() wrote a record with ParentEventID = %q", value)
+		}
+	}
+}
+
+func TestMarshalOmitsAnAbsentParentEventID(t *testing.T) {
+	candidate := validRecord()
+	encoded, err := Marshal(candidate)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if strings.Contains(string(encoded), "parent_event_id") {
+		t.Fatalf("Marshal() emitted an absent parent event id: %s", encoded)
+	}
+
+	parent := DeriveEventID("claude-code", "parent-source")
+	candidate.ParentEventID = parent
+	encoded, err = Marshal(candidate)
+	if err != nil {
+		t.Fatalf("Marshal() with a parent error = %v", err)
+	}
+	if want := `"parent_event_id":"` + string(parent) + `"`; !strings.Contains(string(encoded), want) {
+		t.Fatalf("Marshal() = %s, want it to contain %s", encoded, want)
+	}
+}
+
+// TestValidateDoesNotRejectASelfParent pins ADR-0035 §7 the right way round.
+// Cycle-freedom is structural, established by the adapter's pure comparison against
+// the child's own EventID; Validate stays per-record and pure and must not grow an
+// ancestor rule, which would drop a whole invocation rather than fall through to the
+// session span.
+func TestValidateDoesNotRejectASelfParent(t *testing.T) {
+	candidate := validRecord()
+	candidate.ParentEventID = candidate.EventID
+	if err := Validate(candidate); err != nil {
+		t.Fatalf("Validate() rejected a self-parent: %v", err)
+	}
+}

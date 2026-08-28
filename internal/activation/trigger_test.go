@@ -15,6 +15,7 @@ import (
 	"github.com/SupermodularAI/agents-wake/internal/config"
 	"github.com/SupermodularAI/agents-wake/internal/health"
 	"github.com/SupermodularAI/agents-wake/internal/lockfile"
+	"github.com/SupermodularAI/agents-wake/internal/record"
 	"github.com/SupermodularAI/agents-wake/internal/store"
 )
 
@@ -124,7 +125,9 @@ func TestAPlainInitOnAnUnboundedRepositoryBoundsTheNextTrigger(t *testing.T) {
 	claudeDir, root := inventoryFixture(t)
 	spool := store.New(filepath.Join(paths.DataDir, eventsFile))
 
-	if written, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil || written != 1 {
+	// Two records for the fixture's one call: the invocation, and the session_end
+	// its long-silent session id now yields (ADR-0034).
+	if written, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil || written != 2 {
 		t.Fatalf("Init(full) = %d, %v; want the pre-existing history imported", written, err)
 	}
 	if _, err := Init(paths, root, claudeDir, testExecutable(t), false); err != nil {
@@ -167,6 +170,123 @@ func TestAPlainInitOnAnUnboundedRepositoryBoundsTheNextTrigger(t *testing.T) {
 	if len(entries) != 1 || entries[0].Record.Name != "Read" {
 		t.Fatalf("Entries() = %+v, want only the call that happened after the plain init", entries)
 	}
+}
+
+// A schema bump must not turn the hook-fired scan into a destructive one.
+//
+// The rebuild a bump asks for is "drop and rescan" (ADR-0015), and the rescan half is
+// a whole-history scan: the spool holds whatever the user backfilled with `wake
+// ingest`, including events from before the repository's recorded boundary. The
+// hook-fired scan cannot re-derive those — it runs under that boundary, because it is
+// the one scan nobody asked for (ADR-0025) — so a discard here would delete history it
+// is not allowed to bring back, from a process ADR-0016 keeps silent.
+//
+// So it leaves the spool alone, keeps collecting forward, and reports the stale count
+// as a rebuild that has not happened. The user's own scan does the drop and the rescan
+// together, exactly once, which is the pairing Rebuild has always had.
+func TestATriggerLeavesASpoolFromAnotherSchemaVersionForAUserAskedScan(t *testing.T) {
+	paths := testPaths(t)
+	claudeDir, root := inventoryFixture(t)
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), false); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	// The backfill a plain `init` names in its own output: history from before the
+	// boundary, in the spool because the user asked for it.
+	// The invocation and its session's own record, as above.
+	if written, err := Ingest(paths, claudeDir); err != nil || written != 2 {
+		t.Fatalf("Ingest() = %d, %v; want the pre-boundary history backfilled", written, err)
+	}
+	spoolPath := filepath.Join(paths.DataDir, eventsFile)
+	staleID := appendRecordFromAnotherSchemaVersion(t, spoolPath)
+
+	if ran, err := Trigger(paths, claudeDir); err != nil || !ran {
+		t.Fatalf("Trigger() = %v, %v; want the scan to run", ran, err)
+	}
+
+	entries, err := store.New(spoolPath).Entries(0)
+	if err != nil {
+		t.Fatalf("Entries() error = %v", err)
+	}
+	// The backfilled call and its session_end, both still there: what this test is
+	// about is that the hook-fired scan deleted neither.
+	if len(entries) != 2 {
+		t.Fatalf("Entries() = %+v, want the backfilled records still in the spool", entries)
+	}
+	raw, err := os.ReadFile(spoolPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !strings.Contains(string(raw), string(staleID)) {
+		t.Error("the hook-fired scan discarded the spool; only a scan that re-derives the whole history may")
+	}
+	scan := scanCounters(t, paths)
+	if scan.StaleRecords != 1 {
+		t.Errorf("Scan.StaleRecords = %d, want 1 — the records this build cannot read are what doctor reports", scan.StaleRecords)
+	}
+	if scan.StaleRebuilt {
+		t.Error("Scan.StaleRebuilt = true, want false — doctor must not claim a rebuild this scope cannot perform")
+	}
+
+	// The user asks, and the drop and the rescan happen together: the backfilled
+	// record comes back and the unreadable one does not.
+	if _, ingestErr := Ingest(paths, claudeDir); ingestErr != nil {
+		t.Fatalf("second Ingest() error = %v", ingestErr)
+	}
+	raw, err = os.ReadFile(spoolPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if strings.Contains(string(raw), string(staleID)) {
+		t.Error("the user-asked scan left the record from an earlier schema version; a bump is a rebuild, not a skip")
+	}
+	entries, err = store.New(spoolPath).Entries(0)
+	if err != nil {
+		t.Fatalf("Entries() error = %v", err)
+	}
+	if len(entries) != 2 || entries[0].Record.Name != "Bash" {
+		t.Fatalf("Entries() = %+v, want the backfilled records re-derived from the transcript", entries)
+	}
+	if scan := scanCounters(t, paths); scan.StaleRecords != 1 || !scan.StaleRebuilt {
+		t.Errorf("Scan.StaleRecords, Scan.StaleRebuilt = %d, %v; want 1, true — the rebuild happened and says so", scan.StaleRecords, scan.StaleRebuilt)
+	}
+}
+
+// appendRecordFromAnotherSchemaVersion writes one line no build but an earlier one
+// could have written, and returns its id.
+//
+// By hand, because there is no earlier build here to write it: this build's own
+// encoding of a valid record with only the version number changed, which is what an
+// additive dimension addition actually leaves on disk.
+func appendRecordFromAnotherSchemaVersion(t *testing.T, spoolPath string) record.Hash {
+	t.Helper()
+	outcome := record.OutcomeOK
+	stale := record.Record{
+		SchemaVersion: record.SchemaVersion - 1,
+		EventID:       record.DeriveEventID("claude-code", "an-event-only-the-store-remembers"),
+		Timestamp:     time.Date(2026, time.August, 1, 12, 0, 0, 0, time.UTC),
+		Harness:       "claude-code",
+		SessionID:     "session-0",
+		Repo:          "0123456789abcdef0123456789abcdef",
+		Kind:          record.KindBuiltinTool,
+		Name:          "Bash",
+		Invoker:       record.InvokerModel,
+		Outcome:       &outcome,
+	}
+	line, err := json.Marshal(stale)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	spool, err := os.OpenFile(spoolPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("OpenFile() error = %v", err)
+	}
+	if _, err := spool.Write(append(line, '\n')); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if err := spool.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	return stale.EventID
 }
 
 // Single-flight, not a queue. ADR-0016 rules out concurrent session-ends each
@@ -272,13 +392,13 @@ func TestScanCountersDistinguishAnUnreadableSourceFromACleanZero(t *testing.T) {
 	// A transcript Wake read completely and refused every primitive in is not a
 	// clean zero: the numbers are missing everything that transcript held, and
 	// nobody knows how much. This is the shape a Claude Code field rename takes —
-	// every Task call still there, none of them nameable — so it must not arrive as
+	// every call still there, none of them nameable — so it must not arrive as
 	// a skipped transcript, which doctor reports as an honest zero.
 	t.Run("a transcript whose every primitive name was refused", func(t *testing.T) {
 		paths := testPaths(t)
 		claudeDir, root := inventoryFixture(t)
 		if err := os.WriteFile(transcriptOf(claudeDir), []byte(strings.Join([]string{
-			`{"uuid":"entry-1","sessionId":"session-1","cwd":"` + root + `","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Task"}]}}`,
+			`{"uuid":"entry-1","sessionId":"session-1","cwd":"` + root + `","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Skill","input":{"skill":"../secrets"}}]}}`,
 			`{"uuid":"entry-2","sessionId":"session-1","cwd":"` + root + `","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 		}, "\n")), 0o600); err != nil {
 			t.Fatalf("WriteFile() error = %v", err)
@@ -299,8 +419,14 @@ func TestScanCountersDistinguishAnUnreadableSourceFromACleanZero(t *testing.T) {
 		if scan.ParseErrors != 0 || scan.Unreadable != 0 {
 			t.Errorf("ParseErrors = %d, Unreadable = %d; want 0 and 0", scan.ParseErrors, scan.Unreadable)
 		}
-		if scan.EventsWritten != 0 {
-			t.Errorf("EventsWritten = %d, want 0", scan.EventsWritten)
+		// The session grain is written even though every call in it was refused, and
+		// that is the honest answer rather than a consolation record: the session
+		// happened, and a session whose primitive calls this build could not name is
+		// exactly the plan §2.7 baseline a rate is measured against. Its tool_calls is
+		// 0 — this scan collected none — and RefusedCalls above still reports what was
+		// lost, so nothing is presented as complete that is not.
+		if scan.EventsWritten != 1 {
+			t.Errorf("EventsWritten = %d, want 1 — the session_end, and no invocation", scan.EventsWritten)
 		}
 	})
 

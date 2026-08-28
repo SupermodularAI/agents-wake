@@ -168,3 +168,55 @@ jobs:
           echo "$version"
           echo "$version" | grep -qE 'commit [0-9a-f]{7,}' || { echo "::error::--version does not name the commit"; exit 1; }
           echo "$version" | grep -qE 'built [0-9]{4}-[0-9]{2}-[0-9]{2}T' || { echo "::error::--version does not name the build date"; exit 1; }
+
+      # ADR-0030 replaces ADR-0012's artefact claim with a behavioural one, and
+      # this is where the new claim is checked: a fresh, unconfigured install of
+      # the artefact GoReleaser produces sends nothing and says so on every
+      # surface that reports it. It is the inverse of the ADR-0012-era check
+      # that asserted `remote` was absent from --help. Asserted on the release
+      # binary rather than only in `go test`, because the binary people install
+      # is the subject of the claim; release.yml runs this workflow as its gate,
+      # so the same assertion covers the real release build at tag time.
+      #
+      # The flush is the load-bearing line. Delivery fails silently by design
+      # (ADR-0018), so denying the runner network access would prove nothing —
+      # a blocked send and a send that never happened look identical. Asking the
+      # one code path that can send to send, on a fresh root, and reading back
+      # its refusal is the strongest assertion here that can actually fail.
+      - name: confirm a fresh release artefact has remote delivery disabled
+        run: |
+          binary="$(find dist -type f -name wake -path '*linux_amd64*' | head -n 1)"
+          test -n "$binary" || { echo "::error::no linux/amd64 binary in dist"; exit 1; }
+
+          fresh="$(mktemp -d)"
+          mkdir -p "$fresh/home" "$fresh/state"
+          # A fresh install: empty HOME, empty data root, and the credential
+          # override cleared so a runner environment cannot configure delivery
+          # behind this assertion's back (ADR-0028).
+          wake_fresh() {
+            env -u WAKE_REMOTE_AUTHORIZATION HOME="$fresh/home" WAKE_DIR="$fresh/state" "$binary" "$@"
+          }
+
+          help="$(wake_fresh --help)"
+          echo "$help"
+          printf '%s\n' "$help" | grep -qE '^[[:space:]]+remote[[:space:]]' \
+            || { echo "::error::the release artefact has no remote command; it ships in every build (ADR-0030)"; exit 1; }
+
+          status="$(wake_fresh remote status)"
+          echo "$status"
+          for line in 'endpoint: not configured' 'credential: not configured' 'state: off'; do
+            printf '%s\n' "$status" | grep -qxF "$line" \
+              || { echo "::error::a fresh artefact does not report '$line'"; exit 1; }
+          done
+
+          flush="$(wake_fresh remote flush)"
+          echo "$flush"
+          printf '%s\n' "$flush" | grep -qxF 'no remote endpoint is configured; nothing was sent.' \
+            || { echo "::error::a fresh artefact's flush did not refuse to send"; exit 1; }
+
+          doctor="$(wake_fresh doctor)"
+          echo "$doctor"
+          for line in 'remote endpoint: not configured' 'remote credential: not configured' 'remote delivery: off'; do
+            printf '%s\n' "$doctor" | grep -qxF "$line" \
+              || { echo "::error::doctor does not report '$line' on a fresh install"; exit 1; }
+          done

@@ -39,14 +39,22 @@ func moduleRoot(t *testing.T) string {
 	}
 }
 
+// confinedFileNames is every filename only this package may spell. All three are
+// taken as constants rather than literals, so the names this test walks the tree
+// for are by construction the names the package writes (ADR-0028).
+var confinedFileNames = []string{projectsFileName, saltFileName, remoteAuthFileName}
+
 // Acceptance item 12, mechanically. The privacy guarantee — the repository label
 // and path never leave the local store, only the hashed id — is checkable by
 // reading one directory precisely because no other package can name either file.
 // A hand review of call sites would hold until the next ticket; this holds after
 // it.
-func TestProjectsJsonAndSaltAreNamedOnlyInThisPackage(t *testing.T) {
+//
+// ADR-0028 extends the same guarantee to the remote credential store, because a
+// new secret this test cannot see is a secret whose confinement nothing
+// verifies.
+func TestSecretFilenamesAreNamedOnlyInThisPackage(t *testing.T) {
 	root := moduleRoot(t)
-	confined := []string{projectsFileName, saltFileName}
 	scanned := 0
 
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -78,7 +86,7 @@ func TestProjectsJsonAndSaltAreNamedOnlyInThisPackage(t *testing.T) {
 		if readErr != nil {
 			return readErr
 		}
-		for _, name := range confined {
+		for _, name := range confinedFileNames {
 			if strings.Contains(string(raw), name) {
 				t.Errorf("%s names %q; both files are read and written only inside %s", relative, name, packageDir)
 			}
@@ -111,6 +119,10 @@ func TestExportedTypesCarryNoPathOrLabelField(t *testing.T) {
 	assertFieldsAre(t, reflect.TypeOf(Problem{}), "Key", "Reason")
 	assertFieldsAre(t, reflect.TypeOf(NestedRootError{}), "EnclosingID", "Outer")
 	assertFieldsAre(t, reflect.TypeOf(Key{}), "Name", "Kind", "Default", "Sentinels", "Provisional")
+	// The collection boundary is a directory the user typed, and this is the type
+	// that reports on it: flags and a count, never the path. `doctor` is the caller,
+	// and its output is what people paste into issues (ADR-0019 §7).
+	assertFieldsAre(t, reflect.TypeOf(GlobalRootState{}), "Set", "Refused", "Discovered")
 
 	// A second, looser net for a field added under a name the allowlists above
 	// would have to be updated to admit: whoever adds it has to justify the name
@@ -121,6 +133,7 @@ func TestExportedTypesCarryNoPathOrLabelField(t *testing.T) {
 		reflect.TypeOf(Problem{}),
 		reflect.TypeOf(NestedRootError{}),
 		reflect.TypeOf(Key{}),
+		reflect.TypeOf(GlobalRootState{}),
 	} {
 		for i := range typ.NumField() {
 			name := strings.ToLower(typ.Field(i).Name)

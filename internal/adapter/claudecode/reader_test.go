@@ -3,6 +3,7 @@ package claudecode
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"testing"
@@ -32,7 +33,10 @@ func TestReadDerivesOnlyTerminalRecords(t *testing.T) {
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	// A closing Staleness rather than the zero value, because the entry carries an
+	// attributionSkill: ADR-0035 defers a skill-attributed call until its session has
+	// closed, so it is emitted from the close pass and not on sight of the tool_result.
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -43,11 +47,17 @@ func TestReadDerivesOnlyTerminalRecords(t *testing.T) {
 	if event.Kind != record.KindMCPTool || event.Package != "atlassian" || event.ViaSkill != "jira-work" || event.Outcome == nil || *event.Outcome != record.OutcomeOK {
 		t.Fatalf("record = %+v", event)
 	}
+	// "jira-work" has no invocation record in this transcript, so case 2 resolves
+	// nothing and the call parents onto the session span rather than onto an id no
+	// record carries (ADR-0035 §2, §6).
+	if want := sessionParent("session-1"); event.ParentEventID != want {
+		t.Errorf("ParentEventID = %q, want the session span %q", event.ParentEventID, want)
+	}
 }
 
 func TestReadDoesNotEmitUnterminatedCall(t *testing.T) {
 	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Skill"}]}}`
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -64,7 +74,7 @@ func TestReadUsesSkillNameInsteadOfToolName(t *testing.T) {
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Skill","input":{"skill":"pr-review","args":"never retain this prose"}}]}}`,
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -81,7 +91,7 @@ func TestReadUsesSkillNameInsteadOfToolName(t *testing.T) {
 // Staleness.
 func TestReadDerivesTerminalAttributedSkill(t *testing.T) {
 	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"run-sdlc","message":{"model":"sonnet","stop_reason":"end_turn"}}`
-	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -94,13 +104,14 @@ func TestReadDerivesTerminalAttributedSkill(t *testing.T) {
 	}
 }
 
-// An attributed end_turn entry is not a second subagent invocation. The Task call
-// that entered the subagent is the invocation, and the parent transcript carries it
-// as a paired tool_use/tool_result with an outcome; counting the attributed entry
-// too would report one run as two.
+// An entry carrying attributionAgent but no agentId is not a subagent transcript
+// entry, so no record is derived from it. A subagent invocation's record comes from
+// a transcript that declares an agent id, resolved at session close and keyed by
+// that id (ADR-0036 §2, subagent.go) — deriving one from an attributed entry as well
+// would report one run as two.
 func TestReadDerivesNoSubagentRecordFromAttributionAlone(t *testing.T) {
 	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionAgent":"sdlc-check-architecture","message":{"model":"sonnet","stop_reason":"end_turn"}}`
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -122,7 +133,7 @@ func TestReadDefersASkillCandidateUntilItsSessionCloses(t *testing.T) {
 	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"run-sdlc","message":{"model":"sonnet","stop_reason":"end_turn"}}`
 
 	inside := Staleness{Timeout: time.Hour, Now: callInstant.Add(30 * time.Minute)}
-	buffered, err := Read(strings.NewReader(input), resolver, names, inside)
+	buffered, err := read(strings.NewReader(input), resolver, names, inside)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -136,7 +147,7 @@ func TestReadDefersASkillCandidateUntilItsSessionCloses(t *testing.T) {
 		t.Errorf("Read() = %+v, want the session open and no call buffered", buffered)
 	}
 
-	closed, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	closed, err := read(strings.NewReader(input), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -166,7 +177,7 @@ func TestReadCountsOneSkillRunAsOneInvocation(t *testing.T) {
 		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -204,7 +215,7 @@ func TestReadCollapsesASkillCandidatePerSessionNotPerTranscript(t *testing.T) {
 		`{"uuid":"entry-2","sessionId":"session-2","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -237,7 +248,7 @@ func TestReadEmitsOneFallbackForRepeatedShapeACandidates(t *testing.T) {
 		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -267,7 +278,7 @@ func TestReadDoesNotCountAmbiguityForACandidateTheToolUsePathCovered(t *testing.
 		`{"uuid":"entry-5","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:04Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -293,7 +304,7 @@ func TestReadEmitsSkillFallbacksInADeterministicOrder(t *testing.T) {
 
 	var want []record.Hash
 	for attempt := range 20 {
-		result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+		result, err := read(strings.NewReader(input), resolver, names, closedSession)
 		if err != nil {
 			t.Fatalf("Read() error = %v", err)
 		}
@@ -317,7 +328,7 @@ func TestReadEmitsSkillFallbacksInADeterministicOrder(t *testing.T) {
 func TestReadResolvesASkillCandidateDespiteAnOversizedLine(t *testing.T) {
 	candidate := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`
 
-	result, err := Read(strings.NewReader(candidate+"\n"+oversizedResult(t)+"\n"), resolver, names, closedSession)
+	result, err := read(strings.NewReader(candidate+"\n"+oversizedResult(t)+"\n"), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -342,7 +353,7 @@ func TestReadDoesNotResolveASkillCandidateWhenALineWasUnreadable(t *testing.T) {
 	candidate := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`
 	unreadable := `{"uuid":"entry-2","sessionId":"session-1",`
 
-	result, err := Read(strings.NewReader(candidate+"\n"+unreadable+"\n"), resolver, names, closedSession)
+	result, err := read(strings.NewReader(candidate+"\n"+unreadable+"\n"), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -365,7 +376,7 @@ func TestReadDoesNotResolveASkillCandidateWhenALineWasUnreadable(t *testing.T) {
 func TestReadNeverCountsASidechainTurnAsASkillInvocation(t *testing.T) {
 	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","isSidechain":true,"attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`
 
-	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -385,7 +396,7 @@ func TestReadRecordsAttributingAgentForPrimitiveCalls(t *testing.T) {
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionAgent":"sdlc-implement","message":{"content":[{"type":"tool_use","id":"call-1","name":"Skill","input":{"skill":"commit-message"}}]}}`,
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -396,7 +407,7 @@ func TestReadRecordsAttributingAgentForPrimitiveCalls(t *testing.T) {
 
 func TestReadDoesNotEmitUnfinishedAttributedRun(t *testing.T) {
 	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionAgent":"sdlc-check-architecture","message":{"model":"sonnet","stop_reason":"tool_use"}}`
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -410,7 +421,7 @@ func TestReadSkipsUnconsentedRepository(t *testing.T) {
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/outside","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/outside","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
-	result, err := Read(strings.NewReader(input), deny, names, Staleness{})
+	result, err := read(strings.NewReader(input), deny, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -445,7 +456,7 @@ func TestReadSkipsAnEventBeforeTheInstantCollectionBegan(t *testing.T) {
 		`{"uuid":"entry-4","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), forwardOnly, names, Staleness{})
+	result, err := read(strings.NewReader(input), forwardOnly, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -465,7 +476,7 @@ func TestReadKeepsUnknownOutcomeNull(t *testing.T) {
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1"}]}}`,
 	}, "\n")
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -477,14 +488,14 @@ func TestReadKeepsUnknownOutcomeNull(t *testing.T) {
 func TestReadSkipsMalformedLine(t *testing.T) {
 	input := strings.Join([]string{
 		`not json`,
-		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Task","input":{"subagent_type":"explorer"}}]}}`,
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Skill","input":{"skill":"pr-review"}}]}}`,
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":true}]}}`,
 	}, "\n")
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
-	if result.Malformed != 1 || len(result.Records) != 1 || result.Records[0].Kind != record.KindSubagent {
+	if result.Malformed != 1 || len(result.Records) != 1 || result.Records[0].Kind != record.KindSkill {
 		t.Fatalf("Read() = %+v", result)
 	}
 }
@@ -492,11 +503,11 @@ func TestReadSkipsMalformedLine(t *testing.T) {
 // twoCallsInOneEntry is a transcript whose single tool_use entry carries two
 // calls, terminated together by one later entry. Claude Code emits this shape
 // whenever the model calls two tools in one assistant turn.
-const twoCallsInOneEntry = `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"},{"type":"tool_use","id":"call-2","name":"Task","input":{"subagent_type":"explorer"}}]}}
+const twoCallsInOneEntry = `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"},{"type":"tool_use","id":"call-2","name":"Skill","input":{"skill":"pr-review"}}]}}
 {"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false},{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}`
 
 func TestReadDerivesADistinctIDForEachToolCallInOneEntry(t *testing.T) {
-	result, err := Read(strings.NewReader(twoCallsInOneEntry), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(twoCallsInOneEntry), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -515,11 +526,11 @@ func TestReadDerivesADistinctIDForEachToolCallInOneEntry(t *testing.T) {
 }
 
 func TestReadDerivesTheSameToolCallIDsOnReingest(t *testing.T) {
-	first, err := Read(strings.NewReader(twoCallsInOneEntry), resolver, names, Staleness{})
+	first, err := read(strings.NewReader(twoCallsInOneEntry), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("first Read() error = %v", err)
 	}
-	second, err := Read(strings.NewReader(twoCallsInOneEntry), resolver, names, Staleness{})
+	second, err := read(strings.NewReader(twoCallsInOneEntry), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("second Read() error = %v", err)
 	}
@@ -539,27 +550,33 @@ func TestReadDoesNotCollideAToolCallWithATerminalRun(t *testing.T) {
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
 	if len(result.Records) != 2 {
 		t.Fatalf("Read() records = %+v, want a terminal run and a tool call", result.Records)
 	}
-	// The paired tool call is appended during the scan and the Shape-A fallback only
-	// after the session is judged closed, so the call comes first (ADR-0023 §3). The
+	// The order is the fallback first and the call second, which is the reverse of what
+	// it was before ADR-0035: the call carries an attributionSkill, so it is deferred
+	// past the fallback's own group and emitted once its parent is resolvable. The
 	// entry carries attributionSkill "pr-review" and a Bash tool_use with no Skill
 	// tool_use anywhere, so it is genuinely a run with no tool trace and the fallback
 	// is correct here.
-	call, run := result.Records[0], result.Records[1]
-	if call.Kind != record.KindBuiltinTool {
-		t.Errorf("first record is not the tool call: %+v", call)
-	}
+	run, call := result.Records[0], result.Records[1]
 	if run.Kind != record.KindSkill || run.Outcome != nil {
-		t.Errorf("second record is not the terminal skill run: %+v", run)
+		t.Errorf("first record is not the terminal skill run: %+v", run)
+	}
+	if call.Kind != record.KindBuiltinTool {
+		t.Errorf("second record is not the tool call: %+v", call)
 	}
 	if run.EventID == call.EventID {
 		t.Errorf("a tool call and a terminal run of the same entry share id %q", run.EventID)
+	}
+	// And the fallback is what the call parents onto: one record for the name, so
+	// case 2 resolves it (ADR-0035 §3).
+	if call.ParentEventID != run.EventID {
+		t.Errorf("ParentEventID = %q, want the terminal run %q", call.ParentEventID, run.EventID)
 	}
 }
 
@@ -572,7 +589,7 @@ func TestReadRejectsAnEntryIDOutsideTheTokenDomain(t *testing.T) {
 		fmt.Sprintf(`{"uuid":%s,"sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","attributionSkill":"pr-review","message":{"stop_reason":"end_turn"}}`, quoted(t, "../escape")),
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -590,11 +607,11 @@ func TestReadCountsAnOversizedLineWithoutRetainingIt(t *testing.T) {
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 		oversized,
-		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","message":{"content":[{"type":"tool_use","id":"call-2","name":"Task","input":{"subagent_type":"code-reviewer"}}]}}`,
+		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","message":{"content":[{"type":"tool_use","id":"call-2","name":"Skill","input":{"skill":"pr-review"}}]}}`,
 		`{"uuid":"entry-4","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:03Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -625,7 +642,7 @@ func TestReadNeverUsesToolArguments(t *testing.T) {
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Skill","input":{"args":"do not retain this secret"}}]}}`,
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -657,7 +674,7 @@ var (
 // writes a call that genuinely succeeded as outcome: interrupted, permanently
 // (ADR-0004 dedup never upserts, ADR-0015).
 func TestReadCompletesACallWhoseResultLinePrecedesIt(t *testing.T) {
-	result, err := Read(strings.NewReader(reversedOrderPair), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(reversedOrderPair), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -690,7 +707,7 @@ func TestReadCompletesACallWhoseResultLinePrecedesIt(t *testing.T) {
 func TestReadDerivesTheSameRecordInEitherLineOrder(t *testing.T) {
 	encoded := make([]string, 0, 2)
 	for _, transcript := range []string{forwardOrderPair, reversedOrderPair} {
-		result, err := Read(strings.NewReader(transcript), resolver, names, Staleness{})
+		result, err := read(strings.NewReader(transcript), resolver, names, Staleness{})
 		if err != nil {
 			t.Fatalf("Read() error = %v", err)
 		}
@@ -714,7 +731,7 @@ func TestReadDerivesTheSameRecordInEitherLineOrder(t *testing.T) {
 // calls awaiting a result", and the staleness path ages exactly those into
 // interrupted. A call that does not exist has nothing to age.
 func TestReadEmitsNothingForAResultWhoseCallNeverArrives(t *testing.T) {
-	result, err := Read(strings.NewReader(toolResultLine), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(toolResultLine), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -746,7 +763,7 @@ func TestReadDerivesTheRealOutcomeWhenTheResultArrivesFirst(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			transcript := reversedPairWith(testCase.entryFields, testCase.blockFields)
-			result, err := Read(strings.NewReader(transcript), resolver, names, Staleness{})
+			result, err := read(strings.NewReader(transcript), resolver, names, Staleness{})
 			if err != nil {
 				t.Fatalf("Read() error = %v", err)
 			}
@@ -769,7 +786,7 @@ func TestReadDoesNotEmitAnEarlyResultForAnUnconsentedCall(t *testing.T) {
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/outside","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/outside","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
 	}, "\n")
-	result, err := Read(strings.NewReader(transcript), deny, names, Staleness{})
+	result, err := read(strings.NewReader(transcript), deny, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -783,9 +800,9 @@ func TestReadDoesNotEmitAnEarlyResultForAnUnconsentedCall(t *testing.T) {
 func TestReadCountsARefusedNameWhoseResultArrivedFirst(t *testing.T) {
 	transcript := strings.Join([]string{
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
-		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Task"}]}}`,
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Skill","input":{"skill":"../secrets"}}]}}`,
 	}, "\n")
-	result, err := Read(strings.NewReader(transcript), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(transcript), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -802,7 +819,7 @@ func TestReadDoesNotEmitAnEarlyResultForAnIDOutsideTheTokenDomain(t *testing.T) 
 		fmt.Sprintf(`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":%s,"is_error":false}]}}`, unsafe),
 		fmt.Sprintf(`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":%s,"name":"Bash"}]}}`, unsafe),
 	}, "\n")
-	result, err := Read(strings.NewReader(transcript), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(transcript), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -822,7 +839,7 @@ func TestReadIgnoresARepeatedResultForACompletedCall(t *testing.T) {
 		toolResultLine,
 		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":true}]}}`,
 	}, "\n")
-	result, err := Read(strings.NewReader(transcript), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(transcript), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -845,7 +862,7 @@ func TestReadKeepsTheFirstOfTwoEarlyResultsForOneCall(t *testing.T) {
 		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":true}]}}`,
 		toolUseLine,
 	}, "\n")
-	result, err := Read(strings.NewReader(transcript), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(transcript), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -868,7 +885,7 @@ func TestReadRetainsNothingFromAnEarlyResultLine(t *testing.T) {
 	for _, value := range hostileValues {
 		entryFields := fmt.Sprintf(`"toolDenialKind":%s,"pad":%s,"toolUseResult":{"interrupted":false},`,
 			quoted(t, value), quoted(t, "swordfish-"+value))
-		result, err := Read(strings.NewReader(reversedPairWith(entryFields, "")), resolver, names, Staleness{})
+		result, err := read(strings.NewReader(reversedPairWith(entryFields, "")), resolver, names, Staleness{})
 		if err != nil {
 			t.Fatalf("Read() error = %v", err)
 		}
@@ -890,6 +907,28 @@ func TestReadRetainsNothingFromAnEarlyResultLine(t *testing.T) {
 				t.Fatalf("record retains %q from the early result line: %s", fragment, encoded)
 			}
 		}
+	}
+}
+
+// TestReadDoesNotPairAToolResultFromAnotherSession is constraint 4. The call
+// buffer is keyed by (session, block id) rather than by the block id alone: once
+// the buffer outlives one file, a tool_result in one session's transcript could
+// otherwise terminate a call belonging to another — a cross-session pairing
+// ADR-0002's invocation grain and ADR-0034's per-session delimitation both forbid.
+func TestReadDoesNotPairAToolResultFromAnotherSession(t *testing.T) {
+	transcript := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-2","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+	}, "\n")
+	result, err := read(strings.NewReader(transcript), resolver, names, Staleness{})
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 0 {
+		t.Fatalf("Read() records = %+v, want none: the result belongs to another session", result.Records)
+	}
+	if result.Pending != 1 {
+		t.Errorf("Pending = %d, want 1: the call stays buffered rather than terminated by a foreign result", result.Pending)
 	}
 }
 
@@ -917,14 +956,14 @@ func parsedTime(t *testing.T, value string) time.Time {
 // opened in a single assistant turn, terminated one at a time by results written
 // in three different shapes, with an attribution-only bookkeeping entry in
 // between. Every payload carries a fragment nothing may retain.
-const mixedShapeTranscript = `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-1","name":"Bash"},{"type":"tool_use","id":"call-2","name":"Task","input":{"subagent_type":"code-reviewer"}},{"type":"tool_use","id":"call-3","name":"Skill","input":{"skill":"pr-review"}}]}}
+const mixedShapeTranscript = `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-1","name":"Bash"},{"type":"tool_use","id":"call-2","name":"mcp__atlassian__search"},{"type":"tool_use","id":"call-3","name":"Skill","input":{"skill":"pr-review"}}]}}
 {"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","toolUseResult":"total 12\nfile.go\n","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}
 {"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","toolUseResult":[{"type":"text","text":"reviewed"}],"message":{"content":[{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}
 {"uuid":"entry-4","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:03Z","message":{"model":"sonnet","stop_reason":"tool_use"}}
 {"uuid":"entry-5","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:04Z","toolUseResult":{"stdout":"swordfish","interrupted":true},"message":{"content":[{"type":"tool_result","tool_use_id":"call-3"}]}}`
 
 func TestReadTerminatesEveryCallInATranscriptShapedLikeARealOne(t *testing.T) {
-	result, err := Read(strings.NewReader(mixedShapeTranscript), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(mixedShapeTranscript), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -936,9 +975,9 @@ func TestReadTerminatesEveryCallInATranscriptShapedLikeARealOne(t *testing.T) {
 	// Matched by name rather than by position: which shape terminated which call is
 	// the point, and the assertion should not also depend on emission order.
 	want := map[record.Identifier]record.Outcome{
-		"Bash":          record.OutcomeOK,
-		"code-reviewer": record.OutcomeOK,
-		"pr-review":     record.OutcomeInterrupted,
+		"Bash":                   record.OutcomeOK,
+		"mcp__atlassian__search": record.OutcomeOK,
+		"pr-review":              record.OutcomeInterrupted,
 	}
 	got := map[record.Identifier]record.Outcome{}
 	for _, event := range result.Records {
@@ -993,6 +1032,23 @@ func deny(string, time.Time) (record.Hash, bool) { return "", false }
 // subkey of the per-machine salt (config.Repos.NameKey).
 var names = record.NewNamer([]byte("test scope key"))
 
+// installedPrimitives is what this package's tests treat the machine as having. It is
+// the third injected input, beside the resolver and the namer; a test about a name the
+// machine does not have passes a narrower Installed of its own.
+var installedPrimitives = NewInstalled([]InstalledPrimitive{
+	{Name: "pr-review", Kind: record.KindSkill},
+	{Name: "run-sdlc", Kind: record.KindSkill},
+	{Name: "deploy", Kind: record.KindCommand},
+})
+
+// read is this file's entry point into Read for every test that says nothing about
+// session_end derivation. It passes a zero Idleness, which derives none — the same
+// safe default a caller that cannot read the threshold gets. A test about the
+// session grain calls Read directly with a real Idleness (see session_end_test.go).
+func read(source io.Reader, resolve Resolver, names record.Namer, stale Staleness) (Result, error) {
+	return Read(source, resolve, names, installedPrimitives, stale, Idleness{})
+}
+
 // quoted encodes value as a JSON string so a hostile value can be embedded in a
 // transcript line without hand-escaping it.
 func quoted(t *testing.T, value string) string {
@@ -1013,154 +1069,45 @@ func skillCallTranscript(t *testing.T, skill string) string {
 	}, "\n")
 }
 
-// subagentCallTranscript is a terminated Task call naming subagentType as its
-// primitive.
-func subagentCallTranscript(t *testing.T, subagentType string) string {
-	t.Helper()
-	return strings.Join([]string{
-		fmt.Sprintf(`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Task","input":{"subagent_type":%s}}]}}`, quoted(t, subagentType)),
-		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
-	}, "\n")
-}
-
-func TestReadNamesASubagentCallByItsSubagentType(t *testing.T) {
-	input := strings.Join([]string{
-		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Task","input":{"subagent_type":"explorer"}},{"type":"tool_use","id":"call-2","name":"Task","input":{"subagent_type":"code-reviewer"}},{"type":"tool_use","id":"call-3","name":"Task","input":{"subagent_type":"general-purpose"}}]}}`,
-		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false},{"type":"tool_result","tool_use_id":"call-2","is_error":false},{"type":"tool_result","tool_use_id":"call-3","is_error":false}]}}`,
-	}, "\n")
-
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
-	if err != nil {
-		t.Fatalf("Read() error = %v", err)
+// ADR-0036 §2: the invoking tool_use and the subagent's own transcript are the same
+// logical event, and the transcript is the canonical source — so the invoking block
+// produces no primitive record of its own, neither a subagent record nor a
+// builtin_tool one. Both tool names are excluded: real transcripts carry "Agent"
+// (782 occurrences in ADR-0036's sample, 0 for "Task"), and "Task" stays recognised
+// for a transcript written by an older harness.
+//
+// It is a skip and not a refusal. A refusal is lost collection, which drives
+// doctor's "collects nothing"; a call Wake deliberately does not collect is a clean
+// zero and must not read as a fault.
+func TestReadDerivesNoRecordFromEitherSubagentToolName(t *testing.T) {
+	inputs := map[string]string{
+		"naming a subagent type": `,"input":{"subagent_type":"explorer"}`,
+		"naming an empty type":   `,"input":{"subagent_type":""}`,
+		"carrying no input":      ``,
 	}
-	if len(result.Records) != 3 || result.Malformed != 0 || result.Pending != 0 || result.Refused != 0 {
-		t.Fatalf("Read() = %+v, want one record per subagent invocation", result)
-	}
-	seen := map[record.Identifier]bool{}
-	for _, event := range result.Records {
-		if event.Name == "Task" {
-			t.Errorf("record is named after the tool, not the subagent: %+v", event)
+	for _, tool := range []string{"Agent", "Task"} {
+		for label, blockInput := range inputs {
+			transcript := strings.Join([]string{
+				fmt.Sprintf(`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","entrypoint":"cli","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-1","name":%q%s}]}}`, tool, blockInput),
+				`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","entrypoint":"cli","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+			}, "\n")
+			// Both staleness values, so the rule that resolves a buffered call cannot
+			// resurrect this one either: nothing was buffered to resolve.
+			for session, stale := range map[string]Staleness{"open session": {}, "closed session": closedSession} {
+				t.Run(fmt.Sprintf("%s %s, %s", tool, label, session), func(t *testing.T) {
+					result, err := read(strings.NewReader(transcript), resolver, names, stale)
+					if err != nil {
+						t.Fatalf("Read() error = %v", err)
+					}
+					if len(result.Records) != 0 {
+						t.Errorf("Read() records = %+v, want none: the subagent's own transcript is the source", result.Records)
+					}
+					if result.Refused != 0 || result.Pending != 0 || result.Malformed != 0 {
+						t.Errorf("Read() = %+v, want a clean zero — not a refusal, nothing buffered, no unusable line", result)
+					}
+				})
+			}
 		}
-		if event.Kind != record.KindSubagent {
-			t.Errorf("record kind = %q, want %q", event.Kind, record.KindSubagent)
-		}
-		if err := record.Validate(event); err != nil {
-			t.Errorf("Validate(%+v) error = %v", event, err)
-		}
-		seen[event.Name] = true
-	}
-	for _, want := range []record.Identifier{"explorer", "code-reviewer", "general-purpose"} {
-		if !seen[want] {
-			t.Errorf("no record named %q; got %v", want, seen)
-		}
-	}
-	if len(seen) != 3 {
-		t.Errorf("distinct names = %v, want exactly three", seen)
-	}
-}
-
-func TestReadCollapsesRepeatedSubagentInvocationsToOnePrimitive(t *testing.T) {
-	input := strings.Join([]string{
-		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Task","input":{"subagent_type":"explorer"}},{"type":"tool_use","id":"call-2","name":"Task","input":{"subagent_type":"explorer"}},{"type":"tool_use","id":"call-3","name":"Task","input":{"subagent_type":"code-reviewer"}}]}}`,
-		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false},{"type":"tool_result","tool_use_id":"call-2","is_error":false},{"type":"tool_result","tool_use_id":"call-3","is_error":false}]}}`,
-	}, "\n")
-
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
-	if err != nil {
-		t.Fatalf("Read() error = %v", err)
-	}
-	// The invocation grain first: two calls of one subagent stay two records with
-	// two distinct ids, so nothing is lost before aggregation collapses them.
-	if len(result.Records) != 3 {
-		t.Fatalf("Read() records = %+v, want one per invocation", result.Records)
-	}
-	var explorers []record.Record
-	for _, event := range result.Records {
-		if event.Name == "explorer" {
-			explorers = append(explorers, event)
-		}
-	}
-	if len(explorers) != 2 {
-		t.Fatalf("explorer records = %d, want 2", len(explorers))
-	}
-	if explorers[0].EventID == explorers[1].EventID {
-		t.Errorf("both explorer invocations derived the same event id %q", explorers[0].EventID)
-	}
-
-	// Then the primitive grain, through the real aggregation layer rather than by
-	// inspection.
-	summary := metrics.Aggregate(result.Records)
-	if len(summary.Primitives) != 2 {
-		t.Fatalf("Aggregate() primitives = %+v, want explorer and code-reviewer", summary.Primitives)
-	}
-	usage := map[record.Identifier]metrics.PrimitiveUsage{}
-	for _, primitive := range summary.Primitives {
-		usage[primitive.Name] = primitive
-	}
-	if got := usage["explorer"]; got.Invocations != 2 || got.Kind != record.KindSubagent {
-		t.Errorf("explorer usage = %+v, want 2 invocations of a subagent", got)
-	}
-	if got := usage["code-reviewer"]; got.Invocations != 1 || got.Kind != record.KindSubagent {
-		t.Errorf("code-reviewer usage = %+v, want 1 invocation of a subagent", got)
-	}
-}
-
-// One subagent run is one invocation, even though Claude Code's own storage
-// describes it twice: the parent's Task tool_use/tool_result pair, and the
-// attributed end_turn entry the subagent's own turn leaves behind. Both describe
-// the same logical event, so only one of them may become a record — the store's
-// collapse guarantee, and ADR-0002's invocation grain ("one call to a primitive").
-func TestReadCountsOneSubagentRunAsOneInvocation(t *testing.T) {
-	input := strings.Join([]string{
-		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-1","name":"Task","input":{"subagent_type":"explorer"}}]}}`,
-		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","attributionAgent":"explorer","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
-		`{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
-	}, "\n")
-
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
-	if err != nil {
-		t.Fatalf("Read() error = %v", err)
-	}
-	if len(result.Records) != 1 {
-		t.Fatalf("Read() records = %+v, want exactly one for one subagent run", result.Records)
-	}
-	// The surviving record is the paired one: it is the only source of the two that
-	// carries an outcome at all (ADR-0005), and the only one bounded by a start and
-	// an end rather than by a stop reason (ADR-0015).
-	event := result.Records[0]
-	if event.Kind != record.KindSubagent || event.Name != "explorer" || event.Outcome == nil || *event.Outcome != record.OutcomeOK {
-		t.Fatalf("record = %+v, want the terminated explorer call with its outcome", event)
-	}
-
-	summary := metrics.Aggregate(result.Records)
-	if len(summary.Primitives) != 1 || summary.Primitives[0].Invocations != 1 {
-		t.Errorf("Aggregate() primitives = %+v, want explorer with one invocation", summary.Primitives)
-	}
-}
-
-func TestReadDropsAndCountsASubagentCallWithNoType(t *testing.T) {
-	input := strings.Join([]string{
-		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Task"},{"type":"tool_use","id":"call-2","name":"Task","input":{"subagent_type":""}}]}}`,
-		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false},{"type":"tool_result","tool_use_id":"call-2","is_error":false}]}}`,
-	}, "\n")
-
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
-	if err != nil {
-		t.Fatalf("Read() error = %v", err)
-	}
-	if len(result.Records) != 0 {
-		t.Errorf("Read() records = %+v, want none: a nameless Task call is not collected as \"Task\"", result.Records)
-	}
-	// Nothing was buffered, so the later tool_result synthesises nothing.
-	if result.Pending != 0 {
-		t.Errorf("Pending = %d, want 0", result.Pending)
-	}
-	// A refused name is not an unusable line, so doctor's drift signal is untouched.
-	if result.Malformed != 0 {
-		t.Errorf("Malformed = %d, want 0", result.Malformed)
-	}
-	if result.Refused != 2 {
-		t.Errorf("Refused = %d, want 2", result.Refused)
 	}
 }
 
@@ -1170,10 +1117,10 @@ func TestReadDropsAndCountsASubagentCallWithNoType(t *testing.T) {
 // a repository Wake was never asked to read, and would never clear.
 func TestReadDoesNotCountARefusalInAnUnconsentedRepository(t *testing.T) {
 	for _, transcript := range []string{
-		subagentCallTranscript(t, ""),
-		subagentCallTranscript(t, "/usr/local/bin"),
+		skillCallTranscript(t, "/usr/local/bin"),
+		skillCallTranscript(t, "../secrets"),
 	} {
-		result, err := Read(strings.NewReader(transcript), deny, names, Staleness{})
+		result, err := read(strings.NewReader(transcript), deny, names, Staleness{})
 		if err != nil {
 			t.Fatalf("Read() error = %v", err)
 		}
@@ -1183,55 +1130,9 @@ func TestReadDoesNotCountARefusalInAnUnconsentedRepository(t *testing.T) {
 	}
 }
 
-func TestReadDropsAndCountsSubagentCallsWithAHostileType(t *testing.T) {
-	for _, value := range hostileValues {
-		result, err := Read(strings.NewReader(subagentCallTranscript(t, value)), resolver, names, Staleness{})
-		if err != nil {
-			t.Fatalf("Read() error = %v", err)
-		}
-		if len(result.Records) != 0 || result.Pending != 0 || result.Refused != 1 {
-			t.Errorf("Read(subagent_type=%q) = %+v", value, result)
-		}
-	}
-}
-
-func TestReadDerivesADirectoryScopedSubagentReference(t *testing.T) {
-	result, err := Read(strings.NewReader(subagentCallTranscript(t, "apps/web:reviewer")), resolver, names, Staleness{})
-	if err != nil {
-		t.Fatalf("Read() error = %v", err)
-	}
-	if len(result.Records) != 1 {
-		t.Fatalf("Read() records = %+v", result.Records)
-	}
-	event := result.Records[0]
-	if event.Kind != record.KindSubagent {
-		t.Errorf("record kind = %q, want %q", event.Kind, record.KindSubagent)
-	}
-	name := string(event.Name)
-	if !strings.HasPrefix(name, "scope-") || !strings.HasSuffix(name, ":reviewer") {
-		t.Fatalf("record name = %q, want scope-<digest>:reviewer", name)
-	}
-	if strings.Contains(name, "apps") || strings.Contains(name, "web") {
-		t.Fatalf("record name retains a path fragment: %q", name)
-	}
-	if err := record.Validate(event); err != nil {
-		t.Fatalf("Validate() error = %v", err)
-	}
-}
-
-func TestReadDropsAScopedSubagentCallWithoutAScopeKey(t *testing.T) {
-	result, err := Read(strings.NewReader(subagentCallTranscript(t, "apps/web:reviewer")), resolver, record.Namer{}, Staleness{})
-	if err != nil {
-		t.Fatalf("Read() error = %v", err)
-	}
-	if len(result.Records) != 0 || result.Pending != 0 || result.Refused != 1 {
-		t.Errorf("Read() = %+v, want the call dropped and counted, never named unkeyed", result)
-	}
-}
-
 func TestReadDropsCallsWhosePrimitiveNameIsPathShaped(t *testing.T) {
 	for _, value := range hostileValues {
-		result, err := Read(strings.NewReader(skillCallTranscript(t, value)), resolver, names, Staleness{})
+		result, err := read(strings.NewReader(skillCallTranscript(t, value)), resolver, names, Staleness{})
 		if err != nil {
 			t.Fatalf("Read() error = %v", err)
 		}
@@ -1248,7 +1149,7 @@ func TestReadDropsAttributedRunWithPathShapedAttribution(t *testing.T) {
 			// Read under closedSession, the staleness value that does emit a Shape-A
 			// fallback: under the zero Staleness this assertion would pass vacuously,
 			// because nothing is emitted for any reason at all.
-			result, err := Read(strings.NewReader(input), resolver, names, closedSession)
+			result, err := read(strings.NewReader(input), resolver, names, closedSession)
 			if err != nil {
 				t.Fatalf("Read() error = %v", err)
 			}
@@ -1262,13 +1163,206 @@ func TestReadDropsAttributedRunWithPathShapedAttribution(t *testing.T) {
 	}
 }
 
+// entrypointCallTranscript is a terminated Bash call whose tool_use entry carries
+// the given raw JSON as its top-level entrypoint. Claude Code stamps the field on
+// the entry, not on the content block, so this is where the reader has to read it
+// from.
+func entrypointCallTranscript(entrypointJSON string) string {
+	return strings.Join([]string{
+		fmt.Sprintf(`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","entrypoint":%s,"message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`, entrypointJSON),
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+	}, "\n")
+}
+
+// The ticket's three-value acceptance criterion, on the read side: Claude Code's
+// own spelling maps onto Wake's vocabulary, and the mapping is a lookup rather
+// than a pass-through (ADR-0008).
+func TestReadCarriesEachClaudeCodeEntrypoint(t *testing.T) {
+	for source, want := range map[string]record.Entrypoint{
+		"cli":     record.EntrypointCLI,
+		"sdk-py":  record.EntrypointSDKPython,
+		"sdk-cli": record.EntrypointSDKCLI,
+	} {
+		result, err := read(strings.NewReader(entrypointCallTranscript(quoted(t, source))), resolver, names, Staleness{})
+		if err != nil {
+			t.Fatalf("Read() error = %v", err)
+		}
+		if len(result.Records) != 1 || result.Refused != 0 || result.Malformed != 0 {
+			t.Fatalf("Read(entrypoint=%q) = %+v", source, result)
+		}
+		event := result.Records[0]
+		if event.Entrypoint != want {
+			t.Errorf("Read(entrypoint=%q) carried %q, want %q", source, event.Entrypoint, want)
+		}
+		if err := record.Validate(event); err != nil {
+			t.Errorf("Validate() error = %v", err)
+		}
+	}
+}
+
+func TestReadOmitsAnAbsentEntrypoint(t *testing.T) {
+	input := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+	}, "\n")
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 1 || result.Refused != 0 {
+		t.Fatalf("Read() = %+v", result)
+	}
+	event := result.Records[0]
+	if event.Entrypoint != "" {
+		t.Errorf("record carried Entrypoint = %q for an entry that reported none", event.Entrypoint)
+	}
+	if err := record.Validate(event); err != nil {
+		t.Errorf("Validate() error = %v", err)
+	}
+}
+
+// An unmapped value drops the call and counts the drop. It is never blanked, which
+// would emit the record in a degraded form, and never passed through, which would
+// put an unvalidated harness string in a persisted field (ADR-0007).
+func TestReadDropsAndCountsACallWithAnUnknownEntrypoint(t *testing.T) {
+	// "sdk_python" is deliberate: Wake's own spelling is not a Claude Code spelling
+	// and a transcript claiming it must not be trusted.
+	for _, value := range []string{"sdk-ts", "vscode", "CLI", "sdk_python"} {
+		result, err := read(strings.NewReader(entrypointCallTranscript(quoted(t, value))), resolver, names, Staleness{})
+		if err != nil {
+			t.Fatalf("Read() error = %v", err)
+		}
+		if len(result.Records) != 0 || result.Refused != 1 {
+			t.Errorf("Read(entrypoint=%q) = %+v, want no records and one refusal", value, result)
+		}
+	}
+}
+
+// TestReadTreatsANonStringEntrypointAsAnUnusableLine covers the blast radius the
+// refusal path does not: a field of the wrong JSON type fails the whole entry's
+// unmarshal, so it is a line the read had no entry for rather than a call it
+// refused — and because that entry could have carried a terminator, it is also what
+// holds the staleness rule back. entrypointCallTranscript takes raw JSON precisely
+// so this can be asserted rather than assumed.
+func TestReadTreatsANonStringEntrypointAsAnUnusableLine(t *testing.T) {
+	for _, value := range []string{"123", "{}", "[]", "true", "null"} {
+		result, err := read(strings.NewReader(entrypointCallTranscript(value)), resolver, names, Staleness{})
+		if err != nil {
+			t.Fatalf("Read() error = %v", err)
+		}
+		// null is a valid JSON string value in Go's decoder: it leaves the field at
+		// its zero value, which is a reported absence and a collectable call.
+		if value == "null" {
+			if len(result.Records) != 1 || result.Malformed != 0 || result.Refused != 0 {
+				t.Errorf("Read(entrypoint=null) = %+v, want one record", result)
+			}
+			continue
+		}
+		if len(result.Records) != 0 || result.Malformed != 1 || result.Refused != 0 {
+			t.Errorf("Read(entrypoint=%s) = %+v, want no records and one malformed line", value, result)
+		}
+	}
+}
+
+func TestReadDropsCallsWithAHostileEntrypoint(t *testing.T) {
+	for _, value := range hostileValues {
+		result, err := read(strings.NewReader(entrypointCallTranscript(quoted(t, value))), resolver, names, Staleness{})
+		if err != nil {
+			t.Fatalf("Read() error = %v", err)
+		}
+		if len(result.Records) != 0 || result.Refused != 1 {
+			t.Errorf("Read(entrypoint=%q) = %+v, want no records and one refusal", value, result)
+		}
+	}
+}
+
+// The staleness path builds its record through complete, like both
+// result-terminated paths, so it inherits the field rather than losing it.
+func TestReadCarriesEntrypointOnAnInterruptedCall(t *testing.T) {
+	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","entrypoint":"sdk-py","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 1 {
+		t.Fatalf("Read() records = %+v", result.Records)
+	}
+	event := result.Records[0]
+	if event.Outcome == nil || *event.Outcome != record.OutcomeInterrupted {
+		t.Fatalf("record = %+v, want an interrupted outcome", event)
+	}
+	if event.Entrypoint != record.EntrypointSDKPython {
+		t.Errorf("record carried Entrypoint = %q, want %q", event.Entrypoint, record.EntrypointSDKPython)
+	}
+}
+
+func TestReadCarriesEntrypointOnAnAttributedSkillRun(t *testing.T) {
+	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"pr-review","entrypoint":"cli","message":{"model":"sonnet","stop_reason":"end_turn"}}`
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 1 {
+		t.Fatalf("Read() records = %+v", result.Records)
+	}
+	if got := result.Records[0].Entrypoint; got != record.EntrypointCLI {
+		t.Errorf("record carried Entrypoint = %q, want %q", got, record.EntrypointCLI)
+	}
+}
+
+func TestReadDropsAnAttributedRunWithAnUnknownEntrypoint(t *testing.T) {
+	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"pr-review","entrypoint":"sdk-ts","message":{"model":"sonnet","stop_reason":"end_turn"}}`
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	// No candidate is built, so there is no ambiguity to report either. The drop is
+	// still lost collection and carries a count: a session whose only trace is an
+	// attributed run would otherwise leave none at all.
+	if len(result.Records) != 0 || result.AmbiguousSkillRuns != 0 || result.Refused != 1 {
+		t.Errorf("Read() = %+v, want no records, no ambiguity and one refusal", result)
+	}
+}
+
+// TestReadCountsEveryRefusedAttributedRun pins the counter to the invocations that
+// were lost rather than to the entries that carried them: two runs of different
+// skills in one session are two records that will never exist.
+func TestReadCountsEveryRefusedAttributedRun(t *testing.T) {
+	input := strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"pr-review","entrypoint":"sdk-ts","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","attributionSkill":"commit-message","entrypoint":"sdk-ts","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
+	}, "\n")
+
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 0 || result.Refused != 2 {
+		t.Errorf("Read() = %+v, want no records and two refusals", result)
+	}
+}
+
+// TestReadSkipsAnAttributedRunItNeverCollects keeps the refusal counter honest in
+// the other direction: an unconsented repository is outside collection, not lost
+// from it, so nothing about it may reach doctor's "collects nothing" arm.
+func TestReadSkipsAnAttributedRunItNeverCollects(t *testing.T) {
+	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/elsewhere","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"pr-review","entrypoint":"cli","message":{"model":"sonnet","stop_reason":"end_turn"}}`
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 0 || result.Refused != 0 {
+		t.Errorf("Read() = %+v, want no records and no refusal", result)
+	}
+}
+
 func TestReadOmitsUnsafeOptionalFieldsAndKeepsTheEvent(t *testing.T) {
 	input := strings.Join([]string{
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","version":"../1.0.0","attributionSkill":"/etc/passwd","attributionAgent":"../x","attributionMcpServer":"plugin:../evil:tool","message":{"model":"C:\\Windows","content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(input), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1285,7 +1379,7 @@ func TestReadOmitsUnsafeOptionalFieldsAndKeepsTheEvent(t *testing.T) {
 }
 
 func TestReadDerivesADirectoryScopedSkillReference(t *testing.T) {
-	result, err := Read(strings.NewReader(skillCallTranscript(t, "apps/web:deploy")), resolver, names, Staleness{})
+	result, err := read(strings.NewReader(skillCallTranscript(t, "apps/web:deploy")), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1311,7 +1405,11 @@ func TestReadPreservesRealClaudeCodeIdentityFormats(t *testing.T) {
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, Staleness{})
+	// A closing Staleness, because the entry carries both attribution fields: a
+	// skill-attributed call is emitted from the close pass under ADR-0035, not on
+	// sight of its tool_result. What the test is about — that every real field format
+	// survives the reader — is unchanged.
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1363,7 +1461,7 @@ const resultForUnterminatedCall = `{"uuid":"entry-2","sessionId":"session-1","cw
 func TestReadEmitsInterruptedForACallWhoseSessionWentStale(t *testing.T) {
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(2 * time.Hour)}
 
-	result, err := Read(strings.NewReader(unterminatedCall), resolver, names, stale)
+	result, err := read(strings.NewReader(unterminatedCall), resolver, names, stale)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1390,7 +1488,7 @@ func TestReadEmitsInterruptedForACallWhoseSessionWentStale(t *testing.T) {
 func TestReadKeepsACallBufferedInsideTheStalenessWindow(t *testing.T) {
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(30 * time.Minute)}
 
-	result, err := Read(strings.NewReader(unterminatedCall), resolver, names, stale)
+	result, err := read(strings.NewReader(unterminatedCall), resolver, names, stale)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1410,7 +1508,7 @@ func TestReadDoesNotInterruptACallInAStillActiveSession(t *testing.T) {
 	}, "\n")
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(3*time.Hour + time.Minute)}
 
-	result, err := Read(strings.NewReader(input), resolver, names, stale)
+	result, err := read(strings.NewReader(input), resolver, names, stale)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1444,7 +1542,7 @@ func oversizedResult(t *testing.T) string {
 func TestReadInterruptsAStaleCallDespiteAnOversizedLine(t *testing.T) {
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
 
-	result, err := Read(strings.NewReader(unterminatedCall+"\n"+oversizedResult(t)+"\n"), resolver, names, stale)
+	result, err := read(strings.NewReader(unterminatedCall+"\n"+oversizedResult(t)+"\n"), resolver, names, stale)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1474,7 +1572,7 @@ func TestReadDoesNotInterruptACallWhenALineWasUnusable(t *testing.T) {
 
 	for name, unusable := range cases {
 		t.Run(name, func(t *testing.T) {
-			result, err := Read(strings.NewReader(unterminatedCall+"\n"+unusable+"\n"), resolver, names, stale)
+			result, err := read(strings.NewReader(unterminatedCall+"\n"+unusable+"\n"), resolver, names, stale)
 			if err != nil {
 				t.Fatalf("Read() error = %v", err)
 			}
@@ -1515,7 +1613,7 @@ func TestReadDoesNotInterruptACallTerminatedByAnyResultShape(t *testing.T) {
 				payload +
 				`,"message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`
 
-			result, err := Read(strings.NewReader(unterminatedCall+"\n"+terminator+"\n"), resolver, names, stale)
+			result, err := read(strings.NewReader(unterminatedCall+"\n"+terminator+"\n"), resolver, names, stale)
 			if err != nil {
 				t.Fatalf("Read() error = %v", err)
 			}
@@ -1542,7 +1640,7 @@ func TestReadResolvesSessionsDespiteAnOversizedLine(t *testing.T) {
 	input := strings.Join([]string{unterminatedCall, oversizedResult(t)}, "\n")
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
 
-	result, err := Read(strings.NewReader(input), resolver, names, stale)
+	result, err := read(strings.NewReader(input), resolver, names, stale)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1566,7 +1664,7 @@ func TestReadKeepsEverySessionOpenWhenALineWasUnreadable(t *testing.T) {
 	input := strings.Join([]string{unterminatedCall, unreadable}, "\n")
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
 
-	result, err := Read(strings.NewReader(input), resolver, names, stale)
+	result, err := read(strings.NewReader(input), resolver, names, stale)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1589,7 +1687,7 @@ func TestReadStillResolvesStaleCallsWhenEveryLineWasUsable(t *testing.T) {
 	}, "\n")
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
 
-	result, err := Read(strings.NewReader(input), resolver, names, stale)
+	result, err := read(strings.NewReader(input), resolver, names, stale)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1632,7 +1730,7 @@ func TestReadStillResolvesAStaleCallOnATranscriptCarryingBookkeepingLines(t *tes
 
 	for name, input := range inputs {
 		t.Run(name, func(t *testing.T) {
-			result, err := Read(strings.NewReader(input), resolver, names, stale)
+			result, err := read(strings.NewReader(input), resolver, names, stale)
 			if err != nil {
 				t.Fatalf("Read() error = %v", err)
 			}
@@ -1662,18 +1760,26 @@ func TestReadStillResolvesAStaleCallOnATranscriptCarryingBookkeepingLines(t *tes
 // rest, so the line is still inspectable — and neither of these carries a tool_result
 // block, so neither can be the terminator of a buffered call.
 //
-// They are the common case, not an edge: sampling ~/.claude/projects, message.content
-// arrives as a plain string on thousands of user turns, touching almost every
-// transcript. A gate keyed on "json.Unmarshal returned an error" would therefore be as
-// permanently closed as one keyed on Malformed was.
+// A gate keyed on "json.Unmarshal returned an error" would be as permanently closed as
+// one keyed on Malformed was, so the shape below has to keep standing for a line the
+// reader has no entry for and which nonetheless hides nothing.
 //
-// A non-object toolUseResult used to belong here and no longer does: the field is read
-// raw, so such a line decodes whole (see transcriptEntry.ToolUseResult). It is covered
-// as an ordinary readable line instead — by
-// TestReadDoesNotInterruptACallTerminatedByAnyResultShape when it terminates a call,
-// and by the case below when it does not.
+// Two shapes used to belong here and no longer do. A non-object toolUseResult decodes
+// whole, because the field is read raw (see transcriptEntry.ToolUseResult); it is
+// covered as an ordinary readable line by
+// TestReadDoesNotInterruptACallTerminatedByAnyResultShape when it terminates a call and
+// by the case below when it does not. And a user turn whose content is a plain string
+// decodes whole now too, because the reader models that shape — it is the one a typed
+// invocation's command tag arrives on (messageContent, ADR-0036 §3) — so it is covered
+// by TestReadDecodesAUserTurnWhoseContentIsText instead.
+//
+// What is left is a content at a type the reader models neither of, which
+// messageContent.UnmarshalJSON still deliberately costs the entry for rather than
+// guessing at. The map must not go empty:
+// TestReadStillResolvesAStaleCallWhenALineOnlyPartlyDecoded iterates it and would pass
+// vacuously.
 var partlyDecodedLines = map[string]string{
-	"a user turn whose content is text rather than blocks": `{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","type":"user","message":{"role":"user","content":"carry on"}}`,
+	"a user turn whose content is an object rather than blocks or text": `{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","type":"user","message":{"role":"user","content":{"note":"carry on"}}}`,
 }
 
 func TestReadStillResolvesAStaleCallWhenALineOnlyPartlyDecoded(t *testing.T) {
@@ -1681,7 +1787,7 @@ func TestReadStillResolvesAStaleCallWhenALineOnlyPartlyDecoded(t *testing.T) {
 
 	for name, line := range partlyDecodedLines {
 		t.Run(name, func(t *testing.T) {
-			result, err := Read(strings.NewReader(unterminatedCall+"\n"+line), resolver, names, stale)
+			result, err := read(strings.NewReader(unterminatedCall+"\n"+line), resolver, names, stale)
 			if err != nil {
 				t.Fatalf("Read() error = %v", err)
 			}
@@ -1695,6 +1801,58 @@ func TestReadStillResolvesAStaleCallWhenALineOnlyPartlyDecoded(t *testing.T) {
 	}
 }
 
+// A plain-string message.content is where a typed invocation's command tag lives, so
+// the reader has to get an entry out of that line at all before ADR-0036 §3 can read
+// anything from it. It used to be a *json.UnmarshalTypeError that cost the whole entry.
+func TestReadDecodesAUserTurnWhoseContentIsText(t *testing.T) {
+	line := `{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","type":"user","message":{"role":"user","content":"carry on"}}`
+
+	result, err := read(strings.NewReader(unterminatedCall+"\n"+line), resolver, names, closedSession)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if result.Malformed != 0 {
+		t.Errorf("Malformed = %d, want 0 — the line now yields an entry", result.Malformed)
+	}
+	// The line is still not a terminator, so the staleness rule still runs over it.
+	if result.Interrupted != 1 || result.Pending != 0 || len(result.Records) != 1 {
+		t.Fatalf("Read() = %+v", result)
+	}
+}
+
+// The default branch of messageContent.UnmarshalJSON delegates to the block decode, so
+// every shape other than a string costs the entry exactly as it did before — and the
+// line stays inspectable, so it still cannot stop the staleness rule.
+func TestReadStillCostsTheEntryForAContentTypeItModelsNeither(t *testing.T) {
+	line := `{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","type":"user","message":{"role":"user","content":{"note":"carry on"}}}`
+
+	result, err := read(strings.NewReader(unterminatedCall+"\n"+line), resolver, names, closedSession)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if result.Malformed != 1 {
+		t.Errorf("Malformed = %d, want 1 — the entry is still lost", result.Malformed)
+	}
+	if result.Interrupted != 1 || result.Pending != 0 {
+		t.Fatalf("Read() = %+v", result)
+	}
+}
+
+// D8's first intended side effect, pinned so a later change cannot silently undo it: a
+// string-shaped content is no longer a parse error, on the commonest line shape a real
+// transcript has.
+func TestReadCountsNoParseErrorForAStringShapedUserEntry(t *testing.T) {
+	line := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","type":"user","message":{"role":"user","content":"carry on"}}`
+
+	result, err := read(strings.NewReader(line), resolver, names, Staleness{})
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if result.Malformed != 0 {
+		t.Fatalf("Malformed = %d, want 0", result.Malformed)
+	}
+}
+
 func TestReadStillResolvesAStaleCallPastANonObjectToolUseResult(t *testing.T) {
 	// An entry whose toolUseResult is an array and which carries no tool_result block:
 	// fully readable, so it is not blindness, and not a terminator, so it resolves
@@ -1703,7 +1861,7 @@ func TestReadStillResolvesAStaleCallPastANonObjectToolUseResult(t *testing.T) {
 	line := `{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","toolUseResult":["one","two"],"message":{"content":[{"type":"text"}]}}`
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
 
-	result, err := Read(strings.NewReader(unterminatedCall+"\n"+line), resolver, names, stale)
+	result, err := read(strings.NewReader(unterminatedCall+"\n"+line), resolver, names, stale)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1722,8 +1880,11 @@ func TestReadTreatsALineWithNoEntryAsActivityForItsSession(t *testing.T) {
 	// This is what the narrowed gate makes load-bearing: these lines no longer stop the
 	// rule, so the rule has to take account of them rather than not see them.
 	lines := map[string]string{
-		"bookkeeping line":  `{"type":"queue-operation","operation":"enqueue","sessionId":"session-1","timestamp":"2026-08-13T19:30:00Z"}`,
-		"partly decoded":    `{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T19:30:00Z","type":"user","message":{"role":"user","content":"carry on"}}`,
+		"bookkeeping line": `{"type":"queue-operation","operation":"enqueue","sessionId":"session-1","timestamp":"2026-08-13T19:30:00Z"}`,
+		// An object content, not the string one this line used to carry: the reader models
+		// a string content now (messageContent), so that shape yields an entry and no
+		// longer stands for a line the reader has none for.
+		"partly decoded":    `{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T19:30:00Z","type":"user","message":{"role":"user","content":{"note":"carry on"}}}`,
 		"unusable entry id": `{"uuid":"not/a/token","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T19:30:00Z","message":{"content":[{"type":"text"}]}}`,
 	}
 	// 20:00 against a 19:30 line: half an hour inside a one-hour window.
@@ -1731,7 +1892,7 @@ func TestReadTreatsALineWithNoEntryAsActivityForItsSession(t *testing.T) {
 
 	for name, line := range lines {
 		t.Run(name, func(t *testing.T) {
-			result, err := Read(strings.NewReader(unterminatedCall+"\n"+line), resolver, names, stale)
+			result, err := read(strings.NewReader(unterminatedCall+"\n"+line), resolver, names, stale)
 			if err != nil {
 				t.Fatalf("Read() error = %v", err)
 			}
@@ -1752,11 +1913,11 @@ func TestReadDerivesTheSameEventIDForAStaleCallAsForACompletedOne(t *testing.T) 
 	// comes from the source event, so no suffix and no second id namespace separates
 	// the interrupted record from the completed one (ADR-0004). That is what makes a
 	// rescan, a retry and two concurrent scans all a no-op at the store.
-	stale, err := Read(strings.NewReader(unterminatedCall), resolver, names, Staleness{Timeout: time.Hour, Now: callInstant.Add(2 * time.Hour)})
+	stale, err := read(strings.NewReader(unterminatedCall), resolver, names, Staleness{Timeout: time.Hour, Now: callInstant.Add(2 * time.Hour)})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
-	completed, err := Read(strings.NewReader(unterminatedCall+"\n"+resultForUnterminatedCall), resolver, names, Staleness{})
+	completed, err := read(strings.NewReader(unterminatedCall+"\n"+resultForUnterminatedCall), resolver, names, Staleness{})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1769,7 +1930,7 @@ func TestReadDerivesTheSameEventIDForAStaleCallAsForACompletedOne(t *testing.T) 
 
 	// And a different clock does not change it either: the id is derived from the
 	// source event, never from when the scan happened.
-	later, err := Read(strings.NewReader(unterminatedCall), resolver, names, Staleness{Timeout: time.Minute, Now: callInstant.Add(400 * time.Hour)})
+	later, err := read(strings.NewReader(unterminatedCall), resolver, names, Staleness{Timeout: time.Minute, Now: callInstant.Add(400 * time.Hour)})
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1790,7 +1951,7 @@ func TestReadEmitsStaleCallsInADeterministicOrder(t *testing.T) {
 
 	var want []record.Hash
 	for attempt := range 20 {
-		result, err := Read(strings.NewReader(input), resolver, names, stale)
+		result, err := read(strings.NewReader(input), resolver, names, stale)
 		if err != nil {
 			t.Fatalf("Read() error = %v", err)
 		}
@@ -1818,7 +1979,7 @@ func TestReadReportsTheCursorFloorOfTheEarliestOpenSession(t *testing.T) {
 	input := strings.Join([]string{closedSession, openFirst, openLater}, "\n")
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8*time.Hour + 30*time.Minute)}
 
-	result, err := Read(strings.NewReader(input), resolver, names, stale)
+	result, err := read(strings.NewReader(input), resolver, names, stale)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1842,7 +2003,7 @@ func TestReadReleasesTheCursorFloorWhenEverySessionClosed(t *testing.T) {
 	second := `{"uuid":"entry-2","sessionId":"session-2","cwd":"/repo","timestamp":"2026-08-13T12:00:05Z","message":{"content":[{"type":"tool_use","id":"call-2","name":"Read"}]}}`
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
 
-	result, err := Read(strings.NewReader(unterminatedCall+"\n"+second), resolver, names, stale)
+	result, err := read(strings.NewReader(unterminatedCall+"\n"+second), resolver, names, stale)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1863,7 +2024,7 @@ func TestReadPinsTheCursorFloorForAnOpenSessionWithNothingBuffered(t *testing.T)
 	// re-read, which writes nothing twice (ADR-0004).
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(30 * time.Minute)}
 
-	result, err := Read(strings.NewReader(unterminatedCall+"\n"+resultForUnterminatedCall), resolver, names, stale)
+	result, err := read(strings.NewReader(unterminatedCall+"\n"+resultForUnterminatedCall), resolver, names, stale)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1889,7 +2050,7 @@ func TestReadPinsTheCursorFloorForASessionHoldingOnlyASkillCandidate(t *testing.
 	live := `{"uuid":"entry-2","sessionId":"session-live","cwd":"/repo","timestamp":"2026-08-13T19:45:00Z","attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
 
-	result, err := Read(strings.NewReader(strings.Join([]string{closed, live}, "\n")), resolver, names, stale)
+	result, err := read(strings.NewReader(strings.Join([]string{closed, live}, "\n")), resolver, names, stale)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -1925,16 +2086,22 @@ func TestReadDoesNotInterruptACallItNeverCollected(t *testing.T) {
 		"a session id outside the token domain": {
 			transcript: `{"uuid":"entry-1","sessionId":"` + strings.Repeat("s", 1024) + `","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
 		},
-		"a subagent call naming no subagent": {
-			transcript:  `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Task"}]}}`,
+		"a call whose primitive name the grammar refuses": {
+			transcript:  `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Skill","input":{"skill":"../secrets"}}]}}`,
 			wantRefused: 1,
+		},
+		// A subagent invocation is a clean zero rather than a refusal: the subagent's
+		// own transcript is the canonical source of that run, so this block was never
+		// Wake's to collect (ADR-0036 §2).
+		"a subagent invocation call": {
+			transcript: `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Agent","input":{"subagent_type":"explorer"}}]}}`,
 		},
 	}
 	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
 
 	for name, test := range cases {
 		t.Run(name, func(t *testing.T) {
-			result, err := Read(strings.NewReader(test.transcript), resolver, names, stale)
+			result, err := read(strings.NewReader(test.transcript), resolver, names, stale)
 			if err != nil {
 				t.Fatalf("Read() error = %v", err)
 			}
@@ -1965,7 +2132,7 @@ func TestReadRetainsNothingFromAnInterruptedCall(t *testing.T) {
 			`{"uuid":"entry-1","sessionId":"session-1","cwd":%s,"timestamp":"2026-08-13T12:00:00Z","toolDenialKind":%s,"pad":%s,"message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
 			quoted(t, consentedPath), quoted(t, value), quoted(t, "swordfish-"+value))
 
-		result, err := Read(strings.NewReader(transcript), resolver, names, stale)
+		result, err := read(strings.NewReader(transcript), resolver, names, stale)
 		if err != nil {
 			t.Fatalf("Read() error = %v", err)
 		}
@@ -2008,7 +2175,7 @@ func TestReadRetainsNothingFromASkillFallback(t *testing.T) {
 			`{"uuid":"entry-1","sessionId":"session-1","cwd":%s,"timestamp":"2026-08-13T12:00:00Z","toolDenialKind":%s,"pad":%s,"attributionSkill":"pr-review","message":{"model":"sonnet","stop_reason":"end_turn"}}`,
 			quoted(t, consentedPath), quoted(t, value), quoted(t, "swordfish-"+value))
 
-		result, err := Read(strings.NewReader(transcript), resolver, names, closedSession)
+		result, err := read(strings.NewReader(transcript), resolver, names, closedSession)
 		if err != nil {
 			t.Fatalf("Read() error = %v", err)
 		}
@@ -2038,9 +2205,14 @@ func TestReadRetainsNothingFromASkillFallback(t *testing.T) {
 }
 
 func TestMarshalledRecordsCarryNoSeparator(t *testing.T) {
-	inputs := []string{skillCallTranscript(t, "apps/web:deploy"), subagentCallTranscript(t, "apps/web:reviewer")}
+	inputs := []string{
+		skillCallTranscript(t, "apps/web:deploy"),
+		subagentTranscript(t, "agent-1", "session-1", "apps/web:reviewer"),
+	}
 	for _, value := range hostileValues {
-		inputs = append(inputs, skillCallTranscript(t, value), subagentCallTranscript(t, value))
+		inputs = append(inputs,
+			skillCallTranscript(t, value),
+			subagentTranscript(t, "agent-1", "session-1", value))
 	}
 	inputs = append(inputs, strings.Join([]string{
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","version":"../1.0.0","attributionSkill":"/etc/passwd","attributionAgent":"../secrets","attributionMcpServer":"plugin:../evil:tool","message":{"model":"~/.ssh/id_rsa","content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
@@ -2049,24 +2221,33 @@ func TestMarshalledRecordsCarryNoSeparator(t *testing.T) {
 
 	// Every input under both staleness values, so each one also traverses the two
 	// terminal paths a closed session opens: the interrupted rule, and the Shape-A
-	// skill fallback. A record built on either of those must carry no path fragment
+	// skill fallback. And under both idleness values, so each also traverses the
+	// third — the session grain, whose record is built from an anchor entry rather
+	// than from a call. A record built on any of those must carry no path fragment
 	// either (ADR-0007).
 	for _, input := range inputs {
 		for _, stale := range []Staleness{{}, closedSession} {
-			result, err := Read(strings.NewReader(input), resolver, names, stale)
-			if err != nil {
-				t.Fatalf("Read() error = %v", err)
+			for _, idle := range []Idleness{{}, finished} {
+				assertNoSeparatorInRecords(t, input, stale, idle)
 			}
-			for _, event := range result.Records {
-				encoded, err := record.Marshal(event)
-				if err != nil {
-					t.Fatalf("Marshal() error = %v", err)
-				}
-				for _, fragment := range []string{"/", `\`, "etc", "Windows", "secrets", ".ssh"} {
-					if strings.Contains(string(encoded), fragment) {
-						t.Fatalf("record contains %q: %s", fragment, encoded)
-					}
-				}
+		}
+	}
+}
+
+func assertNoSeparatorInRecords(t *testing.T, input string, stale Staleness, idle Idleness) {
+	t.Helper()
+	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, stale, idle)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	for _, event := range result.Records {
+		encoded, err := record.Marshal(event)
+		if err != nil {
+			t.Fatalf("Marshal() error = %v", err)
+		}
+		for _, fragment := range []string{"/", `\`, "etc", "Windows", "secrets", ".ssh"} {
+			if strings.Contains(string(encoded), fragment) {
+				t.Fatalf("record contains %q: %s", fragment, encoded)
 			}
 		}
 	}

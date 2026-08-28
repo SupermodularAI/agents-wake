@@ -98,6 +98,63 @@ func TestDiagnoseDoesNotCallPendingOrInterruptedCallsLostCollection(t *testing.T
 	}
 }
 
+// Records the spool holds and no surface can read are lost collection until something
+// re-derives them — the same shape as a source nobody could read, and the reason the
+// "collects nothing" arm exists. A rebuild that has already happened is the opposite:
+// the scan reporting it is the scan that fixed it, and calling that "collects nothing"
+// would contradict the events the same scan wrote.
+func TestDiagnoseSeparatesARebuildThatHappenedFromOneStillOwed(t *testing.T) {
+	for _, c := range []struct {
+		name        string
+		scan        Scan
+		want        State
+		wantRebuild StoreRebuild
+	}{
+		{
+			name:        "a spool this build cannot read, left for the user to rebuild",
+			scan:        Scan{Transcripts: 1, StaleRecords: 3},
+			want:        StateCollectsNothing,
+			wantRebuild: StoreRebuildNeeded,
+		},
+		{
+			name:        "the same records, alongside forward collection that worked",
+			scan:        Scan{Transcripts: 1, EventsWritten: 2, StaleRecords: 3},
+			want:        StateCollectsNothing,
+			wantRebuild: StoreRebuildNeeded,
+		},
+		{
+			name:        "a rebuild the same scan performed",
+			scan:        Scan{Transcripts: 1, EventsWritten: 2, StaleRecords: 3, StaleRebuilt: true},
+			want:        StateCollecting,
+			wantRebuild: StoreRebuildDone,
+		},
+		{
+			name:        "a rebuild that re-derived nothing, because the harness had pruned it",
+			scan:        Scan{Transcripts: 1, Skipped: 1, StaleRecords: 3, StaleRebuilt: true},
+			want:        StateCollectsZero,
+			wantRebuild: StoreRebuildDone,
+		},
+		{
+			name:        "a spool this build reads",
+			scan:        Scan{Transcripts: 1, EventsWritten: 2},
+			want:        StateCollecting,
+			wantRebuild: StoreRebuildNotNeeded,
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			c.scan.At = scannedAt
+
+			got := Diagnose(Report{Scan: c.scan}, nil, nil)
+			if got.State != c.want {
+				t.Errorf("State = %q, want %q", got.State, c.want)
+			}
+			if got.StoreRebuild != c.wantRebuild {
+				t.Errorf("StoreRebuild = %q, want %q", got.StoreRebuild, c.wantRebuild)
+			}
+		})
+	}
+}
+
 // The scan time the printer renders is a decision, not a format: a counter file this
 // build could not read has no scan time rather than a zero one, and rendering the
 // zero time as a timestamp would date the last scan to year one.
@@ -147,6 +204,9 @@ func TestDiagnoseOnlyEverReturnsAKnownState(t *testing.T) {
 		{Scan: Scan{At: scannedAt, Transcripts: 3, Skipped: 3}},
 		{Scan: Scan{At: scannedAt, EventsWritten: 4}},
 		{Scan: Scan{At: scannedAt, EventsWritten: 1, PendingCalls: 5, InterruptedCalls: 3}},
+		{Scan: Scan{At: scannedAt, EventsWritten: 1, BoundarySkipped: 2}},
+		{Scan: Scan{At: scannedAt, EventsWritten: 1, BoundaryRefused: 2}},
+		{Scan: Scan{At: scannedAt, EventsWritten: 1, RefusedSubagentRuns: 2}},
 	}
 	failures := []error{nil, errors.New("refused")}
 
@@ -158,5 +218,68 @@ func TestDiagnoseOnlyEverReturnsAKnownState(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// A registration the boundary could not complete is reported as its own number and
+// does not blind the integration state.
+//
+// It is a standing fact about a directory rather than a source nobody could read: the
+// same directory is re-observed and re-refused by every scan, nothing records that it
+// was refused, and no command removes the entry it nests with. Folding it in would put
+// a machine that is collecting normally into "collects nothing" permanently, which is
+// the reason Skipped and an ambiguous skill run are not in it either. The counter is
+// what says collection was lost there, and doctor prints it beside the boundary's own
+// state.
+func TestDiagnoseDoesNotLetARefusedBoundaryRegistrationBlindTheIntegrationState(t *testing.T) {
+	got := Diagnose(Report{Scan: Scan{At: scannedAt, Transcripts: 2, EventsWritten: 4, BoundaryRefused: 1}}, nil, nil)
+	if got.State != StateCollecting {
+		t.Errorf("State = %q, want %q", got.State, StateCollecting)
+	}
+}
+
+// A subagent run refused for want of a name is reported as its own number and does
+// not blind the integration state.
+//
+// It is the same shape as a refused boundary registration and as an ambiguous skill
+// run: the transcript was read completely, the refusal is a documented decision
+// (ADR-0036 §2 measured 2% of real subagent transcripts declaring no name at all, and
+// refuses to name them from the harness's documented default), and no scan will ever
+// see that transcript differently. With no incremental cursor every scan re-reads the
+// whole history and re-refuses the same runs, so folding it into "collects nothing"
+// would pin a machine writing thousands of records to that word for good — and a state
+// word that can never change again is not a diagnosis.
+//
+// The counter is what reports the loss, and doctor prints it whatever the state word
+// says. RefusedCalls keeps its own arm below, so the drift signal that arm exists for
+// is unaffected.
+func TestDiagnoseDoesNotLetARefusedSubagentRunBlindTheIntegrationState(t *testing.T) {
+	got := Diagnose(Report{Scan: Scan{At: scannedAt, Transcripts: 2, EventsWritten: 4, RefusedSubagentRuns: 1}}, nil, nil)
+	if got.State != StateCollecting {
+		t.Errorf("State = %q, want %q", got.State, StateCollecting)
+	}
+}
+
+// A directory the boundary discovered and that is no longer there is an honest zero,
+// for the reason Skipped is one: there is nothing left there to read, so nothing was
+// lost by not registering it. Folding it in would put every machine that has ever
+// deleted a project directory permanently into "collects nothing".
+func TestDiagnoseDoesNotCallAVanishedBoundaryDirectoryLostCollection(t *testing.T) {
+	got := Diagnose(Report{Scan: Scan{At: scannedAt, Transcripts: 2, EventsWritten: 4, BoundarySkipped: 3}}, nil, nil)
+	if got.State != StateCollecting {
+		t.Errorf("State = %q, want %q", got.State, StateCollecting)
+	}
+}
+
+// A typed invocation naming something this machine has no primitive for is not lost
+// collection at all — a typed CLI built-in was never Wake's to collect — so it is one
+// step weaker than the refused subagent run above and excluded for the same reason on
+// top of that: every scan re-reads the whole history and re-skips the same built-ins,
+// and roughly 101 of 136 observed occurrences are built-ins, so a state word following
+// this counter could never change again (ADR-0036 §3).
+func TestDiagnoseDoesNotBlindTheStateOnASkippedTypedInvocation(t *testing.T) {
+	got := Diagnose(Report{Scan: Scan{At: scannedAt, Transcripts: 2, EventsWritten: 4, SkippedTypedInvocations: 99}}, nil, nil)
+	if got.State != StateCollecting {
+		t.Errorf("State = %q, want %q", got.State, StateCollecting)
 	}
 }

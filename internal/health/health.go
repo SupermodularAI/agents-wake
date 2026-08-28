@@ -7,11 +7,13 @@
 // ADR-0016 requires that path to exit 0 in silence, so the signal has to be left
 // somewhere `doctor` can read it later.
 //
-// Every field is an int or a time. There is no free-text field, and there is no
-// field that could hold one: `doctor` output is what people paste into issues, so a
+// Every field is an int, a bool, or a time. There is no free-text field, and there is
+// no field that could hold one: `doctor` output is what people paste into issues, so a
 // counter carries a count and never a line, a path, or a label (ADR-0019 §7,
 // ADR-0007 applied to diagnostics). A test asserts the field types, because the
-// temptation a later change will feel is to add "and here is why" as a string. The
+// temptation a later change will feel is to add "and here is why" as a string. A bool
+// is admitted on the same terms as an int and no looser — two values, neither of them
+// text — and only for a fact that is a yes or a no rather than a count. The
 // state word `doctor` prints is Diagnose's return value derived over these counters
 // on every read, and never a field in the file.
 //
@@ -45,7 +47,29 @@ import (
 // Bumped to 3 when the scan gained the ambiguous-skill-run counter (T121): a version-2
 // file read as this format would report 0 for a counter nobody measured, which is the
 // same failure the bump to 2 avoided.
-const reportVersion = 3
+//
+// Bumped to 4 when the scan gained the two collection-boundary counters (DG-75): a
+// version-3 file read as this format would report 0 for two counters nobody measured,
+// and one of them is the only line that says a repository under the boundary could not
+// be registered. Same failure, same remedy, and the same cost — one scan's
+// diagnostics, on a file that is derived and non-precious (ADR-0014).
+//
+// Bumped to 5 when the scan gained the stale-record counter and the flag saying
+// whether that scan rebuilt them (DG-81): a version-4 file read as this format would
+// report 0 and false for two facts nobody measured, and together they are the only
+// lines saying whether the store still holds records this build cannot read. Same
+// failure, same remedy, same cost.
+//
+// Bumped to 6 when the scan gained the refused-subagent-run counter (DG-84): a
+// version-5 file read as this format would report 0 for a counter nobody measured, and
+// it is the only line that says a subagent run happened and no number carries it. Same
+// failure, same remedy, same cost.
+//
+// Bumped to 7 when the scan gained the skipped-typed-invocation counter (DG-85): a
+// version-6 file read as this format would report 0 for a counter nobody measured, and
+// it is the only line that says a typed invocation named something this machine has no
+// primitive for. Same failure, same remedy, same cost.
+const reportVersion = 7
 
 // reportFileMode is the mode the counter file is written with. It holds no path and
 // no label, but it is state about this user's machine and the rest of the local
@@ -80,12 +104,34 @@ type Scan struct {
 	Skipped         int       `json:"skipped"`
 	EventsWritten   int       `json:"events_written"`
 	RefusedProjects int       `json:"refused_projects"`
-	// RefusedCalls counts primitive invocations a reader found but could not name:
-	// the invocation happened and no number carries it. It is separate from
+	// RefusedCalls counts primitive invocations a reader found but could not
+	// derive a valid record from — it could not name the primitive, or a bounded
+	// dimension such as the entrypoint carried a value outside Wake's vocabulary:
+	// the invocation happened and no number carries it. A tool call and an
+	// attributed skill run both reach it, because both are an invocation. It is separate from
 	// ParseErrors, which counts lines that were unusable, and from Skipped, which is
 	// an honest zero — this one is collection that was lost, and it is what a
 	// harness renaming the field a primitive's identity lives in looks like.
+	//
+	// A subagent run refused for want of a name is deliberately not in it, and has a
+	// counter of its own: that refusal is a standing fact about a transcript rather than
+	// something a scan found out, and this counter is the one Diagnose reads as drift.
 	RefusedCalls int `json:"refused_calls"`
+	// RefusedSubagentRuns counts subagent runs a scan resolved and could not name —
+	// the transcript declared no name at all (2% of real ones, ADR-0036 §2), declared
+	// one the name grammar refuses, or declared a directory-scoped one this build has
+	// no scope key to digest (ADR-0020). The run happened and no number carries it, so
+	// this is collection that was lost and the counter is what reports it (plan §3.3,
+	// §12). Fail closed: nothing is written and no name is inferred from the harness's
+	// documented default.
+	//
+	// It is separate from RefusedCalls, which counts what one source's own lines
+	// refused, for the reason Diagnose acts on: this one is a standing fact about a
+	// transcript. Every scan re-reads the whole history — there is no incremental cursor
+	// yet (T020, T102) — re-resolves the same runs and refuses them again, and no Wake
+	// release will ever name them. So it is deliberately not one of Diagnose's "collects
+	// nothing" reasons: a state word driven by this counter could never change again.
+	RefusedSubagentRuns int `json:"refused_subagent_runs"`
 	// PendingCalls counts tool calls the last scan found unterminated whose session is
 	// still inside the staleness window: a number that is not final yet, not collection
 	// that was lost (ADR-0015). It is deliberately not one of Diagnose's
@@ -109,6 +155,72 @@ type Scan struct {
 	// nothing" reasons: the transcript was read completely and the collapse is a
 	// documented decision, not a source nobody could read.
 	AmbiguousSkillRuns int `json:"ambiguous_skill_runs"`
+	// SkippedTypedInvocations counts typed invocations the last scan read the command tag
+	// of and derived no record from, because the name it declared is not a primitive this
+	// machine has: the installed-primitive set the reader was handed does not hold it,
+	// holds it under a kind ADR-0036 §1's precedence row does not cover, or the
+	// name/scope grammar refuses it.
+	//
+	// It is a skip and not lost collection. A typed CLI built-in like /clear was never
+	// Wake's to collect, so nothing was lost. It is reported all the same because that
+	// set is injected and therefore fallible: a name absent from it may be a built-in, or
+	// may be a primitive since uninstalled or renamed, and nothing in the transcript
+	// tells the two apart.
+	//
+	// It is deliberately not one of integrationState's "collects nothing" reasons, and
+	// this is the strongest case of that exclusion rather than the weakest. Every scan
+	// re-reads the whole history and re-skips the same built-ins — roughly 101 of 136
+	// observed occurrences are built-ins — so a state word following it would be pinned
+	// to "collects nothing" on every machine forever while thousands of records are
+	// written, and a state word that can never change again is not a diagnosis (ADR-0036
+	// §3, plan §3.3, §12). See claudecode.Result.SkippedTypedInvocations and Diagnose.
+	SkippedTypedInvocations int `json:"skipped_typed_invocations"`
+	// BoundarySkipped counts directories a scan discovered under the recorded global
+	// root and did not register because the directory no longer exists (ADR-0032
+	// Consequences). It is an honest zero, not lost collection: there is nothing left
+	// there to read, so it is deliberately not one of Diagnose's "collects nothing"
+	// reasons — the same reason Skipped is not.
+	BoundarySkipped int `json:"boundary_skipped"`
+	// BoundaryRefused counts directories a scan discovered under the recorded global
+	// root and could not register — most often a root that nests with one already
+	// recorded (ADR-0019 §5), and otherwise a discovered root the boundary does not
+	// enclose. The sessions in it were readable and no number carries them, so this is
+	// collection that was lost and the counter is what reports it (plan §3.3, §12).
+	//
+	// It is deliberately not one of Diagnose's "collects nothing" reasons, and that
+	// exclusion is argued where the arm is: every scan re-observes the same directory
+	// and refuses it again, so a state word driven by this counter could never change
+	// again.
+	BoundaryRefused int `json:"boundary_refused"`
+	// StaleRecords counts records the last scan found in the spool carrying a record
+	// schema version this build does not read (record.SchemaVersion, ADR-0007's
+	// dimension addition, ADR-0015's rebuild-not-migration). Every consumer reads the
+	// spool through store.Entries, which drops them the way it drops any line that does
+	// not decode, so this is the only number that says they are there at all.
+	//
+	// It counts what the scan found, not what it did about it — StaleRebuilt is that —
+	// because the two scopes answer differently and a single number could not say which
+	// happened.
+	StaleRecords int `json:"stale_records"`
+	// StaleRebuilt is whether that scan discarded the spool and re-derived it from the
+	// harness's own history.
+	//
+	// Only a scan that imports the whole history does: the rescan half of "drop and
+	// rescan" has to be able to bring back everything the drop removed, and the
+	// hook-fired scan collects inside each repository's recorded boundary (ADR-0025), so
+	// what it re-derived would be narrower than what it deleted. This is what lets
+	// doctor report a rebuild that happened separately from one that is still owed.
+	//
+	// A rebuild is also the honest report of what it cannot promise: a period the
+	// harness has since pruned was in the store and nowhere else, so it does not come
+	// back (ADR-0014).
+	//
+	// A rebuild that happened is deliberately not one of Diagnose's "collects nothing"
+	// reasons — the scan that reports it is the scan that fixed it, so the state word
+	// would contradict the events that scan wrote, and the next scan reports zero. One
+	// that is still owed is: those records are in the store and no surface can read
+	// them, which is the definition that arm exists for.
+	StaleRebuilt bool `json:"stale_rebuilt"`
 }
 
 // Hooks is what the last `init` or `remove` managed to do. KeptOwned is the partial

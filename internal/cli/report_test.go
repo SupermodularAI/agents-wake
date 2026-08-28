@@ -271,6 +271,63 @@ func TestReportAggregatesEveryConsentedRepositoryNotOnlyTheOneItRunsIn(t *testin
 	if !strings.Contains(out, "skill-a") {
 		t.Fatalf("wake report only shows the current directory's repo, not every consented one: %s", out)
 	}
+	// Neither literal hash is one a registration derived, so both rows take the
+	// id fallback — and the two rows must still be told apart, never blank.
+	for _, want := range []string{"repo-0123456789ab", "repo-fedcba987654"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("wake report did not distinguish the unlabelled repository %q: %s", want, out)
+		}
+	}
+}
+
+// TestReportShowsTheRepositoryLabelOfAConsentedRepository is the end-to-end proof
+// the label map is threaded from internal/config to the renderer: the id comes from
+// the registration itself, so a break anywhere along the chain shows the fallback
+// instead of the label.
+func TestReportShowsTheRepositoryLabelOfAConsentedRepository(t *testing.T) {
+	paths, root := reportFixture(t)
+	id := consentLabelled(t, paths, root, "agents-wake")
+
+	ok := record.OutcomeOK
+	item := record.Record{
+		SchemaVersion: record.SchemaVersion,
+		EventID:       record.DeriveEventID("claude-code", "labelled-run"),
+		Timestamp:     time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC),
+		Harness:       "claude-code",
+		SessionID:     "session-1",
+		Repo:          record.Hash(id),
+		Kind:          record.KindSkill,
+		Name:          "report",
+		Invoker:       record.InvokerModel,
+		Outcome:       &ok,
+	}
+	if _, err := store.New(filepath.Join(paths.DataDir, "events.ndjson")).Append([]record.Record{item}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+
+	out, err := run(t, "report", "--usage")
+	if err != nil {
+		t.Fatalf("wake report error = %v: %s", err, out)
+	}
+	if !strings.Contains(out, "agents-wake") {
+		t.Fatalf("wake report did not show the consented repository's label: %s", out)
+	}
+}
+
+// consentLabelled registers root under a chosen label and returns the repository
+// id derived for it, so a test can record an event under the same id the label map
+// is keyed by.
+func consentLabelled(t *testing.T, paths config.Paths, root, label string) string {
+	t.Helper()
+	repos, err := config.OpenRepos(paths)
+	if err != nil {
+		t.Fatalf("OpenRepos() error = %v", err)
+	}
+	id, err := repos.Register(root, label, time.Time{})
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	return id
 }
 
 func appendReportRecord(t *testing.T, paths config.Paths) {

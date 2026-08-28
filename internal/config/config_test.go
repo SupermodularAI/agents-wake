@@ -342,9 +342,18 @@ func TestListDistinguishesDefaultFromOverridden(t *testing.T) {
 			}
 		}
 		// The provisional fact has to reach T007 through List, which is the
-		// only thing the command reads.
-		if want := (s.Key == "session.idle_timeout" || s.Key == "scan.stale_call_timeout"); s.Provisional != want {
-			t.Errorf("%s provisional = %v, want %v", s.Key, s.Provisional, want)
+		// only thing the command reads. Compared against the registry rather
+		// than a literal pair of names: the provisional set is pinned
+		// exhaustively by keys_test.go, in one place. What is under test here is that List carries the
+		// flag through unchanged, and a second closed literal would only make
+		// this test fail on a key it says nothing about.
+		k, ok := lookup(s.Key)
+		if !ok {
+			t.Errorf("List() returned %q, which is not a registered key", s.Key)
+			continue
+		}
+		if s.Provisional != k.Provisional {
+			t.Errorf("%s provisional = %v, want %v", s.Key, s.Provisional, k.Provisional)
 		}
 	}
 }
