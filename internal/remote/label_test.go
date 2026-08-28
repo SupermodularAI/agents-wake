@@ -99,8 +99,8 @@ func TestRepoLabelTravelsBesideTheHash(t *testing.T) {
 // stringValue is indistinguishable at the receiver from a real value, so a
 // repository with nothing recorded sends the hash alone.
 //
-// The fixture is the trace root, so both projections of the label — wake.repo_label
-// and langfuse.trace.name — are in play under one set of cases.
+// Both projections of the label — wake.repo_label and langfuse.trace.name — ride
+// every span under the same gate, so one set of cases covers both.
 func TestNoRecordedLabelEmitsNoLabelAttribute(t *testing.T) {
 	for name, labels := range map[string]RepoLabels{
 		"a nil map":                    nil,
@@ -152,8 +152,8 @@ var labelCorpus = slices.Concat(hostileIdentifiers, []string{
 })
 
 // TestALabelThatFailsValidationEmitsNoLabelAttribute is the fail-closed half of
-// ADR-0033 §3, run against the trace root so one corpus pass covers both projections
-// of the label. Every refusal produces the same output — no attribute — because a
+// ADR-0033 §3. Both projections of the label answer to it, under one gate, so one
+// corpus pass covers both. Every refusal produces the same output — no attribute — because a
 // truncated, escaped, or sanitised repository name is a wrong answer that looks
 // like a right one. A refused label never drops the span it belongs to.
 //
@@ -227,8 +227,9 @@ func TestALabelThatFailsValidationEmitsNoLabelAttribute(t *testing.T) {
 // fragment gets onto the wire. Nothing this encoder legitimately emits contains a
 // separator, so the assertion is over the whole payload (plan §3.4, BC-3).
 func TestNoPathSeparatorReachesThePayloadThroughALabel(t *testing.T) {
-	// Both fixtures, so the check covers the trace root's projection of the label as
-	// well as wake.repo_label's.
+	// Both fixtures, kept now that kind no longer changes which projections a span
+	// carries: an invocation and a session_end both emit both, and a regression that
+	// reintroduced a kind-dependent path would show up here first.
 	for _, r := range []record.Record{fullRecord(), fullSessionEndRecord()} {
 		for _, hostile := range hostileIdentifiers {
 			if !strings.ContainsAny(hostile, `/\`) {
@@ -247,35 +248,34 @@ func TestNoPathSeparatorReachesThePayloadThroughALabel(t *testing.T) {
 	}
 }
 
-// TestLabelDoesNotWidenTheAlwaysPresentKeySet is BC-8: the key set grows by
-// exactly one key, and that key is conditional. A minimal record with no label
-// still emits exactly the always-present set.
+// TestLabelDoesNotWidenTheAlwaysPresentKeySet is BC-8: the key set grows by the
+// label's two projections, both conditional on the same resolved label and on
+// nothing else. A record with no label still emits exactly the always-present set,
+// whatever its kind.
 func TestLabelDoesNotWidenTheAlwaysPresentKeySet(t *testing.T) {
-	unlabelled := attributeKeys(attributesOf(t, encodeOneLabelled(t, validRecord(), nil), "attributes"))
-	if !slices.Equal(unlabelled, frozenAlwaysPresentKeys) {
-		t.Fatalf("unlabelled span attribute keys = %v, always-present set = %v", unlabelled, frozenAlwaysPresentKeys)
-	}
-
-	want := slices.Sorted(slices.Values(append(slices.Clone(frozenAlwaysPresentKeys), "wake.repo_label")))
-	labelled := attributeKeys(attributesOf(t, encodeOneLabelled(t, validRecord(), testLabels()), "attributes"))
-	if !slices.Equal(labelled, want) {
-		t.Fatalf("labelled span attribute keys = %v, want the always-present set plus wake.repo_label: %v", labelled, want)
-	}
-
-	// The same at the trace root, where the label has a second projection: no label
-	// still means no key at all, even on the span that names the trace.
+	// The trace root and an ordinary invocation, because kind no longer selects a key
+	// on either side of the condition (ADR-0038 §1).
 	end := validRecord()
 	end.Kind, end.Name, end.Invoker = record.KindSessionEnd, "session", record.InvokerAuto
 
-	unlabelledRoot := attributeKeys(attributesOf(t, encodeOneLabelled(t, end, nil), "attributes"))
-	if !slices.Equal(unlabelledRoot, frozenAlwaysPresentKeys) {
-		t.Fatalf("unlabelled trace-root attribute keys = %v, always-present set = %v", unlabelledRoot, frozenAlwaysPresentKeys)
-	}
+	want := slices.Sorted(slices.Values(append(slices.Clone(frozenAlwaysPresentKeys),
+		"wake.repo_label", "langfuse.trace.name")))
 
-	wantRoot := slices.Sorted(slices.Values(append(slices.Clone(frozenAlwaysPresentKeys), "wake.repo_label", "langfuse.trace.name")))
-	labelledRoot := attributeKeys(attributesOf(t, encodeOneLabelled(t, end, testLabels()), "attributes"))
-	if !slices.Equal(labelledRoot, wantRoot) {
-		t.Fatalf("labelled trace-root attribute keys = %v, want the always-present set plus both label projections: %v", labelledRoot, wantRoot)
+	for name, r := range map[string]record.Record{
+		"an invocation":   validRecord(),
+		"the session_end": end,
+	} {
+		t.Run(name, func(t *testing.T) {
+			unlabelled := attributeKeys(attributesOf(t, encodeOneLabelled(t, r, nil), "attributes"))
+			if !slices.Equal(unlabelled, frozenAlwaysPresentKeys) {
+				t.Fatalf("unlabelled span attribute keys = %v, always-present set = %v", unlabelled, frozenAlwaysPresentKeys)
+			}
+
+			labelled := attributeKeys(attributesOf(t, encodeOneLabelled(t, r, testLabels()), "attributes"))
+			if !slices.Equal(labelled, want) {
+				t.Fatalf("labelled span attribute keys = %v, want the always-present set plus both label projections: %v", labelled, want)
+			}
+		})
 	}
 }
 
@@ -314,11 +314,11 @@ func TestFlushSendsTheRepoLabelForAConsentedRepository(t *testing.T) {
 	}
 }
 
-// TestFlushNamesTheTraceAfterTheRepository is DG-94 end to end through the real
-// internal/config path: a repository consented by `wake init` names the trace of every
-// session anchored in it, keyed to the id its own salt derives. The name rides on the
-// session_end span alone, so a batch carrying a whole session posts exactly one span
-// that names its trace.
+// TestFlushNamesTheTraceAfterTheRepository is the end-to-end criterion through the
+// real internal/config path: a repository consented by `wake init` names the trace of
+// every session anchored in it, keyed to the id its own salt derives. Every posted
+// span carries the name, because the receiver materialises it per observation and a
+// name on one span groups nothing (ADR-0038 §1).
 func TestFlushNamesTheTraceAfterTheRepository(t *testing.T) {
 	paths := testPaths(t)
 	receiver, endpoint := serve(t, http.StatusOK)
@@ -335,19 +335,19 @@ func TestFlushNamesTheTraceAfterTheRepository(t *testing.T) {
 		t.Fatalf("FlushReport() error = %v", err)
 	}
 
-	named := 0
-	for i, attrs := range spanAttributesOf(t, receiver.request(t, 0).body) {
+	spans := spanAttributesOf(t, receiver.request(t, 0).body)
+	if len(spans) != 4 {
+		t.Fatalf("the posted batch carries %d spans, want the 3 registered records plus the session_end", len(spans))
+	}
+	for i, attrs := range spans {
 		got, present := stringValueOf(t, attrs, "langfuse.trace.name")
 		if !present {
+			t.Errorf("posted span %d names no trace; every span of a consented repository carries the name", i)
 			continue
 		}
-		named++
 		if got != label {
 			t.Errorf("span %d langfuse.trace.name = %q, want %q", i, got, label)
 		}
-	}
-	if named != 1 {
-		t.Errorf("%d posted spans name the trace, want exactly the session_end span", named)
 	}
 }
 

@@ -88,6 +88,12 @@
                   }
                 },
                 {
+                  "key": "langfuse.trace.name",
+                  "value": {
+                    "stringValue": "agents-wake"
+                  }
+                },
+                {
                   "key": "wake.package",
                   "value": {
                     "stringValue": "atlassian"
@@ -299,6 +305,12 @@
                   }
                 },
                 {
+                  "key": "langfuse.trace.name",
+                  "value": {
+                    "stringValue": "agents-wake"
+                  }
+                },
+                {
                   "key": "wake.invoker",
                   "value": {
                     "stringValue": "model"
@@ -374,6 +386,12 @@
                 },
                 {
                   "key": "wake.repo_label",
+                  "value": {
+                    "stringValue": "agents-wake"
+                  }
+                },
+                {
+                  "key": "langfuse.trace.name",
                   "value": {
                     "stringValue": "agents-wake"
                   }
