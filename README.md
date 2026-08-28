@@ -52,14 +52,18 @@ wake init
 wake report
 ```
 
-`wake report` prints usage for the primitives you've used. Add `--unused` to
-see primitives that are available but never invoked, or both flags together
-for the full picture. A bare `--unused` swaps the OVERVIEW too — invocation
-counts and outcomes describe activity, so the overview above an unused list
-is instead a count of unused primitives by kind. In a terminal the tables are
-lime-bordered and colored; piped or redirected — a script, another program,
-an agent reading the output — it's plain ASCII text instead, so nothing
-downstream ever has to parse around a color code.
+`wake report` prints usage for the primitives you've used, one row per
+primitive, with a REPO column naming the repository it was used in — the
+readable label from your local project map, never the path. The unused list
+has no such column: a repository is a property of an invocation, and an unused
+primitive has none. Add `--unused` to see primitives that are available but
+never invoked, or both flags together for the full picture. A bare `--unused`
+swaps the OVERVIEW too — invocation counts and outcomes describe activity, so
+the overview above an unused list is instead a count of unused primitives by
+kind. In a terminal the tables are lime-bordered and colored; piped or
+redirected — a script, another program, an agent reading the output — it's
+plain ASCII text instead, so nothing downstream ever has to parse around a
+color code.
 
 `wake init` explains what it will change before doing so. It consents the
 current project and installs Wake-owned Claude Code session hooks, and
@@ -147,9 +151,10 @@ review. Its default design keeps the sensitive path local:
 - Records are structurally limited to identifiers, hashes, timestamps, enums,
   and counters. Invalid or path-shaped values are dropped rather than stored.
 - Repository identity is a salted, per-machine HMAC. The readable project map
-  stays local with restrictive permissions. When you turn remote delivery on, a
-  payload carries that hash and the repository's readable name; the repository
-  path never leaves the machine.
+  stays local with restrictive permissions; its labels are what `wake report`
+  and the dashboard show in their REPO column. When you turn remote delivery on,
+  a payload carries that hash and the repository's readable label; the
+  repository path never leaves the machine.
 - Every binary ships the remote-delivery capability and it is off until you run
   `wake remote set [url]` and `wake remote on`. Until you do, no endpoint is
   configured, nothing is sent, and `wake remote status` and `wake doctor` both
@@ -186,6 +191,15 @@ wake remote status
 | `wake remote off` | Stop delivering; the endpoint is kept, so nothing needs re-entering to resume. |
 | `wake remote flush` | Deliver everything pending now. Add `--dry-run` to print the exact payload the next flush would send, without sending it. |
 | `wake remote status` | Report the endpoint's bare host, whether a credential and delivery are configured, the last flush time, and what's pending. This is the one command allowed to name the endpoint; `doctor` and everything else report presence only. |
+
+What travels is one span per record: a trace per session, each invocation
+parented onto its session, named after the repository so the receiver can group
+by it. Spans carry structure, timing, model, tokens and outcome — never prompt
+or completion text. Built-in tool calls are counted locally but not sent as
+spans of their own. Nothing OTLP-shaped is persisted: the payload is computed
+from the local event store at flush time, held for one POST, then discarded,
+and every id is derived from `event_id`, so a retried flush deduplicates at the
+receiver rather than double-counting.
 
 A `wake ingest` scan triggers a detached flush automatically once delivery is
 on, throttled by `remote.min_interval` (15 minutes by default, provisional) —
