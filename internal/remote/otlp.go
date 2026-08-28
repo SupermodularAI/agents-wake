@@ -121,8 +121,9 @@ const (
 	// maxSpanAttributes is the size of the frozen span attribute key set. It
 	// only sizes an allocation, but keeping it beside the constants makes a
 	// change to the key set visible in the same review. wake.repo_label,
-	// langfuse.trace.name and the twelve session-grain keys are all conditional,
-	// so this sizes the allocation for the widest span rather than for every span.
+	// langfuse.trace.name and the twelve session-grain keys are all conditional —
+	// the first two on a resolved label and nothing else (ADR-0038 §1) — so this
+	// sizes the allocation for the widest span rather than for every span.
 	maxSpanAttributes = 35
 )
 
@@ -158,9 +159,8 @@ type RepoLabels map[string]string
 //
 // labels is a flush-time projection and not part of the record: a label that does
 // not pass on the way out is omitted whole and never drops the span it belongs to.
-// The same label also names the trace, on the session_end span alone — the trace
-// root, and the only span of a session whose repository is the session's own
-// (ADR-0034 §1, ADR-0035 §2).
+// The same label also names the trace, on every span rather than on the trace root
+// alone, because the receiver materialises that name per observation (ADR-0038 §1).
 func Encode(records []record.Record, labels RepoLabels) ([]byte, int, error) {
 	spans := make([]span, 0, len(records))
 	dropped := 0
@@ -288,28 +288,30 @@ func spanAttributes(r record.Record, labels RepoLabels) []keyValue {
 	// langfuse.session.id above duplicates wake.session_id under the key Langfuse
 	// groups by.
 	//
-	// The session_end span alone carries it, and that gate is the whole reason it
-	// is safe to set a trace-level attribute from a per-span encoder. A trace is
-	// one session (trace_id = harness ‖ session_id, ADR-0027); session_end is
-	// derived at most once per session id, ever (ADR-0034 §1), and is the one
-	// record ADR-0035 §2 leaves rootless. Every other record of the session
-	// resolves the repository from its own entry's cwd, and those can differ
-	// within one session id, so emitting from every span would let whichever span
-	// the receiver read last rename the trace — unrepairable, because we can never
-	// rebuild the receiver's store (ADR-0027).
+	// Every span carries it, under the same gate as wake.repo_label and no other.
+	// It rode the session_end span alone until ADR-0038: the receiver materialises
+	// the trace name onto each observation from that span's own attributes rather
+	// than joining to the trace, so a name on one span named the trace correctly
+	// and left every other observation of it ungroupable — the failure was
+	// invisible in any view that lists traces rather than observations
+	// (ADR-0038 §Context, §1).
 	//
-	// The branch is on Kind rather than on an absent ParentEventID because
-	// ADR-0035 §2 also leaves the parent absent when derivation genuinely fails
-	// for a non-root record: rootlessness-by-field is not a discriminator, and
-	// exactly-one-per-session is.
+	// The value is this record's own repository, not the session's anchor: an
+	// aggregate over observations answers where an invocation ran, and that is a
+	// property of the invocation. Where a session's records resolve different
+	// repositories from their own entries' cwd, each span keeps its own, which is
+	// the correct attribution and the one the anchor would have got wrong
+	// (ADR-0038 §2). The trace's own displayed name is then whichever span the
+	// receiver read last; it converges on the anchor because session_end is
+	// derived at session close (ADR-0034 §1) and is therefore the last of its
+	// session into the spool and the last delivered — an ordering consequence, not
+	// a guarantee the receiver gives us (ADR-0038 §3).
 	//
 	// A repository with no recorded label, or one whose label this build will not
 	// represent, emits nothing and the trace keeps its span-derived name: unnamed
 	// rather than mislabelled, because unknown is signalled by absence (ADR-0027)
 	// and never collapses into a definite value (ADR-0005).
-	if r.Kind == record.KindSessionEnd {
-		attrs = appendString(attrs, "langfuse.trace.name", labelFor(labels, r.Repo))
-	}
+	attrs = appendString(attrs, "langfuse.trace.name", labelFor(labels, r.Repo))
 	attrs = appendString(attrs, "wake.package", string(r.Package))
 	attrs = appendString(attrs, "wake.package_version", string(r.PackageVersion))
 	if r.Source != nil {

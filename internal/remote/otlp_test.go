@@ -266,10 +266,11 @@ func fullRecord() record.Record {
 	return r
 }
 
-// fullSessionEndRecord is fullRecord as the trace root: the only shape that can emit
-// every key the encoder can emit, now that langfuse.trace.name is the trace root's
-// alone. Its own EventID, so a batch may carry it beside fullRecord, and no parent — a
-// session_end is the one record ADR-0035 §2 leaves rootless.
+// fullSessionEndRecord is fullRecord as the trace root. Its own EventID, so a batch
+// may carry it beside fullRecord, and no parent — a session_end is the one record
+// ADR-0035 §2 leaves rootless. It is no longer the only shape that can emit every key
+// the encoder can emit: since ADR-0038 §1 a fully populated invocation emits the same
+// set, which is what TestParentSpanIDIsNotAnAttribute asserts.
 //
 // Outcome, DurationMS and the session totals stay exactly as fullRecord set them, even
 // though the adapter builds a session_end with no outcome and no duration of its own:
@@ -629,10 +630,11 @@ var frozenSpanAttributeKeys = []string{
 	"gen_ai.usage.thinking_tokens",
 	"langfuse.observation.type",
 	"langfuse.session.id",
-	// Conditional, and belongs in this list only: the session_end span alone
-	// carries it, and only when a label resolved. A trace whose session_end has
-	// not been derived yet, and a repository with no representable label, both
-	// keep the span-derived name (ADR-0027, ADR-0034 §1). Deliberately absent from
+	// Conditional, and belongs in this list only: every span carries it, under the
+	// same gate as wake.repo_label below and for the same reason — it is that same
+	// value under a second key, the one the receiver will group by (ADR-0038 §1,
+	// §2). A repository with no representable label emits neither, and its trace
+	// keeps the span-derived name (ADR-0033 §3). Deliberately absent from
 	// frozenAlwaysPresentKeys below.
 	"langfuse.trace.name",
 	"wake.builtin_tool_calls",
@@ -681,26 +683,19 @@ var frozenAlwaysPresentKeys = []string{
 	"wake.session_id",
 }
 
-// frozenRootOnlyKeys are the keys only a trace-root span may carry. A record with a
-// parent is by definition not the trace root (ADR-0035 §2), so the widest key set
-// such a span can emit is the frozen set without these.
-var frozenRootOnlyKeys = []string{"langfuse.trace.name"}
-
-func frozenNonRootSpanAttributeKeys() []string {
-	return slices.DeleteFunc(slices.Clone(frozenSpanAttributeKeys), func(key string) bool {
-		return slices.Contains(frozenRootOnlyKeys, key)
-	})
-}
+// No key is root-only. Position in the trace does not gate any attribute: a span's
+// keys are decided by the fields its own record populated and by whether its
+// repository has a representable label (ADR-0038 §1). A span with a parent emits the
+// same widest set as one without.
 
 // frozenResourceAttributeKeys is the resource-level equivalent.
 var frozenResourceAttributeKeys = []string{"service.name", "service.version"}
 
 // TestFullRecordEmitsFrozenKeySet asserts the encoder's complete output shape. That
-// shape includes the conditional wake.repo_label, so the fixture has to carry a label
-// as well as a fully populated record, and it includes langfuse.trace.name, which only
-// the trace root carries — so the fixture is a fully populated session_end. No
-// invocation record can produce every key the encoder can emit (ADR-0033 §3,
-// ADR-0034 §1).
+// shape includes the two conditional keys — wake.repo_label and langfuse.trace.name —
+// so the fixture has to carry a label as well as a fully populated record. Kind no
+// longer selects any key, so a fully populated invocation emits the same set as a
+// fully populated session_end; TestParentSpanIDIsNotAnAttribute pins that half.
 func TestFullRecordEmitsFrozenKeySet(t *testing.T) {
 	got := attributeKeys(attributesOf(t, encodeOneLabelled(t, fullSessionEndRecord(), testLabels()), "attributes"))
 	if !slices.Equal(got, frozenSpanAttributeKeys) {
@@ -708,34 +703,39 @@ func TestFullRecordEmitsFrozenKeySet(t *testing.T) {
 	}
 }
 
-// TestOnlyTheTraceRootNamesTheTrace is the BC-12 assertion: exactly one span of a
-// trace may carry langfuse.trace.name, because a session's other records resolve the
-// repository from their own entry's cwd and can disagree with the anchor
-// (internal/adapter/claudecode/session_end.go:216-222). A second writer would let
-// whichever span the receiver read last rename the trace, and the receiver's store can
-// never be rebuilt (ADR-0027).
-func TestOnlyTheTraceRootNamesTheTrace(t *testing.T) {
-	root := attributesOf(t, encodeOneLabelled(t, fullSessionEndRecord(), testLabels()), "attributes")
-	name, present := stringValueOf(t, root, "langfuse.trace.name")
-	if !present {
-		t.Fatal("the session_end span carries no langfuse.trace.name for a labelled repository")
-	}
-	if name != testLabel {
-		t.Errorf("langfuse.trace.name = %q, want %q", name, testLabel)
-	}
-	if label, _ := stringValueOf(t, root, "wake.repo_label"); label != name {
-		t.Errorf("langfuse.trace.name = %q, wake.repo_label = %q; they are the same value, resolved once", name, label)
+// TestEverySpanNamesTheTraceAfterItsOwnRepository replaces the BC-12 assertion that
+// exactly one span of a trace may name it. That rule named the trace correctly and
+// produced nothing a receiver can group by: the receiver materialises the trace name
+// onto each observation from that span's own attributes, so a name on one span leaves
+// every other observation of the trace unnamed (ADR-0038 §Context).
+//
+// The value is the span's own label, not the session anchor's. An aggregate over
+// observations answers where an invocation ran, which is a property of the invocation
+// (ADR-0038 §2) — so the last case here is the one the old rule existed to prevent:
+// two records of one session in different repositories, each keeping its own.
+func TestEverySpanNamesTheTraceAfterItsOwnRepository(t *testing.T) {
+	for name, r := range map[string]record.Record{
+		"the session_end span": fullSessionEndRecord(),
+		"an invocation span":   fullRecord(),
+		"a minimal span":       validRecord(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			attrs := attributesOf(t, encodeOneLabelled(t, r, testLabels()), "attributes")
+			got, present := stringValueOf(t, attrs, "langfuse.trace.name")
+			if !present {
+				t.Fatal("no langfuse.trace.name for a labelled repository; every span carries it")
+			}
+			if got != testLabel {
+				t.Errorf("langfuse.trace.name = %q, want %q", got, testLabel)
+			}
+			if label, _ := stringValueOf(t, attrs, "wake.repo_label"); label != got {
+				t.Errorf("langfuse.trace.name = %q, wake.repo_label = %q; they are the same value, resolved once", got, label)
+			}
+		})
 	}
 
-	invocation := attributesOf(t, encodeOneLabelled(t, fullRecord(), testLabels()), "attributes")
-	if _, present := invocation["langfuse.trace.name"]; present {
-		t.Error("an invocation span names the trace; a session's records can carry different repositories")
-	}
-	if got := attributeKeys(invocation); !slices.Equal(got, frozenNonRootSpanAttributeKeys()) {
-		t.Errorf("invocation span attribute keys = %v, want %v", got, frozenNonRootSpanAttributeKeys())
-	}
-
-	// In one batch of a whole session, exactly one span writes the name.
+	// A whole session in one batch: every span names the trace, so every observation
+	// the receiver stores can be grouped by repository.
 	payload, dropped, err := Encode([]record.Record{fullRecord(), fullSessionEndRecord(), validRecord()}, testLabels())
 	if err != nil {
 		t.Fatalf("Encode() error = %v", err)
@@ -743,14 +743,42 @@ func TestOnlyTheTraceRootNamesTheTrace(t *testing.T) {
 	if dropped != 0 {
 		t.Fatalf("Encode() dropped = %d, want 0", dropped)
 	}
+	spans := spansOf(t, payload)
 	named := 0
-	for _, span := range spansOf(t, payload) {
+	for _, span := range spans {
 		if _, present := attributesOf(t, span, "attributes")["langfuse.trace.name"]; present {
 			named++
 		}
 	}
-	if named != 1 {
-		t.Errorf("%d spans of one session name the trace, want exactly 1", named)
+	if named != len(spans) {
+		t.Errorf("%d of %d spans name the trace, want all of them", named, len(spans))
+	}
+
+	// Two repositories inside one session id. Each span keeps its own label: the
+	// aggregate attributes each invocation to where it ran, which is what the anchor
+	// alternative would have got wrong (ADR-0038 §2).
+	elsewhere := fullRecord()
+	elsewhere.EventID = record.DeriveEventID("claude-code", "source-event-elsewhere")
+	elsewhere.Repo = "fedcba9876543210fedcba9876543210"
+	const otherLabel = "assist"
+	labels := RepoLabels{string(validRecord().Repo): testLabel, string(elsewhere.Repo): otherLabel}
+
+	mixed, dropped, err := Encode([]record.Record{fullSessionEndRecord(), elsewhere}, labels)
+	if err != nil {
+		t.Fatalf("Encode() error = %v", err)
+	}
+	if dropped != 0 {
+		t.Fatalf("Encode() dropped = %d, want 0", dropped)
+	}
+	want := []string{testLabel, otherLabel}
+	for i, span := range spansOf(t, mixed) {
+		got, present := stringValueOf(t, attributesOf(t, span, "attributes"), "langfuse.trace.name")
+		if !present {
+			t.Fatalf("span %d carries no langfuse.trace.name", i)
+		}
+		if got != want[i] {
+			t.Errorf("span %d langfuse.trace.name = %q, want its own repository's label %q", i, got, want[i])
+		}
 	}
 }
 
@@ -1546,9 +1574,10 @@ func TestParentSpanIDIsNotAnAttribute(t *testing.T) {
 		t.Fatal("fullRecord() carries no parent: this test would pass vacuously")
 	}
 
-	// Labelled, so the widest key set is the one compared: wake.repo_label is
-	// conditional on a label being resolved at flush time. A record with a parent is
-	// not the trace root, so the target is the frozen set without the root-only keys.
+	// Labelled, so the widest key set is the one compared: both conditional keys are
+	// conditional on a label being resolved at flush time, and on nothing else. Having
+	// a parent no longer subtracts a key, so the target is the whole frozen set
+	// (ADR-0038 §1).
 	span := encodeOneLabelled(t, r, testLabels())
 	attributes := attributesOf(t, span, "attributes")
 
@@ -1557,8 +1586,8 @@ func TestParentSpanIDIsNotAnAttribute(t *testing.T) {
 			t.Errorf("attribute key %q carries the parent link, which is span structure", key)
 		}
 	}
-	if got := attributeKeys(attributes); !slices.Equal(got, frozenNonRootSpanAttributeKeys()) {
-		t.Errorf("attribute keys = %v, want the frozen set unchanged %v", got, frozenNonRootSpanAttributeKeys())
+	if got := attributeKeys(attributes); !slices.Equal(got, frozenSpanAttributeKeys) {
+		t.Errorf("attribute keys = %v, want the frozen set unchanged %v", got, frozenSpanAttributeKeys)
 	}
 	for _, key := range frozenSpanAttributeKeys {
 		if strings.Contains(key, "parent") {
