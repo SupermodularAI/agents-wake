@@ -21,7 +21,6 @@ make validate
 
 This runs the same gate CI runs: `fmt-check` → `vet` → `lint` → `test`. A
 green local run means the lint/vet/test portion of CI will pass. Also run:
-green local run means a green CI run. Also run:
 
 ```sh
 make test-race
@@ -37,7 +36,10 @@ The release gate requires a race-clean suite.
 - Keep commits focused; squash-merge is used to land PRs, so intermediate
   commit history on your branch doesn't need to be pristine.
 - Commit messages and PR titles follow [Conventional Commits](https://www.conventionalcommits.org/)
-  (`feat:`, `fix:`, `chore:`, ...).
+  (`feat:`, `fix:`, `chore:`, ...). Because PRs are squash-merged, the PR title
+  is what lands on `main`.
+- User-visible changes go under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md).
+  Internal refactors and test-only changes don't need an entry.
 
 ## Code layout
 
