@@ -9,6 +9,11 @@ called out under Changed.
 
 ## [Unreleased]
 
+### Added
+
+- `SECURITY.md`, `CODE_OF_CONDUCT.md`, and this changelog.
+- Secret, vulnerability, and commit-style gates in CI.
+
 ## [0.2.0] - 2026-08-28
 
 Remote delivery. Wake can now ship its derived records to an OTLP/HTTP
