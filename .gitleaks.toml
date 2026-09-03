@@ -1,0 +1,33 @@
+# Scanner config for the secret gate in .github/workflows/oss-gates.yml.
+#
+# Extends the default rule set rather than replacing it: `useDefault` keeps every
+# upstream rule, and the allowlist below subtracts only what this repository can
+# prove is a fixture.
+[extend]
+useDefault = true
+
+# The 14 findings this suppresses are all one string. `generic-api-key` treats
+# the tail of "https://user:pw@api.example.com:4318/v1/traces" as a credential —
+# 4318 is the OTLP/HTTP port and /v1/traces is the OTLP trace path, so the whole
+# corpus of remote-delivery tests trips it.
+#
+# The allowlist is scoped by CONTENT, deliberately not by path. Allowlisting
+# `.*_test\.go` would be the obvious fix and the wrong one: test fixtures are the
+# likeliest place a real token ever lands, so a path rule would blind the gate to
+# exactly the mistake it exists to catch. Matching reserved documentation domains
+# and loopback instead means a fixture stays quiet while a real host in the same
+# file still fails the build.
+#
+# regexTarget = "line" is required. The default target is the matched secret
+# itself, which here is the bare "4318/v1/traces" — the host that proves the
+# match is a fixture is in the surrounding line, not in the capture.
+[[allowlists]]
+description = "Reserved documentation domains and loopback (RFC 2606, RFC 5737)"
+targetRules = ["generic-api-key"]
+regexTarget = "line"
+regexes = [
+  '''example\.(com|org|net)''',
+  '''\.example([^a-z]|$)''',
+  '''127\.0\.0\.1''',
+  '''localhost''',
+]
