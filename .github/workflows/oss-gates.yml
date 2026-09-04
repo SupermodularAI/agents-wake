@@ -1,0 +1,143 @@
+# Open-source hygiene gates. Deliberately a separate workflow from ci.yml: these
+# answer "is this repository safe to publish and contribute to?", not "does the
+# code build and pass?", and keeping them apart keeps the required-checks list
+# legible when a gate fails.
+name: OSS Gates
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oss-gates-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Scans all of history, not the diff: this repository is public, so a secret
+  # added and removed inside one pull request is already exposed once published.
+  # Anything found here needs rotating, not scrubbing.
+  secrets:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          # --log-opts=--all walks every ref; the default shallow clone would
+          # leave the gate scanning a single commit and passing vacuously.
+          fetch-depth: 0
+
+      # The binary, not gitleaks/gitleaks-action: that action requires a paid
+      # GITLEAKS_LICENSE secret for organisation-owned repositories and fails the
+      # job outright without one. The scanner itself is MIT and ungated.
+      #
+      # Dependabot only watches github-actions (.github/dependabot.yml), so this
+      # version is not updated automatically — bump it by hand.
+      - name: install gitleaks
+        env:
+          GITLEAKS_VERSION: 8.30.1
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          chmod +x /tmp/gitleaks
+
+      # Reads .gitleaks.toml, which allowlists reserved documentation domains by
+      # content rather than by path — a real credential in a test file still
+      # fails this step.
+      - name: scan history for secrets
+        run: /tmp/gitleaks git . --log-opts="--all" --redact --verbose
+
+  # govulncheck rather than a generic scanner: it reports only vulnerabilities
+  # that are actually reachable from this module's call graph, so a CVE in an
+  # unused corner of a dependency does not block a pull request that cannot
+  # trigger it.
+  vulnerabilities:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: stable
+          cache: true
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+
+  # Checks what can actually become the subject on main, which is not the
+  # branch's commits: PRs are squash-merged, and CONTRIBUTING.md says branch
+  # history need not be pristine for exactly that reason. Failing a WIP commit
+  # would enforce a rule the project does not have.
+  #
+  # The repository's squash title setting is COMMIT_OR_PR_TITLE, so the subject
+  # is the PR title — except when the PR has exactly one commit, where GitHub
+  # uses that commit's subject instead. Both cases are checked below; checking
+  # only the title would leave the single-commit case unguarded.
+  #
+  # This is a check, not a guarantee: whoever merges can still edit the subject
+  # in the merge dialog, and nothing here binds that. Only runs on
+  # pull_request — a push to main has no PR title and no base..head range.
+  commit-style:
+    name: conventional commits
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+
+      # The title and commit subjects are attacker-controlled text: a pull
+      # request from a fork can put $(...), backticks or a semicolon in one.
+      # They are therefore written to a file and read back as data — never
+      # interpolated into this script — and every value arrives through env
+      # rather than inline ${{ }}, which would splice it into the shell source
+      # before it runs.
+      - name: check the squash subject
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          # The PR title always needs to conform: it is the subject whenever the
+          # PR has more than one commit.
+          printf '%s\n' "$PR_TITLE" > /tmp/subjects.txt
+
+          # With exactly one commit, GitHub uses that commit's subject instead,
+          # so it has to conform too. Merge commits are excluded throughout: the
+          # Conventional Commits spec does not cover them and GitHub generates
+          # their subjects.
+          count="$(git rev-list --no-merges --count "${BASE_SHA}..${HEAD_SHA}")"
+          if [ "$count" -eq 1 ]; then
+            git log --no-merges --format=%s "${BASE_SHA}..${HEAD_SHA}" >> /tmp/subjects.txt
+          fi
+
+          # A non-empty file is required: an empty one would make the loop below
+          # iterate zero times and pass without checking anything.
+          test -s /tmp/subjects.txt || {
+            echo "::error::no subject to check — the PR title could not be read"
+            exit 1
+          }
+
+          pattern='^(feat|fix|docs|chore|test|refactor|perf|build|ci|style|revert)(\([a-z0-9._-]+\))?!?: .+'
+          failed=0
+          while IFS= read -r subject; do
+            [ -n "$subject" ] || continue
+            if printf '%s' "$subject" | grep -qE "$pattern"; then
+              printf 'ok   %s\n' "$subject"
+            else
+              printf 'FAIL %s\n' "$subject"
+              failed=1
+            fi
+          done < /tmp/subjects.txt
+
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::The squash subject must follow Conventional Commits (see CONTRIBUTING.md). With more than one commit that is the PR title; with exactly one it is that commit's subject."
+            exit 1
+          fi
