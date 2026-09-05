@@ -9,6 +9,19 @@ called out under Changed.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking (stored records and wire).** The outcome `denied_policy` is now
+  `denied_by_harness_rule`, and the record schema moves from 6 to 7. The value
+  records the harness's own permission rule refusing a tool, never a governance
+  decision about an approved set — of the 159 such records on the first machine
+  Wake was installed on, every one was a builtin Bash call. The old name invited
+  a reader to take it for the latter. A store holding version 6 is refused on
+  read and re-derived from the harness's own history by the next scan; the
+  delivery watermark stamps the schema version and starts over on a bump, so
+  nothing needs migrating by hand. Anything grouping on the old string — a saved
+  query or a dashboard panel — needs updating.
+
 ### Added
 
 - `SECURITY.md`, `CODE_OF_CONDUCT.md`, and this changelog.
