@@ -587,7 +587,7 @@ func TestStatusCodeNeverGuessesSuccess(t *testing.T) {
 		{name: "interrupted", outcome: ptr(record.OutcomeInterrupted), want: codeError},
 		{name: "not_found", outcome: ptr(record.OutcomeNotFound), want: codeError},
 		{name: "bad_args", outcome: ptr(record.OutcomeBadArgs), want: codeError},
-		{name: "denied_policy", outcome: ptr(record.OutcomeDeniedPolicy), want: codeUnset, mustNotOK: true},
+		{name: "denied_by_harness_rule", outcome: ptr(record.OutcomeDeniedHarnessRule), want: codeUnset, mustNotOK: true},
 		{name: "denied_user", outcome: ptr(record.OutcomeDeniedUser), want: codeUnset, mustNotOK: true},
 	}
 	for _, testCase := range cases {
