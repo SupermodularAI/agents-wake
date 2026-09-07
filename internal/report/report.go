@@ -9,6 +9,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/errorcell"
 	"github.com/SupermodularAI/agents-wake/internal/inventory"
 	"github.com/SupermodularAI/agents-wake/internal/metrics"
 	"github.com/SupermodularAI/agents-wake/internal/record"
@@ -162,7 +163,7 @@ func primitiveUsage(writer io.Writer, available []inventory.Usage, labels repola
 		if usage.Invocations == 0 {
 			continue
 		}
-		rows.add(string(usage.Name), kind(usage.Kind), string(usage.Harness), labels.Display(usage.Repo), usage.LastUsed.UTC().Format(time.RFC3339), fmt.Sprintf("%d", usage.Invocations), errorCell(usage))
+		rows.add(string(usage.Name), kind(usage.Kind), string(usage.Harness), labels.Display(usage.Repo), usage.LastUsed.UTC().Format(time.RFC3339), fmt.Sprintf("%d", usage.Invocations), errorcell.Render(usage.ErrorRate()))
 	}
 	if len(rows.rows) == 0 {
 		_, err := fmt.Fprintln(writer, "No primitive activity observed.")
@@ -216,20 +217,4 @@ func capitalize(s string) string {
 		return s
 	}
 	return strings.ToUpper(s[:1]) + s[1:]
-}
-
-// errorCell is a single per-primitive table cell, not the OVERVIEW-wide rate:
-// a count first because that is what a busy reader scans a column for, then
-// the percentage in parentheses for the ones who want the rate too. A
-// primitive with no failures says "0" rather than "0 (0.0%)" — a rate is only
-// interesting once there is one.
-func errorCell(usage inventory.Usage) string {
-	if usage.Failures == 0 {
-		return "0"
-	}
-	ratio := metrics.NewRatio(usage.Failures, usage.Invocations-usage.Unknown, usage.Unknown, usage.Invocations)
-	if percent, ok := ratio.Percent(); ok {
-		return fmt.Sprintf("%d (%.1f%%)", usage.Failures, percent)
-	}
-	return fmt.Sprintf("%d", usage.Failures)
 }
