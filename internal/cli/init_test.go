@@ -202,3 +202,63 @@ func TestInitDisclosesAndImportsHistoryOnlyWithFull(t *testing.T) {
 		t.Errorf("Stat(spool) = %v, want init --full to have written it", statErr)
 	}
 }
+
+// Acceptance criterion 1. `Use: "init [path]"` rendered the usage line as
+// `wake init [path] [flags]`, advertising a positional that plain init refuses:
+// its Args validator is cobra.NoArgs, and only --global takes a path. The usage
+// line must name only the form the bare command accepts (plan §7.3 gives `init`
+// no positional; internal/cli/remote.go's `Use: "set [url]"` is the shape for a
+// positional that is genuinely accepted).
+func TestInitHelpAdvertisesNoPositionalOnPlainInit(t *testing.T) {
+	isolate(t)
+
+	out, err := run(t, "init", "--help")
+	if err != nil {
+		t.Fatalf("init --help error = %v", err)
+	}
+	if strings.Contains(out, "wake init [path]") {
+		t.Errorf("the usage line still advertises a positional plain init refuses:\n%s", out)
+	}
+	if !strings.Contains(out, "wake init [flags]") {
+		t.Errorf("help output is missing the usage line %q:\n%s", "wake init [flags]", out)
+	}
+}
+
+// Acceptance criterion 2. Dropping `[path]` from Use must not lose the path
+// argument --global does take: it moves into the two places a reader looking for
+// it lands — the flag's own help line and the command's Long text.
+func TestInitHelpDocumentsTheGlobalPathArgument(t *testing.T) {
+	isolate(t)
+
+	usage := newInitCmd().Flags().Lookup("global").Usage
+	if !strings.Contains(usage, "path") {
+		t.Errorf("the --global flag help does not name its path argument: %q", usage)
+	}
+
+	out, err := run(t, "init", "--help")
+	if err != nil {
+		t.Fatalf("init --help error = %v", err)
+	}
+	if !strings.Contains(out, "wake init --global [path]") {
+		t.Errorf("help output does not document the --global path form:\n%s", out)
+	}
+}
+
+// Help text is read before the command runs, so it must state the same default
+// the run-time disclosure does: collection is forward-only and --full is what
+// imports history (ADR-0024, ADR-0025). A Long that advertised the forms without
+// the default would send a reader to a different command than the one they want.
+func TestInitHelpStatesForwardOnlyCollectionAndNamesFull(t *testing.T) {
+	isolate(t)
+
+	out, err := run(t, "init", "--help")
+	if err != nil {
+		t.Fatalf("init --help error = %v", err)
+	}
+	if !strings.Contains(out, "forward-only") {
+		t.Errorf("help output does not state that collection is forward-only:\n%s", out)
+	}
+	if !strings.Contains(out, "--full") {
+		t.Errorf("help output does not name --full as the way to import history:\n%s", out)
+	}
+}
