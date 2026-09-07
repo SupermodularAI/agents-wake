@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 
 	"github.com/SupermodularAI/agents-wake/internal/lockfile"
@@ -31,6 +32,22 @@ const (
 type Store struct {
 	path     string
 	lockPath string
+	// derived names directories that hold data computed from this spool and
+	// nothing else, relative to the spool's own directory. Discard removes them
+	// with the spool.
+	//
+	// It lives here, rather than at each caller of Discard, because the
+	// invariant belongs to the spool: anything derived from it is wrong the
+	// moment it is dropped. There are already two Discard call sites — the
+	// rebuild in internal/activation and the stale-schema drop in its boundary
+	// walk — and a third would silently keep stale derived data if the removal
+	// were the caller's job to remember.
+	//
+	// A name and not a package reference, deliberately: internal/rollup reads
+	// store.Entry, so a dependency the other way would be an import cycle. The
+	// spool does not need to know what the data means, only that it dies with
+	// it.
+	derived []string
 
 	// mu guards index, indexedTo and indexed. The lock file cannot stand in for it:
 	// a file lock creates no happens-before edge the race detector can see.
@@ -65,6 +82,26 @@ type Entry struct {
 // New creates a Store over path. It creates nothing until an append or a discard.
 func New(path string) *Store {
 	return &Store{path: path, lockPath: path + ".lock"}
+}
+
+// WithDerived returns a Store that also removes the named sibling directories
+// when the spool is discarded. Names are relative to the spool's directory.
+//
+// The caller names the directory rather than this package hard-coding it, so the
+// spool keeps no opinion about what is derived from it — see Store.derived.
+//
+// A fresh Store, never a copy of the receiver. Copying would copy the mutex,
+// giving the two values separate locks over one file — and mu is what serialises
+// the read-modify-write inside this process, which the spool lock explicitly
+// cannot stand in for. The dedup index is left empty for the same reason it is
+// dropped elsewhere: it is an optimisation the next append rebuilds from the
+// spool, never the correctness mechanism (ADR-0015).
+func (s *Store) WithDerived(names ...string) *Store {
+	return &Store{
+		path:     s.path,
+		lockPath: s.lockPath,
+		derived:  append(slices.Clone(s.derived), names...),
+	}
 }
 
 // Append validates all supplied records, drops invalid ones, and appends only
@@ -204,6 +241,17 @@ func (s *Store) Discard() error {
 		// on its own (os.SameFile), so this is belt-and-braces rather than the
 		// correctness mechanism (ADR-0004, ADR-0015).
 		s.dropIndex()
+		// Derived data goes with the spool it was computed from. This runs under
+		// the same lock and after the spool is gone, so a reader can never see a
+		// summary of records the spool no longer holds — only a spool with no
+		// summary, which is the state a first run is in and every reader already
+		// handles.
+		base := filepath.Dir(s.path)
+		for _, name := range s.derived {
+			if err := os.RemoveAll(filepath.Join(base, name)); err != nil {
+				return fmt.Errorf("discarding derived store data: %w", err)
+			}
+		}
 		return nil
 	})
 }

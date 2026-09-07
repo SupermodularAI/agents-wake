@@ -176,7 +176,7 @@ func initEpilogue(paths config.Paths, repos *config.Repos, claudeDir, command, i
 		}
 	}
 
-	events := store.New(filepath.Join(paths.DataDir, eventsFile))
+	events := openEvents(paths)
 	// Once, before either branch. The walk is handed these names as data and the
 	// inventory snapshot below publishes the same pass, so discovery's cost — a read of
 	// every transcript under the harness directory for the consented root's listings —
@@ -209,7 +209,17 @@ func initEpilogue(paths config.Paths, repos *config.Repos, claudeDir, command, i
 	if err != nil {
 		return written, err
 	}
-	return written, refreshInventory(paths, events, discovered)
+	// A derived cache, so its failure is not this command's failure: the records
+	// are already durable in the spool and the next scan retries the same
+	// missing blocks. Doing it after the walk means one seal per scan rather
+	// than one per transcript.
+	//
+	// The error is joined rather than dropped: a seal that keeps failing would
+	// otherwise be invisible, and errcheck's check-blank is enabled here exactly
+	// so a counting tool cannot quietly swallow one. It is reported after the
+	// records are safe, so a failed seal never costs an ingest.
+	sealErr := sealRollups(paths, events)
+	return written, errors.Join(refreshInventory(paths, events, discovered), sealErr)
 }
 
 // Ingest imports available transcripts for consented repositories only.
@@ -239,7 +249,7 @@ func ingestScoped(paths config.Paths, claudeDir string, scope collectionScope) (
 	if err != nil {
 		return 0, fmt.Errorf("resolving current directory: %w", err)
 	}
-	events := store.New(filepath.Join(paths.DataDir, eventsFile))
+	events := openEvents(paths)
 	// One discovery for this command, shared by the walk and the refresh below, for the
 	// reason discoverPrimitives states.
 	discovered := discoverPrimitives(repos, claudeDir, root)
@@ -254,7 +264,10 @@ func ingestScoped(paths config.Paths, claudeDir string, scope collectionScope) (
 	if err != nil {
 		return written, err
 	}
-	return written, refreshInventory(paths, events, discovered)
+	// Same reasoning as Activate's: derived, so a seal failure is reported after
+	// the records are safe and never in place of them.
+	sealErr := sealRollups(paths, events)
+	return written, errors.Join(refreshInventory(paths, events, discovered), sealErr)
 }
 
 // Trigger is the scan the Claude Code hook causes, and it is single-flight: a
@@ -303,7 +316,7 @@ func Trigger(paths config.Paths, claudeDir string) (bool, error) {
 func Rebuild(paths config.Paths, claudeDir string) (int, error) {
 	// The spool is dropped first, so a lock failure returns before the primitives
 	// snapshot is removed — never a half-dropped state.
-	if err := store.New(filepath.Join(paths.DataDir, eventsFile)).Discard(); err != nil {
+	if err := openEvents(paths).Discard(); err != nil {
 		return 0, err
 	}
 	if err := os.Remove(paths.PrimitivesFile); err != nil && !errors.Is(err, fs.ErrNotExist) {
