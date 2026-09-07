@@ -3,6 +3,7 @@ package inventory
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -172,5 +173,42 @@ func write(t *testing.T, path, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
+	}
+}
+
+// The map key in installed_plugins.json is "<plugin>@<marketplace>" and only the
+// plugin half is the namespace a primitive is invoked under. Keeping the whole key
+// would compose a name nothing ever invokes, which renames the phantom row rather
+// than removing it — a worse failure than the one DG-106 fixes.
+func TestInstalledPluginsKeepsThePluginNamespaceFromTheMapKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "installed_plugins.json")
+	write(t, path, `{"version":1,"plugins":{
+  "superpowers@claude-plugins-official":[{"scope":"user","installPath":"/p/superpowers/6.3.0","version":"6.3.0","installedAt":"2026-06-18T14:38:10.185Z"}],
+  "vercel@claude-plugins-official":[{"scope":"user","installPath":"/p/vercel/1.1.0","version":"1.1.0"},{"scope":"user","installPath":"/p/vercel/1.0.0","version":"1.0.0"}],
+  "local-plugin":[{"scope":"user","installPath":"/p/local"}],
+  "empty@market":[{"scope":"user","installPath":""}]}}`)
+
+	want := []pluginInstall{
+		{namespace: "local-plugin", installPath: "/p/local"},
+		{namespace: "superpowers", installPath: "/p/superpowers/6.3.0"},
+		{namespace: "vercel", installPath: "/p/vercel/1.0.0"},
+		{namespace: "vercel", installPath: "/p/vercel/1.1.0"},
+	}
+	if got := installedPlugins(path); !slices.Equal(got, want) {
+		t.Fatalf("installedPlugins() = %+v, want %+v", got, want)
+	}
+}
+
+// "Could not read" means "collects nothing", never an error that breaks a command
+// (plan §4.3).
+func TestInstalledPluginsCollectsNothingFromAnUnreadableFile(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "absent.json")
+	if got := installedPlugins(missing); got != nil {
+		t.Fatalf("installedPlugins(missing) = %+v, want nil", got)
+	}
+	malformed := filepath.Join(t.TempDir(), "installed_plugins.json")
+	write(t, malformed, "not json")
+	if got := installedPlugins(malformed); got != nil {
+		t.Fatalf("installedPlugins(malformed) = %+v, want nil", got)
 	}
 }
