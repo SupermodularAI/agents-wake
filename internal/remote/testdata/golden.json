@@ -36,7 +36,7 @@
                 {
                   "key": "wake.schema_version",
                   "value": {
-                    "intValue": "6"
+                    "intValue": "7"
                   }
                 },
                 {
@@ -103,6 +103,12 @@
                   "key": "wake.package_version",
                   "value": {
                     "stringValue": "1.4.0"
+                  }
+                },
+                {
+                  "key": "wake.mcp_server",
+                  "value": {
+                    "stringValue": "claude-in-chrome"
                   }
                 },
                 {
@@ -259,7 +265,7 @@
                 {
                   "key": "wake.schema_version",
                   "value": {
-                    "intValue": "6"
+                    "intValue": "7"
                   }
                 },
                 {
@@ -339,7 +345,7 @@
                 {
                   "key": "wake.schema_version",
                   "value": {
-                    "intValue": "6"
+                    "intValue": "7"
                   }
                 },
                 {
@@ -406,6 +412,12 @@
                   "key": "wake.package_version",
                   "value": {
                     "stringValue": "1.4.0"
+                  }
+                },
+                {
+                  "key": "wake.mcp_server",
+                  "value": {
+                    "stringValue": "claude-in-chrome"
                   }
                 },
                 {
@@ -556,7 +568,7 @@
                 {
                   "key": "wake.schema_version",
                   "value": {
-                    "intValue": "6"
+                    "intValue": "7"
                   }
                 },
                 {
@@ -623,6 +635,12 @@
                   "key": "wake.package_version",
                   "value": {
                     "stringValue": "1.4.0"
+                  }
+                },
+                {
+                  "key": "wake.mcp_server",
+                  "value": {
+                    "stringValue": "claude-in-chrome"
                   }
                 },
                 {

@@ -133,6 +133,10 @@ func validVersion(v Version) bool { return safeShape(string(v), versionPattern, 
 
 func validOptionalName(v Identifier) bool { return v == "" || ValidName(v) }
 
+// validOptionalToken is validOptionalName's counterpart in the opaque-token
+// domain, for a nullable field whose value must carry no scope separator.
+func validOptionalToken(v Identifier) bool { return v == "" || validToken(v) }
+
 func validOptionalVersion(v Version) bool { return v == "" || validVersion(v) }
 
 // safeShape states the empty-value, length and Windows-drive rules once so no

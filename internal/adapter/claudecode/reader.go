@@ -768,8 +768,12 @@ type call struct {
 	kind        record.Kind
 	name        record.Identifier
 	packageName record.Identifier
-	viaSkill    record.Identifier
-	viaAgent    record.Identifier
+	// mcpServer is the segment mcpServerSegment read out of this call's tool name,
+	// empty for every call that is not an MCP tool and for an MCP tool name with no
+	// second separator. It is stored verbatim; see mcpServerSegment.
+	mcpServer record.Identifier
+	viaSkill  record.Identifier
+	viaAgent  record.Identifier
 	// agentID is the id of the subagent transcript this call's tool_use line was
 	// read from, empty when the entry declared none or declared one outside the
 	// token domain. It is ADR-0035 §2's case-1 key and ADR-0036 §2's — the agent id
@@ -864,6 +868,12 @@ func (entry transcriptEntry) call(source int, block contentBlock, resolve Resolv
 	}
 	if packageName, ok := packageFromAttribution(entry.AttributionMCPServer); ok {
 		derived.packageName = packageName
+	}
+	// The tool name, not entry.AttributionMCPServer: that field carries the config
+	// key, is absent on many MCP entries, and is already spoken for by packageName.
+	// The prefix the harness itself composed is present on every MCP tool_use.
+	if server, found := mcpServerSegment(block.Name); found {
+		derived.mcpServer = server
 	}
 	// The same record.BoundedToken gate observeSubagentRun applies, so this call
 	// derives byte-identically the id subagentRun.subagent() derives — and an agentId
@@ -1015,6 +1025,7 @@ func (call call) complete(result callResult) record.Record {
 		Kind:           call.kind,
 		Name:           call.name,
 		Package:        call.packageName,
+		MCPServer:      call.mcpServer,
 		ViaSkill:       call.viaSkill,
 		ViaAgent:       call.viaAgent,
 		Model:          call.model,
@@ -1079,10 +1090,43 @@ func kindFor(name record.Identifier) record.Kind {
 	if name == "Skill" {
 		return record.KindSkill
 	}
-	if len(name) > 5 && string(name[:5]) == "mcp__" {
+	if len(name) > len(mcpPrefix) && string(name[:len(mcpPrefix)]) == mcpPrefix {
 		return record.KindMCPTool
 	}
 	return record.KindBuiltinTool
+}
+
+// mcpPrefix and mcpSeparator are Claude Code's own spelling of an MCP tool name:
+// mcp__<server>__<tool>. They are parsed here and nowhere else — this is one
+// harness's naming, not a shared vocabulary, so no interface and no shared helper
+// is extracted for a second adapter that does not exist (ADR-0013).
+const (
+	mcpPrefix    = "mcp__"
+	mcpSeparator = "__"
+)
+
+// mcpServerSegment returns the server segment of an MCP tool name, exactly as the
+// tool name spells it. It normalises nothing: the config key a segment corresponds
+// to is the inventory join's question, and answering it here would persist a guess
+// (ADR-0008).
+//
+// A name with no second separator has no segment, and that is an absence rather
+// than a fallback to the whole name (ADR-0005). A segment outside the token domain
+// is refused silently and valuelessly — it is transcript content and must never be
+// quoted (plan §4.2).
+func mcpServerSegment(toolName string) (record.Identifier, bool) {
+	if len(toolName) <= len(mcpPrefix) || toolName[:len(mcpPrefix)] != mcpPrefix {
+		return "", false
+	}
+	rest := toolName[len(mcpPrefix):]
+	for index := 1; index+len(mcpSeparator) <= len(rest); index++ {
+		if rest[index:index+len(mcpSeparator)] != mcpSeparator {
+			continue
+		}
+		server, err := record.BoundedToken(rest[:index])
+		return server, err == nil
+	}
+	return "", false
 }
 
 func packageFromAttribution(value string) (record.Identifier, bool) {

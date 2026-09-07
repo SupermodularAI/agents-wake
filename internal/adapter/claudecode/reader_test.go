@@ -1441,6 +1441,9 @@ func TestReadPreservesRealClaudeCodeIdentityFormats(t *testing.T) {
 	if event.Name != "mcp__atlassian__search" {
 		t.Errorf("Name = %q", event.Name)
 	}
+	if event.MCPServer != "atlassian" {
+		t.Errorf("MCPServer = %q", event.MCPServer)
+	}
 }
 
 // callInstant is when unterminatedCall's tool_use happened, as a value the
@@ -2487,6 +2490,52 @@ func TestReadResolvesAnOmittedIsErrorOnlyForAMeasuredFamily(t *testing.T) {
 	}
 }
 
+// mcpCallTranscript is one MCP tool_use plus the tool_result that terminates it,
+// the minimum a server segment can be read out of.
+func mcpCallTranscript(toolName string) string {
+	return strings.Join([]string{
+		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"` + toolName + `"}]}}`,
+		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
+	}, "\n")
+}
+
+// TestReadStoresTheObservedMCPServerSegment covers the real spellings Claude Code
+// composes: a key that survives unchanged, a plugin triple whose colons became
+// underscores, a hyphenated server, and a dotted-and-spaced key. The segment is
+// stored exactly as the tool name spells it — the config key it corresponds to is
+// the inventory join's question, not this reader's (ADR-0008).
+func TestReadStoresTheObservedMCPServerSegment(t *testing.T) {
+	for _, testCase := range []struct {
+		toolName string
+		want     record.Identifier
+	}{
+		{"mcp__claude-in-chrome__computer", "claude-in-chrome"},
+		{"mcp__plugin_context7_context7__query-docs", "plugin_context7_context7"},
+		{"mcp__linear-server__list_issues", "linear-server"},
+		{"mcp__claude_ai_Atlassian_Rovo__getJiraIssue", "claude_ai_Atlassian_Rovo"},
+	} {
+		t.Run(testCase.toolName, func(t *testing.T) {
+			result, err := read(strings.NewReader(mcpCallTranscript(testCase.toolName)), resolver, names, closedSession)
+			if err != nil {
+				t.Fatalf("Read() error = %v", err)
+			}
+			if len(result.Records) != 1 {
+				t.Fatalf("Read() records = %+v", result.Records)
+			}
+			event := result.Records[0]
+			if event.MCPServer != testCase.want {
+				t.Errorf("MCPServer = %q, want %q", event.MCPServer, testCase.want)
+			}
+			if event.Kind != record.KindMCPTool {
+				t.Errorf("Kind = %q, want %q", event.Kind, record.KindMCPTool)
+			}
+			if string(event.Name) != testCase.toolName {
+				t.Errorf("Name = %q, want %q", event.Name, testCase.toolName)
+			}
+		})
+	}
+}
+
 // Resolving an omission changes only the arm that had nothing to say. Every failure
 // signal still outranks it, and this asserts that over an MCP call — a member family,
 // so the new arm is reachable and the precedence is being tested rather than trivially
@@ -2524,6 +2573,27 @@ func TestReadKeepsFailureSignalPrecedenceForAFamilyThatOmitsOnSuccess(t *testing
 				if event.Outcome == nil || *event.Outcome != testCase.want {
 					t.Errorf("Outcome = %v, want %q", event.Outcome, testCase.want)
 				}
+			}
+		})
+	}
+}
+
+// TestReadLeavesTheMCPServerAbsentWhereThereIsNoSegment pins the absence. A tool
+// that is not an MCP tool has no server, and an MCP-prefixed name with no second
+// separator names no server either — neither falls back to the whole name, because
+// an absence is never a bucket (ADR-0005).
+func TestReadLeavesTheMCPServerAbsentWhereThereIsNoSegment(t *testing.T) {
+	for _, toolName := range []string{"Bash", "Skill", "mcp__nosep"} {
+		t.Run(toolName, func(t *testing.T) {
+			result, err := read(strings.NewReader(mcpCallTranscript(toolName)), resolver, names, closedSession)
+			if err != nil {
+				t.Fatalf("Read() error = %v", err)
+			}
+			if len(result.Records) != 1 {
+				t.Fatalf("Read() records = %+v", result.Records)
+			}
+			if server := result.Records[0].MCPServer; server != "" {
+				t.Errorf("MCPServer = %q, want it absent", server)
 			}
 		})
 	}
@@ -2686,5 +2756,73 @@ func TestReadRatesEveryMCPCallInACorpusShapedLikeTheMeasuredOne(t *testing.T) {
 	}
 	if len(got) != len(want) {
 		t.Errorf("records = %v, want %v", got, want)
+	}
+}
+
+// The `mcp__<server>__` segment is a new derivation off transcript content, so it
+// gets the whole hostile-payload corpus rather than one hand-picked unsafe case:
+// AGENTS.md requires the corpus per adapter because each adapter is a new input
+// shape (T006, ADR-0007). No value in the corpus is inside the token domain, so
+// every one of them must leave MCPServer absent — and whichever records survive
+// must carry no path fragment anywhere in their encoding (plan §4.2).
+func TestReadKeepsAHostileMCPServerSegmentOutOfTheRecord(t *testing.T) {
+	// Most of the corpus makes the whole tool name illegal, so the call is refused
+	// before the segment is ever read. That is a pass, but it is not the case this
+	// test is for, so the surviving records are counted: a corpus that stopped
+	// producing any would leave the assertions below vacuous.
+	survived := 0
+	for _, value := range hostileValues {
+		t.Run(value, func(t *testing.T) {
+			result, err := read(strings.NewReader(mcpCallTranscript("mcp__"+value+"__x")), resolver, names, closedSession)
+			if err != nil {
+				t.Fatalf("Read() error = %v", err)
+			}
+			survived += len(result.Records)
+			for _, event := range result.Records {
+				if event.MCPServer != "" {
+					t.Errorf("MCPServer = %q, want it absent for a segment outside the token domain", event.MCPServer)
+				}
+				encoded, marshalErr := record.Marshal(event)
+				if marshalErr != nil {
+					t.Fatalf("Marshal() error = %v", marshalErr)
+				}
+				for _, fragment := range []string{consentedPath, "/", `\`} {
+					if strings.Contains(string(encoded), fragment) {
+						t.Fatalf("record retains %q: %s", fragment, encoded)
+					}
+				}
+			}
+		})
+	}
+	if survived == 0 {
+		t.Fatal("no hostile value produced a record: the segment assertions never ran")
+	}
+}
+
+// TestReadRefusesAnUnsafeMCPServerSegmentWithoutDroppingTheCall pins that the
+// segment is a dimension, not a gate. "mcp___leading__x" is a legal Name — the name
+// domain admits "_" anywhere — but its segment "_leading" is outside the token
+// domain, so the segment is dropped and the invocation is still collected. A
+// segment Wake will not persist is not a lost call.
+func TestReadRefusesAnUnsafeMCPServerSegmentWithoutDroppingTheCall(t *testing.T) {
+	result, err := read(strings.NewReader(mcpCallTranscript("mcp___leading__x")), resolver, names, closedSession)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 1 || result.Refused != 0 {
+		t.Fatalf("Read() = %+v", result)
+	}
+	event := result.Records[0]
+	if event.MCPServer != "" {
+		t.Errorf("MCPServer = %q, want it absent", event.MCPServer)
+	}
+	if event.Kind != record.KindMCPTool {
+		t.Errorf("Kind = %q, want %q", event.Kind, record.KindMCPTool)
+	}
+	if event.Name != "mcp___leading__x" {
+		t.Errorf("Name = %q", event.Name)
+	}
+	if err := record.Validate(event); err != nil {
+		t.Fatalf("Validate() error = %v", err)
 	}
 }

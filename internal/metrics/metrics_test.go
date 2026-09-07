@@ -235,3 +235,41 @@ func TestAggregateSplitsOnePrimitivePerRepository(t *testing.T) {
 		t.Fatalf("summary = %d invocations, denominator %d; want 2 and 2", summary.Invocations, summary.ErrorRate.Denominator())
 	}
 }
+
+// TestAggregateCarriesTheMCPServerOntoThePrimitiveRow pins the pass-through the
+// inventory join needs: an MCP tool's row has to say which server it belongs to, or
+// the server can never be credited with its own tools' calls. It is a dimension of
+// the row, not a grain of it — two tools of one server stay two rows.
+func TestAggregateCarriesTheMCPServerOntoThePrimitiveRow(t *testing.T) {
+	ok := record.OutcomeOK
+	computer := testRecord("mcp-one", &ok)
+	computer.Kind = record.KindMCPTool
+	computer.Name = "mcp__claude-in-chrome__computer"
+	computer.MCPServer = "claude-in-chrome"
+	navigate := testRecord("mcp-two", &ok)
+	navigate.Kind = record.KindMCPTool
+	navigate.Name = "mcp__claude-in-chrome__navigate"
+	navigate.MCPServer = "claude-in-chrome"
+
+	summary := Aggregate([]record.Record{computer, navigate, testRecord("skill-one", &ok)})
+
+	if len(summary.Primitives) != 3 {
+		t.Fatalf("Primitives = %+v, want three rows", summary.Primitives)
+	}
+	servers := 0
+	for _, primitive := range summary.Primitives {
+		if primitive.Kind == record.KindMCPTool {
+			servers++
+			if primitive.MCPServer != "claude-in-chrome" {
+				t.Errorf("%q MCPServer = %q, want %q", primitive.Name, primitive.MCPServer, "claude-in-chrome")
+			}
+			continue
+		}
+		if primitive.MCPServer != "" {
+			t.Errorf("%q MCPServer = %q, want it absent on a non-MCP row", primitive.Name, primitive.MCPServer)
+		}
+	}
+	if servers != 2 {
+		t.Fatalf("MCP tool rows = %d, want 2", servers)
+	}
+}

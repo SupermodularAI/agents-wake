@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/SupermodularAI/agents-wake/internal/errorcell"
@@ -128,7 +127,7 @@ func view(summary metrics.Summary, available []inventory.Usage, labels repolabel
 		result.LastObserved = "-"
 	}
 	for _, primitive := range available {
-		view := primitiveView{Name: string(primitive.Name), Kind: strings.ReplaceAll(string(primitive.Kind), "_", " "), Harness: string(primitive.Harness), Repo: labels.Display(primitive.Repo), Invocations: number(primitive.Invocations)}
+		view := primitiveView{Name: string(primitive.Name), Kind: primitive.KindLabel(), Harness: string(primitive.Harness), Repo: labels.Display(primitive.Repo), Invocations: number(primitive.Invocations)}
 		if primitive.Invocations == 0 {
 			result.Unused = append(result.Unused, view)
 			continue
