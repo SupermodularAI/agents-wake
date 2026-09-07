@@ -3,6 +3,7 @@ package rollup
 import (
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 )
 
@@ -141,10 +142,12 @@ func (h Histogram) Quantile(q float64) (int64, bool) {
 		return 0, false
 	}
 	// Ceiling of q*Count, so q=0.95 over 100 observations is the 95th and not
-	// the 94th. Computed in integer arithmetic to keep the answer identical
-	// across platforms: a float multiplication landing a hair below an integer
-	// would pick the bucket below.
-	target := (uint64(q*1000)*h.Count + 999) / 1000
+	// the 94th. The quantile is rounded to a permille first, and rounded rather
+	// than truncated: 0.95*1000 in float64 can land a hair below 950, and
+	// truncating it there would silently shift the answer a whole bucket down.
+	// The rest is integer arithmetic so the result is identical across
+	// platforms.
+	target := (uint64(math.Round(q*1000))*h.Count + 999) / 1000
 	if target == 0 {
 		target = 1
 	}

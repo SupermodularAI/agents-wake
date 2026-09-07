@@ -61,12 +61,12 @@ func TestSealIsIncrementalBuildingForward(t *testing.T) {
 	// afterwards is forward of it.
 	dataDir := t.TempDir()
 	events := store.New(filepath.Join(dataDir, "events.ndjson"))
-	if _, err := Seal(dataDir, events, 0); err != nil {
+	if _, err := Seal(dataDir, events, 0, 0); err != nil {
 		t.Fatalf("enabling: %v", err)
 	}
 
 	appendRecords(t, events, 0, 100)
-	first, err := Seal(dataDir, events, 100)
+	first, err := Seal(dataDir, events, 100, 100)
 	if err != nil {
 		t.Fatalf("first seal: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestSealIsIncrementalBuildingForward(t *testing.T) {
 		t.Fatal("no blocks were sealed for history appended after enablement")
 	}
 
-	second, err := Seal(dataDir, events, 100)
+	second, err := Seal(dataDir, events, 100, 100)
 	if err != nil {
 		t.Fatalf("second seal: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestSealIsIncrementalBuildingForward(t *testing.T) {
 
 	// More history, and only the new frontier costs anything.
 	appendRecords(t, events, 100, 100)
-	third, err := Seal(dataDir, events, 200)
+	third, err := Seal(dataDir, events, 200, 200)
 	if err != nil {
 		t.Fatalf("third seal: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestSealIsIncrementalBuildingForward(t *testing.T) {
 func TestBackfillIsIncremental(t *testing.T) {
 	dataDir, events := seededStore(t, 100)
 
-	first, err := Backfill(dataDir, events, 100)
+	first, err := Backfill(dataDir, events, 100, 100)
 	if err != nil {
 		t.Fatalf("first seal: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestBackfillIsIncremental(t *testing.T) {
 		t.Errorf("first seal skipped %d blocks, want 0", first.Skipped)
 	}
 
-	second, err := Backfill(dataDir, events, 100)
+	second, err := Backfill(dataDir, events, 100, 100)
 	if err != nil {
 		t.Fatalf("second seal: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestBackfillIsIncremental(t *testing.T) {
 // hundred events are described by one tier-2 block rather than ten tier-1 ones.
 func TestSealTiersUpward(t *testing.T) {
 	dataDir, events := seededStore(t, 100)
-	if _, err := Backfill(dataDir, events, 100); err != nil {
+	if _, err := Backfill(dataDir, events, 100, 100); err != nil {
 		t.Fatalf("seal: %v", err)
 	}
 
@@ -166,7 +166,7 @@ func TestSealTiersUpward(t *testing.T) {
 // the summary permanently.
 func TestSealLeavesPartialFrontierUnsealed(t *testing.T) {
 	dataDir, events := seededStore(t, 34)
-	if _, err := Backfill(dataDir, events, 34); err != nil {
+	if _, err := Backfill(dataDir, events, 34, 34); err != nil {
 		t.Fatalf("seal: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(Dir(dataDir), blockName(1, 30, 40))); !errors.Is(err, os.ErrNotExist) {
@@ -215,7 +215,7 @@ func TestReadBlockRefusesForeignVersions(t *testing.T) {
 // serves a reader.
 func TestSealResealsForeignBlocks(t *testing.T) {
 	dataDir, events := seededStore(t, 20)
-	if _, err := Backfill(dataDir, events, 20); err != nil {
+	if _, err := Backfill(dataDir, events, 20, 20); err != nil {
 		t.Fatalf("initial seal: %v", err)
 	}
 
@@ -227,7 +227,7 @@ func TestSealResealsForeignBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := Backfill(dataDir, events, 20)
+	result, err := Backfill(dataDir, events, 20, 20)
 	if err != nil {
 		t.Fatalf("reseal: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestSealResealsForeignBlocks(t *testing.T) {
 // position range is not durable identity.
 func TestRemoveDeletesEverything(t *testing.T) {
 	dataDir, events := seededStore(t, 20)
-	if _, err := Backfill(dataDir, events, 20); err != nil {
+	if _, err := Backfill(dataDir, events, 20, 20); err != nil {
 		t.Fatalf("seal: %v", err)
 	}
 	if err := Remove(dataDir); err != nil {
@@ -266,7 +266,7 @@ func TestRemoveDeletesEverything(t *testing.T) {
 func TestSealOnEmptyStore(t *testing.T) {
 	dataDir := t.TempDir()
 	events := store.New(filepath.Join(dataDir, "events.ndjson"))
-	result, err := Seal(dataDir, events, 0)
+	result, err := Seal(dataDir, events, 0, 0)
 	if err != nil {
 		t.Fatalf("Seal on an empty store: %v", err)
 	}

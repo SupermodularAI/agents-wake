@@ -178,3 +178,44 @@ func TestMergeEmptyIsIdentity(t *testing.T) {
 		t.Errorf("merging an empty histogram changed Count from %d to %d", before, h.Count)
 	}
 }
+
+// TestQuantileIsExactAtRoundNumbers guards the float-to-integer conversion.
+//
+// The quantile is scaled to a permille before the integer arithmetic, and
+// truncating rather than rounding there shifts the answer a whole bucket down:
+// 0.95*1000 in float64 can land just below 950. Each case below has a
+// hand-checkable answer, so a shift is visible rather than plausible.
+func TestQuantileIsExactAtRoundNumbers(t *testing.T) {
+	var h Histogram
+	// One hundred observations: fifty at 1 ms, fifty at 1000 ms. The median sits
+	// exactly on the boundary between them.
+	for range 50 {
+		if err := h.Observe(1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 50 {
+		if err := h.Observe(1000); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		q    float64
+		want int64
+	}{
+		{0.5, 1},     // the 50th observation is the last 1 ms one
+		{0.51, 1000}, // the 51st crosses into the slow bucket
+		{0.95, 1000},
+		{0.99, 1000},
+		{1, 1000},
+	} {
+		got, ok := h.Quantile(tc.q)
+		if !ok {
+			t.Errorf("Quantile(%v) reported no value", tc.q)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("Quantile(%v) = %d, want %d", tc.q, got, tc.want)
+		}
+	}
+}

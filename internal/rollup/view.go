@@ -123,11 +123,7 @@ type selection struct {
 func selectBlocks(available map[blockID]Block, head uint64) selection {
 	result := selection{visited: make(map[blockID]struct{})}
 
-	var floor uint64
-	if head > MaxVerbatimEntries {
-		floor = head - MaxVerbatimEntries
-	}
-	cursor := coverageEnd(available, floor)
+	cursor := coverageEnd(available, verbatimFloor(head))
 	result.coveredTo = cursor
 
 	taken := make(map[uint]int, MaxTier)
@@ -185,6 +181,20 @@ func startOf(tier uint, end uint64) uint64 {
 		return end
 	}
 	return end - span
+}
+
+// verbatimFloor is the lowest position the verbatim tail may begin at: blocks
+// are only used below it, and positions above it are read from the spool.
+//
+// One function because two call sites depend on agreeing exactly — the
+// selection walk, which will not look above it, and Prune, which must keep
+// blocks above it for the next walk to use. When they disagreed, a seal deleted
+// the blocks it had just written.
+func verbatimFloor(head uint64) uint64 {
+	if head <= MaxVerbatimEntries {
+		return 0
+	}
+	return head - MaxVerbatimEntries
 }
 
 // coverageEnd is the highest position any available block reaches without

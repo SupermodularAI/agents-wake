@@ -208,7 +208,11 @@ func entryRange(index uint64) (uint64, uint64) {
 }
 
 // Seal brings the rollup directory up to date for every complete block below
-// head, and is safe to call repeatedly.
+// frontier, and is safe to call repeatedly.
+//
+// frontier is the highest position eligible for sealing — records newer than the
+// retention window sit above it — and head is what the spool holds. Pruning uses
+// head, because retention has to keep what a view over the whole store reads.
 //
 // Only complete blocks are sealed. A partial frontier is left unsealed on
 // purpose: a block covering positions 30-40 that was written when the spool held
@@ -219,8 +223,8 @@ func entryRange(index uint64) (uint64, uint64) {
 // The tier loop merges upward from blocks already on disk rather than from
 // records. That is what keeps the work linear in events with no re-reads: a
 // tier-3 block costs ten file reads and some addition, whatever its range.
-func Seal(dataDir string, source *store.Store, head uint64) (SealResult, error) {
-	return seal(dataDir, source, head, false)
+func Seal(dataDir string, source *store.Store, frontier, head uint64) (SealResult, error) {
+	return seal(dataDir, source, frontier, head, false)
 }
 
 // Backfill seals history from before rollups were enabled, and is the explicit
@@ -232,12 +236,12 @@ func Seal(dataDir string, source *store.Store, head uint64) (SealResult, error) 
 // opt-in is a policy choice about touching a user's whole history rather than a
 // cost one — but it stays an opt-in either way, and the mark records that it
 // happened so a later seal does not undo it.
-func Backfill(dataDir string, source *store.Store, head uint64) (SealResult, error) {
-	return seal(dataDir, source, head, true)
+func Backfill(dataDir string, source *store.Store, frontier, head uint64) (SealResult, error) {
+	return seal(dataDir, source, frontier, head, true)
 }
 
 // seal is Seal with the backfill decision left to the caller.
-func seal(dataDir string, source *store.Store, head uint64, backfill bool) (SealResult, error) {
+func seal(dataDir string, source *store.Store, frontier, head uint64, backfill bool) (SealResult, error) {
 	result := SealResult{}
 	dir := Dir(dataDir)
 
@@ -255,13 +259,16 @@ func seal(dataDir string, source *store.Store, head uint64, backfill bool) (Seal
 	case !found && backfill:
 		mark = Enablement{Backfilled: true}
 	case !found:
-		mark = Enablement{Floor: head}
+		// The frontier and not the head: a record inside the retention window
+		// is not sealable yet, and a floor above it would leave it permanently
+		// below the floor once it aged out.
+		mark = Enablement{Floor: frontier}
 	case backfill && !mark.Backfilled:
 		mark.Floor, mark.Backfilled = 0, true
 	default:
 		// A mark already exists and says what this run needs. Nothing to write.
 		mark.Floor = snapToFanout(mark.Floor)
-		return sealFrom(dir, source, head, mark.Floor)
+		return sealFrom(dir, source, frontier, head, mark.Floor)
 	}
 	// Backfilled is set wherever the floor is lowered, including on a first run
 	// that is itself a backfill — the flag is what stops a later plain seal
@@ -275,7 +282,7 @@ func seal(dataDir string, source *store.Store, head uint64, backfill bool) (Seal
 	// stored; relying on a re-read to learn the snapped value made the coupling
 	// invisible and the value easy to use unsnapped.
 	floor := snapToFanout(mark.Floor)
-	return sealFrom(dir, source, head, floor)
+	return sealFrom(dir, source, frontier, head, floor)
 }
 
 // snapToFanout rounds a floor down to a fanout boundary. It is the rule
@@ -288,118 +295,66 @@ func seal(dataDir string, source *store.Store, head uint64, backfill bool) (Seal
 func snapToFanout(floor uint64) uint64 { return floor - floor%Fanout }
 
 // sealFrom does the sealing itself, given a settled floor.
-func sealFrom(dir string, source *store.Store, head, floor uint64) (SealResult, error) {
+//
+// frontier is the highest position sealing may cover — the retention window's
+// edge — while head is what the spool actually holds. The two are different
+// numbers and both are needed: sealing stops at the frontier, but retention has
+// to keep what a view over the *whole* store would read.
+//
+// Only blocks a view would use are written. That is the property that makes a
+// repeated scan free, and it took two attempts to get right: sealing every
+// complete range and pruning afterwards meant each scan wrote 3,400 blocks and
+// deleted them again — at 31,288 records, "sealed once, never recomputed" and
+// "the cost of a scan is the new frontier" were both false while nothing
+// failed. Higher tiers are still merged from the tiers below them, but through
+// blocks held in memory rather than through files that only exist to be deleted.
+func sealFrom(dir string, source *store.Store, frontier, head, floor uint64) (SealResult, error) {
 	result := SealResult{}
 
-	complete := head / Fanout
+	complete := frontier / Fanout
 	if complete == 0 {
 		return result, nil
 	}
 
-	// Which tier-1 blocks are missing is decided before the spool is read, so a
-	// steady-state seal — every block already present but the newest — reads no
-	// records at all.
-	missing := make([]uint64, 0, complete)
-	for index := range complete {
-		start, end := entryRange(index)
-		if start < floor {
-			// History from before rollups were enabled. Left alone until a
-			// backfill asks for it.
-			continue
-		}
-		path := filepath.Join(dir, blockName(1, start, end))
-		present, refused, err := blockState(path)
-		if err != nil {
-			return result, err
-		}
-		if refused {
-			result.Refused++
-			if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
-				return result, fmt.Errorf("removing foreign block: %w", removeErr)
-			}
-			present = false
-		}
-		if present {
-			result.Skipped++
-			continue
-		}
-		missing = append(missing, index)
+	// Which blocks a view would read, decided before anything is written, so a
+	// block that would be pruned is never written in the first place.
+	wanted, err := plannedBlocks(dir, head, frontier, floor)
+	if err != nil {
+		return result, err
 	}
 
-	// One read of the spool for the whole seal, not one per block.
-	//
-	// This is load-bearing rather than an optimisation. store.Entries decodes
-	// the spool from the start on every call and discards what precedes the
-	// position asked for, so calling it once per missing block would cost one
-	// full decode per block — quadratic in history, and worst exactly on the
-	// backfill this design promises to make cheap. Reading once and slicing
-	// keeps a seal linear in the records it actually summarises.
-	if len(missing) > 0 {
-		entries, err := source.Entries(0)
-		if err != nil {
-			return result, err
-		}
-		// Positions are one-based and contiguous within one read, so a block's
-		// range indexes directly into the slice. Verified against the slice's
-		// own bounds rather than assumed: a spool rebuilt shorter under us would
-		// otherwise panic here.
-		for _, index := range missing {
-			start, end := entryRange(index)
-			if end > uint64(len(entries)) {
-				continue
-			}
-			window := entries[start:end]
-			if uint64(len(window)) < Fanout || window[0].Position != start+1 {
-				// The spool no longer holds a full, contiguously numbered block
-				// here — rebuilt shorter, or invalid lines renumbered it. Not
-				// sealable now; the next run finds the same gap.
-				continue
-			}
-			written, err := WriteBlock(dir, Reduce(1, start, end, window))
-			if err != nil {
-				return result, err
-			}
-			if written {
-				result.Sealed++
-			} else {
-				result.Skipped++
-			}
-		}
+	// Tier 1 is reduced from records; every higher tier is merged from the tier
+	// below. Blocks live in this map whether or not they are written, so a tier
+	// that is only scaffolding still contributes to the tier above it.
+	tier1, refused, err := reduceTier1(dir, source, complete, floor, wanted, &result)
+	if err != nil {
+		return result, err
 	}
+	result.Refused += refused
 
-	// Higher tiers are merged from the tier below, never from records.
+	below := tier1
 	span := Fanout
 	for tier := uint(2); tier <= MaxTier; tier++ {
 		span *= Fanout
-		groups := head / span
+		groups := frontier / span
 		if groups == 0 {
 			break
 		}
+		above := make(map[uint64]Block, groups)
 		for group := range groups {
 			start := group * span
 			end := start + span
 			if start < floor {
 				continue
 			}
-			path := filepath.Join(dir, blockName(tier, start, end))
-			present, refused, err := blockState(path)
-			if err != nil {
-				return result, err
-			}
-			if refused {
-				result.Refused++
-				if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
-					return result, fmt.Errorf("removing foreign block: %w", removeErr)
+			children := make([]Block, 0, Fanout)
+			childSpan := span / Fanout
+			for index := range Fanout {
+				child, found := below[start+index*childSpan]
+				if !found {
+					break
 				}
-				present = false
-			}
-			if present {
-				result.Skipped++
-				continue
-			}
-			children, err := readChildren(dir, tier, start, span)
-			if err != nil {
-				return result, err
+				children = append(children, child)
 			}
 			if len(children) < int(Fanout) {
 				// A child is missing, so this tier cannot be sealed exactly.
@@ -407,9 +362,14 @@ func sealFrom(dir string, source *store.Store, head, floor uint64) (SealResult, 
 				// summarised nine tenths of its range would be wrong forever.
 				continue
 			}
-			written, err := WriteBlock(dir, Merge(tier, start, end, children))
-			if err != nil {
-				return result, err
+			merged := Merge(tier, start, end, children)
+			above[start] = merged
+			if _, keep := wanted[blockID{tier: tier, start: start, end: end}]; !keep {
+				continue
+			}
+			written, writeErr := WriteBlock(dir, merged)
+			if writeErr != nil {
+				return result, writeErr
 			}
 			if written {
 				result.Sealed++
@@ -417,13 +377,12 @@ func sealFrom(dir string, source *store.Store, head, floor uint64) (SealResult, 
 				result.Skipped++
 			}
 		}
+		below = above
 	}
 
-	// Superseded fine blocks are dropped once the coarse block covering them
-	// exists. Without this the directory grows linearly with events — measured
-	// at the 31,288 records that motivated this package, tier 1 alone was 9.7 MB
-	// against a 15 MB spool, so the "summary" cost 65% of the data it
-	// summarised. See Prune.
+	// Anything on disk that the plan does not want is removed. With the plan
+	// driving what gets written, this only has work to do after a change of
+	// head, a version bump, or an interrupted run.
 	pruned, err := Prune(dir, head)
 	if err != nil {
 		return result, err
@@ -447,6 +406,111 @@ func sealFrom(dir string, source *store.Store, head, floor uint64) (SealResult, 
 	return result, nil
 }
 
+// reduceTier1 produces every tier-1 block above the floor, writing only those
+// the plan wants, and reports how many existing blocks were refused.
+//
+// It reads the spool once for the whole pass. store.Entries decodes from the
+// start on every call and discards what precedes the position asked for, so
+// calling it per block would cost one full decode per block — quadratic in
+// history, and worst exactly on the backfill this design promises to make cheap.
+func reduceTier1(dir string, source *store.Store, complete, floor uint64, wanted map[blockID]struct{}, result *SealResult) (map[uint64]Block, int, error) {
+	blocks := make(map[uint64]Block, complete)
+	refused := 0
+
+	entries, err := source.Entries(0)
+	if err != nil {
+		return nil, 0, err
+	}
+	for index := range complete {
+		start, end := entryRange(index)
+		if start < floor {
+			// History from before rollups were enabled. Left alone until a
+			// backfill asks for it.
+			continue
+		}
+		// Positions are one-based and contiguous within one read, so a block's
+		// range indexes directly into the slice. Checked against the slice's
+		// own bounds rather than assumed: a spool rebuilt shorter under us
+		// would otherwise panic here.
+		if end > uint64(len(entries)) {
+			continue
+		}
+		window := entries[start:end]
+		if uint64(len(window)) < Fanout || window[0].Position != start+1 {
+			// The spool no longer holds a full, contiguously numbered block
+			// here — rebuilt shorter, or invalid lines renumbered it. Not
+			// sealable now; the next run finds the same gap.
+			continue
+		}
+		block := Reduce(1, start, end, window)
+		blocks[start] = block
+
+		id := blockID{tier: 1, start: start, end: end}
+		if _, keep := wanted[id]; !keep {
+			continue
+		}
+		path := filepath.Join(dir, blockName(1, start, end))
+		present, isRefused, stateErr := blockState(path)
+		if stateErr != nil {
+			return nil, refused, stateErr
+		}
+		if isRefused {
+			refused++
+			if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
+				return nil, refused, fmt.Errorf("removing foreign block: %w", removeErr)
+			}
+			present = false
+		}
+		if present {
+			result.Skipped++
+			continue
+		}
+		written, writeErr := WriteBlock(dir, block)
+		if writeErr != nil {
+			return nil, refused, writeErr
+		}
+		if written {
+			result.Sealed++
+		} else {
+			result.Skipped++
+		}
+	}
+	return blocks, refused, nil
+}
+
+// plannedBlocks is the set of blocks a view over head would read, given what a
+// seal up to frontier is able to produce.
+//
+// It is computed from the ranges sealing *could* write rather than from the
+// files currently on disk, so a first seal plans the same set a later one does
+// and no block is written only to be pruned. Blocks above the verbatim floor are
+// included even though today's walk does not read them: the floor moves forward
+// with the head, and they are the coarse material the next walk will use.
+func plannedBlocks(dir string, head, frontier, floor uint64) (map[blockID]struct{}, error) {
+	available := make(map[blockID]Block)
+	span := uint64(1)
+	for tier := uint(1); tier <= MaxTier; tier++ {
+		span *= Fanout
+		for group := range frontier / span {
+			start := group * span
+			if start < floor {
+				continue
+			}
+			id := blockID{tier: tier, start: start, end: start + span}
+			available[id] = Block{Tier: tier, Start: start, End: start + span}
+		}
+	}
+
+	wanted := selectBlocks(available, head).visited
+	keepAbove := verbatimFloor(head)
+	for id := range available {
+		if id.end > keepAbove {
+			wanted[id] = struct{}{}
+		}
+	}
+	return wanted, nil
+}
+
 // blockState reports whether a block is present and readable, present but
 // foreign, or absent.
 //
@@ -465,25 +529,6 @@ func blockState(path string) (present, refused bool, err error) {
 	}
 	_, readErr := ReadBlock(path)
 	return true, readErr != nil, nil
-}
-
-// readChildren loads the Fanout blocks of the tier below that make up one block.
-func readChildren(dir string, tier uint, start, span uint64) ([]Block, error) {
-	childSpan := span / Fanout
-	children := make([]Block, 0, Fanout)
-	for index := range Fanout {
-		childStart := start + index*childSpan
-		path := filepath.Join(dir, blockName(tier-1, childStart, childStart+childSpan))
-		child, err := ReadBlock(path)
-		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, ErrForeignBlock) {
-			return nil, nil
-		}
-		if err != nil {
-			return nil, err
-		}
-		children = append(children, child)
-	}
-	return children, nil
 }
 
 // ParseBlockName reports the tier and range a file name encodes. It exists so a
@@ -556,6 +601,19 @@ func Prune(dir string, head uint64) (int, error) {
 		return 0, nil
 	}
 
+	// Blocks above the verbatim floor are kept even though today's walk does not
+	// visit them: a view reads those positions from the spool, so they are not
+	// needed *now*, but the floor moves forward with the head and they are the
+	// coarse material the next walk will use.
+	//
+	// Leaving them out was the churn bug. Retention that considered only the
+	// current walk deleted exactly the blocks the seal had just written, so
+	// every scan resealed and repruned them — 3,456 blocks per scan at 31,288
+	// records, with nothing failing and the incrementality claim quietly false.
+	// The test that catches it has to run above MaxVerbatimEntries, because
+	// below that the floor is zero and this region does not exist.
+	keepAbove := verbatimFloor(head)
+
 	pruned := 0
 	for _, entry := range names {
 		if entry.IsDir() {
@@ -574,6 +632,9 @@ func Prune(dir string, head uint64) (int, error) {
 			continue
 		}
 		if _, needed := required[blockID{tier: tier, start: start, end: end}]; needed {
+			continue
+		}
+		if end > keepAbove {
 			continue
 		}
 		if removeErr := os.Remove(filepath.Join(dir, entry.Name())); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {

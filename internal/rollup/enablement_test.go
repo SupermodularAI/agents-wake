@@ -16,7 +16,7 @@ func TestSealBuildsForwardFromEnablement(t *testing.T) {
 	const existing = 100
 	dataDir, events := seededStore(t, existing)
 
-	result, err := Seal(dataDir, events, existing)
+	result, err := Seal(dataDir, events, existing, existing)
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
@@ -61,13 +61,13 @@ func TestEnablementFloorSnapsToFanoutBoundary(t *testing.T) {
 func TestSealsForwardOfEnablement(t *testing.T) {
 	const existing = 100
 	dataDir, events := seededStore(t, existing)
-	if _, err := Seal(dataDir, events, existing); err != nil {
+	if _, err := Seal(dataDir, events, existing, existing); err != nil {
 		t.Fatalf("first seal: %v", err)
 	}
 
 	// A second store's worth of records lands after the floor.
 	appendRecords(t, events, existing, 200)
-	result, err := Seal(dataDir, events, existing+200)
+	result, err := Seal(dataDir, events, existing+200, existing+200)
 	if err != nil {
 		t.Fatalf("second seal: %v", err)
 	}
@@ -88,14 +88,14 @@ func TestSealsForwardOfEnablement(t *testing.T) {
 func TestBackfillIsAnExplicitOptIn(t *testing.T) {
 	const existing = 200
 	dataDir, events := seededStore(t, existing)
-	if _, err := Seal(dataDir, events, existing); err != nil {
+	if _, err := Seal(dataDir, events, existing, existing); err != nil {
 		t.Fatalf("seal: %v", err)
 	}
 	if names := blockNames(t, dataDir); len(names) != 0 {
 		t.Fatalf("a plain seal produced %d blocks over pre-existing history", len(names))
 	}
 
-	result, err := Backfill(dataDir, events, existing)
+	result, err := Backfill(dataDir, events, existing, existing)
 	if err != nil {
 		t.Fatalf("backfill: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestBackfillIsAnExplicitOptIn(t *testing.T) {
 	}
 
 	// A plain seal afterwards must not undo it.
-	if _, err := Seal(dataDir, events, existing); err != nil {
+	if _, err := Seal(dataDir, events, existing, existing); err != nil {
 		t.Fatalf("seal after backfill: %v", err)
 	}
 	after, _ := ReadEnablement(Dir(dataDir))
@@ -147,7 +147,7 @@ func TestForeignEnablementIsReEstablished(t *testing.T) {
 func TestPruneKeepsTheEnablementMark(t *testing.T) {
 	const total = 11_000
 	dataDir, events := seededStore(t, total)
-	if _, err := Backfill(dataDir, events, total); err != nil {
+	if _, err := Backfill(dataDir, events, total, total); err != nil {
 		t.Fatalf("backfill: %v", err)
 	}
 	if _, err := Prune(Dir(dataDir), total); err != nil {
@@ -167,7 +167,7 @@ func TestPruneKeepsTheEnablementMark(t *testing.T) {
 // there without setting the flag.
 func TestFirstRunBackfillRecordsTheFlag(t *testing.T) {
 	dataDir, events := seededStore(t, 100)
-	if _, err := Backfill(dataDir, events, 100); err != nil {
+	if _, err := Backfill(dataDir, events, 100, 100); err != nil {
 		t.Fatalf("backfill: %v", err)
 	}
 	mark, found := ReadEnablement(Dir(dataDir))
@@ -182,7 +182,7 @@ func TestFirstRunBackfillRecordsTheFlag(t *testing.T) {
 	}
 
 	// And a plain seal afterwards must leave it alone.
-	if _, err := Seal(dataDir, events, 100); err != nil {
+	if _, err := Seal(dataDir, events, 100, 100); err != nil {
 		t.Fatalf("seal after backfill: %v", err)
 	}
 	after, _ := ReadEnablement(Dir(dataDir))

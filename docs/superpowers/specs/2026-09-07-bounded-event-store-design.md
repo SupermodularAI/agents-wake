@@ -132,8 +132,20 @@ Measured at 31,288 records, the unpruned directory held 3,474 blocks and 10.8 MB
 against a 15 MB spool — a second copy rather than a summary, with tier 1 alone
 accounting for 9.7 MB of it.
 
-So a seal also prunes: any block an assembled view would not use is removed.
-Pruned, the same history is 18 blocks and 56 KB, or 0.37% of the spool.
+So a seal writes only what a view would read, and removes anything left over.
+The same history is 75 blocks and 230 KB, or 1.5% of the spool.
+
+Deciding what to write *before* writing it is the part that took two attempts.
+Sealing every complete range and pruning afterwards left each scan writing
+about 3,400 blocks and deleting them again — at 31,288 records "sealed once,
+never recomputed" and "the cost of a scan is the new frontier" were both false
+while nothing failed and CI stayed green. Higher tiers are still merged from
+the tiers below them, but through blocks held in memory rather than through
+files that exist only to be deleted.
+
+Two numbers are needed to get this right and they are not the same: sealing
+stops at the retention window's frontier, while retention has to keep what a
+view over the whole store reads. Conflating them was the bug.
 
 Retention is derived from the view's own selection walk rather than from a
 separate rule about which blocks a coarser one supersedes. That is the load-

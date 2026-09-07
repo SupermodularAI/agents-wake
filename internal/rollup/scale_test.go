@@ -25,7 +25,7 @@ func TestStorageIsSublinearAtMeasuredScale(t *testing.T) {
 	}
 	const measured = 31_288
 	dataDir, events := seededStore(t, measured)
-	result, err := Backfill(dataDir, events, measured)
+	result, err := Backfill(dataDir, events, measured, measured)
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestCoverageHoldsAtEveryScale(t *testing.T) {
 	for _, total := range []int{1_000, 11_000, 31_288} {
 		t.Run(fmt.Sprintf("%d records", total), func(t *testing.T) {
 			dataDir, events := seededStore(t, total)
-			if _, err := Backfill(dataDir, events, uint64(total)); err != nil {
+			if _, err := Backfill(dataDir, events, uint64(total), uint64(total)); err != nil {
 				t.Fatalf("seal: %v", err)
 			}
 
@@ -209,7 +209,7 @@ func TestSealAndPruneAreStableAsHistoryGrows(t *testing.T) {
 		}
 		written += result.Written
 
-		if _, sealErr := Backfill(dataDir, events, uint64(written)); sealErr != nil {
+		if _, sealErr := Backfill(dataDir, events, uint64(written), uint64(written)); sealErr != nil {
 			t.Fatalf("step %d seal: %v", step, sealErr)
 		}
 		view, err := Assemble(dataDir, events, uint64(written))
@@ -227,5 +227,95 @@ func TestSealAndPruneAreStableAsHistoryGrows(t *testing.T) {
 		if invocations != uint64(written) {
 			t.Fatalf("step %d: the view accounted for %d of %d records", step, invocations, written)
 		}
+	}
+}
+
+// TestSealIsIdempotentAtMeasuredScale is the regression guard for the most
+// serious bug in this package's history, and it is at scale on purpose.
+//
+// Retention was computed at the sealing frontier rather than at the spool head,
+// so the walk never visited the blocks just above the frontier and a seal
+// deleted the blocks it had itself just written. Every scan resealed and
+// repruned 3,456 blocks at 31,288 records — "sealed once, never recomputed" and
+// "the cost of a scan is the new frontier" were both false, with nothing
+// failing.
+//
+// Every incrementality test in this package before this one ran below 500
+// records, where the verbatim window covers everything, the required set is
+// empty, and Prune's early return hides the whole interaction. That is why the
+// scale matters here rather than being a nicety: the bug is unreachable below
+// MaxVerbatimEntries.
+func TestSealIsIdempotentAtMeasuredScale(t *testing.T) {
+	if testing.Short() {
+		t.Skip("seeds 31,288 records")
+	}
+	const measured = 31_288
+	dataDir, events := seededStore(t, measured)
+
+	first, err := Backfill(dataDir, events, measured, measured)
+	if err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+	if first.Sealed == 0 {
+		t.Fatal("the backfill sealed nothing")
+	}
+
+	second, err := Seal(dataDir, events, measured, measured)
+	if err != nil {
+		t.Fatalf("second seal: %v", err)
+	}
+	if second.Sealed != 0 {
+		t.Errorf("a second seal over unchanged history wrote %d blocks, want 0", second.Sealed)
+	}
+	if second.Pruned != 0 {
+		t.Errorf("a second seal pruned %d blocks, want 0 — it is deleting what it just wrote", second.Pruned)
+	}
+
+	third, err := Seal(dataDir, events, measured, measured)
+	if err != nil {
+		t.Fatalf("third seal: %v", err)
+	}
+	if third.Sealed != 0 || third.Pruned != 0 {
+		t.Errorf("a third seal wrote %d and pruned %d, want 0 and 0 — the churn is periodic",
+			third.Sealed, third.Pruned)
+	}
+}
+
+// TestPruneKeepsWhatAViewOverTheWholeStoreReads asserts the distinction the
+// churn bug came from: pruning is decided by the head, not by the sealing
+// frontier, because a view reads the whole store while sealing stops at the
+// retention window.
+func TestPruneKeepsWhatAViewOverTheWholeStoreReads(t *testing.T) {
+	if testing.Short() {
+		t.Skip("seeds 12,000 records")
+	}
+	const total = 12_000
+	// A frontier well below the head, as a retention window produces.
+	const frontier = 10_000
+	dataDir, events := seededStore(t, total)
+	if _, err := Backfill(dataDir, events, frontier, total); err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+
+	view, err := Assemble(dataDir, events, total)
+	if err != nil {
+		t.Fatalf("assemble: %v", err)
+	}
+	summary := view.Summary()
+	var invocations uint64
+	for _, entry := range summary.Keys {
+		invocations += entry.Aggregate.Invocations
+	}
+	if invocations != total {
+		t.Errorf("a view accounted for %d of %d records after a seal with a frontier below the head",
+			invocations, total)
+	}
+
+	again, err := Seal(dataDir, events, frontier, total)
+	if err != nil {
+		t.Fatalf("second seal: %v", err)
+	}
+	if again.Sealed != 0 || again.Pruned != 0 {
+		t.Errorf("a second seal wrote %d and pruned %d with a frontier below the head", again.Sealed, again.Pruned)
 	}
 }

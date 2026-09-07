@@ -1,6 +1,7 @@
 package activation
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -308,3 +309,130 @@ func blockFiles(t *testing.T, paths config.Paths) []string {
 	}
 	return names
 }
+
+// seedMixedAges writes count records that are all old except the one at the
+// given index, which is recent. The index is a position in write order, so the
+// recent record sits early in the spool.
+func seedMixedAges(t *testing.T, paths config.Paths, count, recentAt int) *store.Store {
+	t.Helper()
+	events := openEvents(paths)
+	old := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	recent := time.Now().UTC().Add(-time.Hour)
+	records := make([]record.Record, 0, count)
+	for index := range count {
+		stamp := old.Add(time.Duration(index) * time.Minute)
+		if index == recentAt {
+			stamp = recent
+		}
+		outcome := record.OutcomeOK
+		duration := int64(index % 500)
+		records = append(records, record.Record{
+			SchemaVersion: record.SchemaVersion,
+			EventID:       record.DeriveEventID("claude-code", record.Identifier(fmt.Sprintf("mixed-%d", index))),
+			Timestamp:     stamp,
+			Harness:       "claude-code",
+			SessionID:     record.Identifier(fmt.Sprintf("session-%d", index/10)),
+			Repo:          record.Hash("abcdef0123456789abcdef0123456789"),
+			Kind:          record.KindSkill,
+			Name:          record.Identifier(fmt.Sprintf("skill-%d", index%3)),
+			Invoker:       record.InvokerModel,
+			Outcome:       &outcome,
+			DurationMS:    &duration,
+		})
+	}
+	result, err := events.Append(records)
+	if err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+	if result.Written != count {
+		t.Fatalf("seeded %d of %d records", result.Written, count)
+	}
+	return events
+}
+
+// TestOneRecentRecordDoesNotVetoTheWholeRange is the regression guard for a
+// silent never-seal.
+//
+// Positions are not time-ordered — a transcript imported today can carry an
+// event from last week — so the first record inside the retention window is not
+// the end of the sealable region. Taking it as the end meant a single recent
+// record at a low position collapsed the frontier to zero: nothing was ever
+// sealed on that machine, with no error anywhere. Every earlier test seeded
+// records of a uniform age, so none of them could see it.
+func TestOneRecentRecordDoesNotVetoTheWholeRange(t *testing.T) {
+	paths := testPaths(t)
+	// One recent record at position 4, ninety-nine records thirty days old.
+	events := seedMixedAges(t, paths, 100, 3)
+
+	frontier, err := sealableHead(events, 100, 7*24*time.Hour)
+	if err != nil {
+		t.Fatalf("sealableHead: %v", err)
+	}
+	// The block holding the recent record is not sealable, so the frontier stops
+	// below it — but the ninety records after it must not be lost with it.
+	if frontier != 0 {
+		t.Errorf("frontier = %d, want 0: the recent record is in the first block, so nothing below it is sealable", frontier)
+	}
+
+	// The same spool with the recent record later on: everything below its block
+	// must still seal.
+	later := testPaths(t)
+	laterEvents := seedMixedAges(t, later, 100, 55)
+	laterFrontier, err := sealableHead(laterEvents, 100, 7*24*time.Hour)
+	if err != nil {
+		t.Fatalf("sealableHead: %v", err)
+	}
+	if laterFrontier != 50 {
+		t.Errorf("frontier = %d, want 50: a recent record in the block at [50,60) must not veto the fifty positions below it",
+			laterFrontier)
+	}
+}
+
+// TestSealableHeadNeverSealsAnInWindowRecord asserts the direction the fix must
+// not trade away: the frontier may be conservative, but it must never rise above
+// a record still inside the window.
+func TestSealableHeadNeverSealsAnInWindowRecord(t *testing.T) {
+	for _, recentAt := range []int{0, 3, 27, 55, 99} {
+		paths := testPaths(t)
+		events := seedMixedAges(t, paths, 100, recentAt)
+		frontier, err := sealableHead(events, 100, 7*24*time.Hour)
+		if err != nil {
+			t.Fatalf("recent at %d: %v", recentAt, err)
+		}
+		// The recent record's position is one-based.
+		if frontier > uint64(recentAt) {
+			t.Errorf("recent record at position %d but frontier = %d: an in-window record would be sealed",
+				recentAt+1, frontier)
+		}
+		if frontier%rollup.Fanout != 0 {
+			t.Errorf("frontier = %d, which is not a fanout boundary", frontier)
+		}
+	}
+}
+
+// TestASealFailureDoesNotFailTheIngest asserts the claim the package comments
+// make: a rollup is a derived cache, so its failure must not fail the command
+// that produced the records.
+//
+// The records are already durable when a seal runs, and the next scan retries
+// the same blocks — so returning the error would make `wake ingest` exit
+// non-zero and skip its "Imported N" line over a failure that cost nothing.
+// noteRollupFailure records it instead.
+func TestASealFailureDoesNotFailTheIngest(t *testing.T) {
+	before := RollupFailures()
+	if noteRollupFailure(nil) {
+		t.Error("noteRollupFailure reported a failure for a nil error")
+	}
+	if RollupFailures() != before {
+		t.Error("a nil error incremented the failure count")
+	}
+	if !noteRollupFailure(errSealFailed) {
+		t.Error("noteRollupFailure did not report a real failure")
+	}
+	if RollupFailures() != before+1 {
+		t.Errorf("failure count = %d, want %d", RollupFailures(), before+1)
+	}
+}
+
+// errSealFailed stands in for a seal error in the test above.
+var errSealFailed = errors.New("seal failed")

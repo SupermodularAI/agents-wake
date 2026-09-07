@@ -45,11 +45,12 @@ called out under Changed.
   nothing that already exists — and sealing it is an explicit opt-in. The floor
   is persisted beside the blocks, because nothing in the spool records when the
   key was set, and it is discarded with them.
-- Sealing also removes rollup blocks that a bounded view would no longer use.
-  Without it the summary grows linearly with history like the spool it
-  summarises — 10.8 MB against a 15 MB spool at 31,288 records, against 56 KB
-  once superseded blocks are dropped. Only derived blocks are removed; the spool
-  is untouched, so the cost is at most a reseal.
+- Sealing writes only the blocks a bounded view would read, and removes any that
+  a view no longer needs. Keeping every tier would make the summary grow
+  linearly with history like the spool it summarises — 10.8 MB against a 15 MB
+  spool at 31,288 records, against 230 KB for the blocks a view actually uses.
+  Only derived blocks are removed; the spool is untouched, so the cost is at
+  most a reseal.
 - Discarding the event store now also discards data derived from it, so
   `wake ingest --rebuild` cannot leave summaries describing records that no
   longer exist.

@@ -214,12 +214,13 @@ func initEpilogue(paths config.Paths, repos *config.Repos, claudeDir, command, i
 	// missing blocks. Doing it after the walk means one seal per scan rather
 	// than one per transcript.
 	//
-	// The error is joined rather than dropped: a seal that keeps failing would
-	// otherwise be invisible, and errcheck's check-blank is enabled here exactly
-	// so a counting tool cannot quietly swallow one. It is reported after the
-	// records are safe, so a failed seal never costs an ingest.
-	sealErr := sealRollups(paths, events)
-	return written, errors.Join(refreshInventory(paths, events, discovered), sealErr)
+	// Not joined into the return: this command's job is to import records, and
+	// they are already durable. A rollup is a derived cache whose next scan
+	// retries the same blocks, so failing `wake ingest` over it — non-zero exit,
+	// and no "Imported N" line — would report a failure that did not happen.
+	// noteRollupFailure is where it surfaces instead.
+	noteRollupFailure(sealRollups(paths, events))
+	return written, refreshInventory(paths, events, discovered)
 }
 
 // Ingest imports available transcripts for consented repositories only.
@@ -264,10 +265,10 @@ func ingestScoped(paths config.Paths, claudeDir string, scope collectionScope) (
 	if err != nil {
 		return written, err
 	}
-	// Same reasoning as Activate's: derived, so a seal failure is reported after
-	// the records are safe and never in place of them.
-	sealErr := sealRollups(paths, events)
-	return written, errors.Join(refreshInventory(paths, events, discovered), sealErr)
+	// Same reasoning as Activate's: derived, so a seal failure is surfaced
+	// rather than returned, and never in place of the records.
+	noteRollupFailure(sealRollups(paths, events))
+	return written, refreshInventory(paths, events, discovered)
 }
 
 // Trigger is the scan the Claude Code hook causes, and it is single-flight: a

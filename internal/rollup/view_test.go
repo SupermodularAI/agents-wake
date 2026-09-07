@@ -14,7 +14,7 @@ import (
 // a hundred thousand records must read no more blocks than one over a thousand.
 func TestViewBudgetIsAbsolute(t *testing.T) {
 	small, eventsSmall := seededStore(t, 1_000)
-	if _, err := Backfill(small, eventsSmall, 1_000); err != nil {
+	if _, err := Backfill(small, eventsSmall, 1_000, 1_000); err != nil {
 		t.Fatalf("sealing the small store: %v", err)
 	}
 	smallView, err := Assemble(small, eventsSmall, 1_000)
@@ -23,7 +23,7 @@ func TestViewBudgetIsAbsolute(t *testing.T) {
 	}
 
 	large, eventsLarge := seededStore(t, 12_000)
-	if _, sealErr := Backfill(large, eventsLarge, 12_000); sealErr != nil {
+	if _, sealErr := Backfill(large, eventsLarge, 12_000, 12_000); sealErr != nil {
 		t.Fatalf("sealing the large store: %v", sealErr)
 	}
 	largeView, err := Assemble(large, eventsLarge, 12_000)
@@ -54,7 +54,7 @@ func TestViewBudgetIsAbsolute(t *testing.T) {
 // carry no ids for most members so the overlap would be undetectable downstream.
 func TestViewCoversWithoutOverlap(t *testing.T) {
 	dataDir, events := seededStore(t, 1_000)
-	if _, err := Backfill(dataDir, events, 1_000); err != nil {
+	if _, err := Backfill(dataDir, events, 1_000, 1_000); err != nil {
 		t.Fatalf("seal: %v", err)
 	}
 	view, err := Assemble(dataDir, events, 1_000)
@@ -85,7 +85,7 @@ func TestViewCoversWithoutOverlap(t *testing.T) {
 // which is the order a reader consumes them in.
 func TestViewIsCoarseToFine(t *testing.T) {
 	dataDir, events := seededStore(t, 1_000)
-	if _, err := Backfill(dataDir, events, 1_000); err != nil {
+	if _, err := Backfill(dataDir, events, 1_000, 1_000); err != nil {
 		t.Fatalf("seal: %v", err)
 	}
 	view, err := Assemble(dataDir, events, 1_000)
@@ -127,7 +127,7 @@ func TestViewWithNoBlocksIsVerbatimOnly(t *testing.T) {
 func TestViewSummaryCountsEveryRecord(t *testing.T) {
 	const total = 1_000
 	dataDir, events := seededStore(t, total)
-	if _, err := Backfill(dataDir, events, total); err != nil {
+	if _, err := Backfill(dataDir, events, total, total); err != nil {
 		t.Fatalf("seal: %v", err)
 	}
 	view, err := Assemble(dataDir, events, total)
@@ -155,7 +155,7 @@ func TestViewSummaryCountsEveryRecord(t *testing.T) {
 func TestViewSummaryMatchesDirectReduce(t *testing.T) {
 	const total = 1_000
 	dataDir, events := seededStore(t, total)
-	if _, err := Backfill(dataDir, events, total); err != nil {
+	if _, err := Backfill(dataDir, events, total, total); err != nil {
 		t.Fatalf("seal: %v", err)
 	}
 	view, err := Assemble(dataDir, events, total)
@@ -210,7 +210,7 @@ func TestViewSummaryMatchesDirectReduce(t *testing.T) {
 func TestViewIgnoresForeignBlocks(t *testing.T) {
 	const total = 1_000
 	dataDir, events := seededStore(t, total)
-	if _, err := Backfill(dataDir, events, total); err != nil {
+	if _, err := Backfill(dataDir, events, total, total); err != nil {
 		t.Fatalf("seal: %v", err)
 	}
 	view, err := Assemble(dataDir, events, total)
@@ -278,12 +278,19 @@ func TestPrunedDirectoryStillCoversHistory(t *testing.T) {
 	// Enough history for tier 3 to exist and for pruning to have work to do.
 	const total = 11_000
 	dataDir, events := seededStore(t, total)
-	result, err := Backfill(dataDir, events, total)
-	if err != nil {
+	if _, err := Backfill(dataDir, events, total, total); err != nil {
 		t.Fatalf("seal: %v", err)
 	}
-	if result.Pruned == 0 {
-		t.Fatal("nothing was pruned, so this does not test a pruned directory")
+	// A sparse directory is the normal state, not an exceptional one: a seal
+	// writes only the blocks a view would read, so most ranges have no file at
+	// all and the tiers on disk end at different positions. That sparseness is
+	// what the walk has to cross, and what an earlier retention rule broke.
+	kept := blockNames(t, dataDir)
+	if len(kept) == 0 {
+		t.Fatal("nothing was sealed")
+	}
+	if uint64(len(kept)) >= total/Fanout {
+		t.Fatalf("%d blocks retained for %d records, which is not a sparse directory", len(kept), total)
 	}
 
 	view, err := Assemble(dataDir, events, total)
@@ -311,7 +318,7 @@ func TestPrunedDirectoryStillCoversHistory(t *testing.T) {
 func TestPruneKeepsCoverageContiguous(t *testing.T) {
 	const total = 11_000
 	dataDir, events := seededStore(t, total)
-	if _, err := Backfill(dataDir, events, total); err != nil {
+	if _, err := Backfill(dataDir, events, total, total); err != nil {
 		t.Fatalf("seal: %v", err)
 	}
 	view, err := Assemble(dataDir, events, total)
@@ -342,7 +349,7 @@ func TestPruneKeepsCoverageContiguous(t *testing.T) {
 func TestPruneIsIdempotent(t *testing.T) {
 	const total = 11_000
 	dataDir, events := seededStore(t, total)
-	if _, err := Backfill(dataDir, events, total); err != nil {
+	if _, err := Backfill(dataDir, events, total, total); err != nil {
 		t.Fatalf("seal: %v", err)
 	}
 	again, err := Prune(Dir(dataDir), total)
@@ -359,7 +366,7 @@ func TestPruneIsIdempotent(t *testing.T) {
 func TestPruneLeavesForeignFilesAlone(t *testing.T) {
 	const total = 11_000
 	dataDir, events := seededStore(t, total)
-	if _, err := Backfill(dataDir, events, total); err != nil {
+	if _, err := Backfill(dataDir, events, total, total); err != nil {
 		t.Fatalf("seal: %v", err)
 	}
 	stray := filepath.Join(Dir(dataDir), "notes.txt")
