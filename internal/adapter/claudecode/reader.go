@@ -137,6 +137,33 @@ type Result struct {
 	// the question came up (plan §4.2, ADR-0007). Read reports it for the one source it
 	// read.
 	SkippedTypedInvocations int
+	// OutOfOrderPairs counts terminated tool calls whose result instant precedes
+	// their own tool_use instant. The pair measured no interval, so DurationMS is
+	// left nil rather than clamped to 0: ADR-0027 reserves a wire-level 0 for a
+	// genuine zero-duration call and delivers it into a receiver store that can
+	// never be rebuilt, so a clamped 0 would state an instant call that nobody
+	// measured (ADR-0005 applied to time).
+	//
+	// It is timestamp order, not transcript line order. A tool_result line written
+	// before its own tool_use line is an ordinary out-of-order write this reader
+	// already pairs correctly, and its instants are still in order — it is not
+	// counted here.
+	//
+	// The record is written all the same, and is counted by Parsed upstream: the
+	// invocation happened and only its duration is unknown. This counter is what
+	// keeps that unknown visible rather than silent (plan §12).
+	//
+	// It is per source and complete on Read, like SkippedTypedInvocations: a pair is
+	// judged at the moment both halves are in hand, which is always inside one
+	// source's read, so Close derives none of its own.
+	//
+	// It deliberately does not move doctor's state word — same reasoning as
+	// RefusedSubagentRuns and SkippedTypedInvocations. There is no incremental
+	// cursor, so every scan re-reads the same transcript and re-counts the same
+	// pairs, and a state word driven by it could never change back (see
+	// health.Diagnose). It carries only a count — no instant, no name, no session
+	// id, no transcript value (ADR-0007, plan §4.2).
+	OutOfOrderPairs int
 	// SkippedSources counts the sources this scan read that derived nothing, refused
 	// nothing, and had nothing attributed back to them by the post-walk resolution —
 	// most often because their working directory belongs to no consented repository.
@@ -222,6 +249,9 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, installed Inst
 	// Summed for the same defensive reason, though a typed invocation is judged entirely
 	// within the line it is on, so Close derives none of its own today.
 	final.SkippedTypedInvocations += first.SkippedTypedInvocations
+	// Summed for the same defensive reason, though a pair is judged inside one
+	// source's read and Close derives none of its own today.
+	final.OutOfOrderPairs += first.OutOfOrderPairs
 	return final, nil
 }
 
@@ -474,16 +504,67 @@ type toolResult struct {
 // retain a result whose tool_use has not arrived yet without holding any
 // transcript string at all — not a denial kind, not a tool name (ADR-0007,
 // plan §4.2).
+//
+// The duration is the one field the result line alone cannot supply: an interval
+// needs both halves of the pair. It is stamped by pairedWith at the moment a call
+// and its result are put together, which is why resultOf — which decodes the
+// result line with no call in hand — leaves it nil.
 type callResult struct {
 	timestamp time.Time
 	outcome   *record.Outcome
+	// duration is the request-to-result interval this pair measured, in
+	// milliseconds, or nil when it measured none. It is stamped by pairedWith at
+	// the moment a call and its result are put together — never derived inside
+	// complete, because interrupted() reaches complete with the call's own instant
+	// as the result instant and a delta computed there would be a non-nil 0 on the
+	// one path ADR-0015 requires to stay unknown (ADR-0005 applied to time).
+	//
+	// It is a number, never a transcript value: nothing here widens ADR-0007's
+	// allowlist.
+	duration *int64
 }
 
 // resultOf derives the terminal half of a call from the tool_result entry and
 // block, at the moment the line is read. Both orders of the pair go through this
 // one function, so line order cannot change a derived outcome.
+//
+// The duration is deliberately left nil here: this function sees the result line
+// alone, and an interval needs the call it terminated. pairedWith stamps it.
 func resultOf(entry transcriptEntry, block contentBlock) callResult {
 	return callResult{timestamp: entry.Timestamp, outcome: outcomeFor(entry, block)}
+}
+
+// pairedWith stamps onto the result that terminated this call the interval the
+// pair measured, and reports whether the pair measured one at all.
+//
+// The interval is request-to-result: from the tool_use instant to the tool_result
+// instant. It includes scheduling and any human permission-approval wait, so a
+// permission-gated call reads as slow. It is not tool execution time and must not
+// be named or described as it. The harness's own toolUseResult.durationMs is a
+// different measurement and is deliberately not consulted, preferred or blended —
+// one provenance, always.
+//
+// A result instant that precedes its call's measured nothing, so the duration
+// stays nil and the caller counts the occurrence: clamping to 0 would publish an
+// unmeasured interval as a definite instant call, which is what ADR-0027 reserves
+// a wire-level 0 for and delivers into a receiver store that can never be rebuilt.
+// The record is still derived — only the duration is unknown, the invocation
+// happened.
+//
+// The comparison is strictly Before, so an equal pair is a measured zero and keeps
+// a non-nil 0: at the source's millisecond resolution a sub-millisecond call is a
+// genuine zero-duration call, and collapsing it to nil would lose exactly the
+// distinction the wake.duration_ms attribute exists to carry (ADR-0027).
+//
+// Both pairing orders go through it, for the reason resultOf exists: line order
+// may not change a derived value.
+func (call call) pairedWith(result callResult) (callResult, bool) {
+	if result.timestamp.Before(call.timestamp) {
+		return result, false
+	}
+	elapsed := result.timestamp.Sub(call.timestamp).Milliseconds()
+	result.duration = &elapsed
+	return result, true
 }
 
 // interruptedResult reports the one signal this reader takes from a tool result
@@ -889,6 +970,11 @@ func subagentInvocation(name string) bool { return name == "Agent" || name == "T
 // terminal path — forward order, out of order, and the staleness rule — shares one
 // derivation and one stamping rule, and a call can only ever yield one shape of
 // record.
+//
+// The duration arrives already derived on the callResult and is copied, never
+// computed here. interrupted() reaches this function with the call's own instant
+// standing in for the result instant, so a delta taken here would be a non-nil 0
+// on the one path that must stay unknown (ADR-0015, ADR-0005 applied to time).
 func (call call) complete(result callResult) record.Record {
 	return record.Record{
 		SchemaVersion:  record.SchemaVersion,
@@ -907,6 +993,7 @@ func (call call) complete(result callResult) record.Record {
 		Invoker:        call.invoker,
 		Entrypoint:     call.entrypoint,
 		Outcome:        result.outcome,
+		DurationMS:     result.duration,
 	}
 }
 
@@ -926,6 +1013,12 @@ func (call call) complete(result callResult) record.Record {
 // activity would make the same logical event serialise differently once unrelated
 // later lines are appended to the session. There is no result entry on this path, so
 // a result-derived timestamp is unavailable by construction.
+//
+// For the same reason there is no duration: the callResult built here carries none,
+// so DurationMS stays nil by construction rather than by exclusion. It is
+// deliberately not derived from the two instants this call hands to complete —
+// they are the same instant, and a 0 there would state an invocation that returned
+// instantly when in truth nothing measured it (ADR-0015, ADR-0005 applied to time).
 func (call call) interrupted() record.Record {
 	outcome := record.OutcomeInterrupted
 	return call.complete(callResult{timestamp: call.timestamp, outcome: &outcome})

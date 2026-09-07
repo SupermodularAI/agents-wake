@@ -175,6 +175,23 @@ type Scan struct {
 	// written, and a state word that can never change again is not a diagnosis (ADR-0036
 	// §3, plan §3.3, §12). See claudecode.Result.SkippedTypedInvocations and Diagnose.
 	SkippedTypedInvocations int `json:"skipped_typed_invocations"`
+	// OutOfOrderPairs counts tool calls the last scan terminated whose result instant
+	// preceded their own call instant. The pair measured no interval, so the record
+	// carries a nil duration rather than a clamped 0 — ADR-0027 reserves a wire-level
+	// 0 for a genuine zero-duration call, delivered into a receiver store that can
+	// never be rebuilt. The invocation itself is in the store and is counted by
+	// EventsWritten.
+	//
+	// It is timestamp order, not the order the two lines were written in: a
+	// tool_result written before its own tool_use is an ordinary out-of-order write
+	// the reader pairs correctly and does not count here.
+	//
+	// It is uncertainty about one number on a record that exists, not lost collection
+	// and not an invocation count, and it is deliberately not one of Diagnose's
+	// "collects nothing" reasons: with no incremental cursor every scan re-reads the
+	// same transcript and re-counts the same pairs, so a state word following it could
+	// never change back.
+	OutOfOrderPairs int `json:"out_of_order_pairs"`
 	// BoundarySkipped counts directories a scan discovered under the recorded global
 	// root and did not register because the directory no longer exists (ADR-0032
 	// Consequences). It is an honest zero, not lost collection: there is nothing left

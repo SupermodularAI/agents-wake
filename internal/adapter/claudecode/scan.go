@@ -289,7 +289,16 @@ func (s *Scan) Read(reader io.Reader) (Result, error) {
 					key := callKey{session: pendingCall.sessionID, id: pendingCall.id}
 					if early, terminated := s.earlyResults[key]; terminated {
 						delete(s.earlyResults, key)
-						s.route(&result.Records, pendingCall.complete(early), source, pendingCall.agentID)
+						// Through pairedWith, for the reason resultOf exists: line order may
+						// not change a derived value — now for the pair's duration as well
+						// as for its outcome. A pair whose instants came back inverted
+						// measured nothing, so the duration stays nil and the occurrence is
+						// counted rather than clamped to 0 (ADR-0027).
+						terminator, ordered := pendingCall.pairedWith(early)
+						if !ordered {
+							result.OutOfOrderPairs++
+						}
+						s.route(&result.Records, pendingCall.complete(terminator), source, pendingCall.agentID)
 					} else {
 						s.pending[key] = pendingCall
 					}
@@ -316,7 +325,13 @@ func (s *Scan) Read(reader io.Reader) (Result, error) {
 					continue
 				}
 				delete(s.pending, key)
-				s.route(&result.Records, pendingCall.complete(resultOf(entry, block)), source, pendingCall.agentID)
+				// The forward-order half of the same pairing: same helper, same counter,
+				// so the two orders cannot disagree about whether a duration exists.
+				terminator, ordered := pendingCall.pairedWith(resultOf(entry, block))
+				if !ordered {
+					result.OutOfOrderPairs++
+				}
+				s.route(&result.Records, pendingCall.complete(terminator), source, pendingCall.agentID)
 			}
 		}
 	})

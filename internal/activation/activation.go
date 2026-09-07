@@ -498,6 +498,12 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 		// fallible (ADR-0036 §3). Added per source, like RefusedCalls: the tag is judged
 		// entirely within the line it is on, so Close has no half to contribute.
 		scan.SkippedTypedInvocations += result.SkippedTypedInvocations
+		// A call and its result whose instants came back out of order. The invocation
+		// is in the store; only its duration is unknown, and it is left nil rather
+		// than clamped to a definite 0 (ADR-0027). Added per source, like the two
+		// above: a pair is judged the moment both halves are in hand, which is always
+		// inside one source's read.
+		scan.OutOfOrderPairs += result.OutOfOrderPairs
 		// Pending, Interrupted, AmbiguousSkillRuns and Skipped are deliberately not
 		// folded here. None of the four is knowable from one transcript any more: a call
 		// unterminated in this file may be terminated in the next, and a session quiet

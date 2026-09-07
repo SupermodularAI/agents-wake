@@ -59,6 +59,19 @@ type Result struct {
 	// the opposite shape from RefusedSubagentRuns. A tag is judged entirely within the
 	// line it is on, so the walk has no second half to contribute.
 	SkippedTypedInvocations int
+	// OutOfOrderPairs is the reader's count of result-terminated pairs whose instants
+	// came back out of order: the tool_result's instant precedes its own tool_use's.
+	// The pair measured no interval, so the record was written with a nil duration
+	// rather than a clamped 0 (ADR-0027) — it is neither lost collection nor an
+	// invocation count. Activation folds it into health.Scan.OutOfOrderPairs, which
+	// doctor renders as its own line and which deliberately does not move the
+	// integration state word: every scan re-reads the whole history and re-counts the
+	// same pairs, so a state word following it could never change back.
+	//
+	// It is a per-source counter, so Read reports it complete and Close leaves it zero:
+	// a pair is judged the moment both halves are in hand, which is always inside one
+	// source's read.
+	OutOfOrderPairs int
 	// Interrupted is the reader's count of calls that resolved to outcome interrupted
 	// because their session went quiet past the staleness threshold (ADR-0015). Those
 	// records are terminal and are also counted by Parsed and Written; this counter
@@ -152,15 +165,17 @@ func NewClaudeCodeScan(resolve claudecode.Resolver, names record.Namer, installe
 //
 // Everything a session's resolution owes to the walk's other transcripts is
 // resolved by Close, so the counters this returns are the per-source ones only —
-// Parsed, Malformed, Refused, SkippedTypedInvocations and the write result. Pending,
+// Parsed, Malformed, Refused, SkippedTypedInvocations, OutOfOrderPairs and the write
+// result. Pending,
 // Interrupted, AmbiguousSkillRuns, RefusedSubagentRuns and SkippedSources are zero here
 // and are answered by Close; a caller must not fold a zero from this call into a health
 // counter.
 //
-// Refused and SkippedTypedInvocations are complete here rather than half an answer.
-// A subagent run's refusal has its own counter on Close instead (see
+// Refused, SkippedTypedInvocations and OutOfOrderPairs are complete here rather than
+// half an answer. A subagent run's refusal has its own counter on Close instead (see
 // Result.RefusedSubagentRuns); a command tag is judged entirely within the line it is
-// on, so the walk adds nothing to it.
+// on, and a pair is judged the moment both halves are in hand, so the walk adds
+// nothing to either.
 func (s *ClaudeCodeScan) Read(reader io.Reader) (Result, error) {
 	derived, err := s.scan.Read(reader)
 	if err != nil {
@@ -177,8 +192,9 @@ func (s *ClaudeCodeScan) Read(reader io.Reader) (Result, error) {
 //
 // The counters that are only knowable now — Pending, Interrupted,
 // AmbiguousSkillRuns, SkippedSources — are the walk's, not any one source's, and
-// the caller folds these rather than the per-source zeros. SkippedTypedInvocations is
-// not among them and is zero here: it is per source and Read reports it whole.
+// the caller folds these rather than the per-source zeros. SkippedTypedInvocations and
+// OutOfOrderPairs are not among them and are zero here: both are per source and Read
+// reports them whole.
 //
 // RefusedSubagentRuns is among them and arrives here only: a subagent transcript
 // declaring no usable name can be judged at this boundary and nowhere else, and it is
@@ -207,6 +223,7 @@ func persist(derived claudecode.Result, destination *store.Store) (Result, error
 		Refused:                 derived.Refused,
 		RefusedSubagentRuns:     derived.RefusedSubagentRuns,
 		SkippedTypedInvocations: derived.SkippedTypedInvocations,
+		OutOfOrderPairs:         derived.OutOfOrderPairs,
 		Interrupted:             derived.Interrupted,
 		AmbiguousSkillRuns:      derived.AmbiguousSkillRuns,
 		SkippedSources:          derived.SkippedSources,

@@ -2252,3 +2252,150 @@ func assertNoSeparatorInRecords(t *testing.T, input string, stale Staleness, idl
 		}
 	}
 }
+
+// The pair's own delta is the duration: from the tool_use instant to the
+// tool_result instant, computed from the two entries this reader already holds.
+// It is never the harness's own toolUseResult.durationMs, which this reader does
+// not decode — one provenance, always. Both line orders derive it, for the same
+// reason resultOf exists: arrival order may not change a derived value.
+func TestReadDerivesDurationFromTheCallResultPair(t *testing.T) {
+	for name, transcript := range map[string]string{
+		"forward":  forwardOrderPair,
+		"reversed": reversedOrderPair,
+	} {
+		t.Run(name, func(t *testing.T) {
+			result, err := read(strings.NewReader(transcript), resolver, names, Staleness{})
+			if err != nil {
+				t.Fatalf("Read() error = %v", err)
+			}
+			if len(result.Records) != 1 {
+				t.Fatalf("Read() records = %+v, want exactly one", result.Records)
+			}
+			event := result.Records[0]
+			if event.DurationMS == nil {
+				t.Fatalf("DurationMS = nil, want the pair's own 1000 ms delta")
+			}
+			// 2026-08-13T12:00:00Z to 2026-08-13T12:00:01Z.
+			if *event.DurationMS != 1000 {
+				t.Errorf("DurationMS = %d, want 1000", *event.DurationMS)
+			}
+			if err := record.Validate(event); err != nil {
+				t.Errorf("Validate() error = %v", err)
+			}
+		})
+	}
+}
+
+// An equal pair measured a real zero, not an unknown. At the source's millisecond
+// resolution a call that returned inside one millisecond is a genuine
+// zero-duration call, and collapsing it to nil would lose exactly the distinction
+// wake.duration_ms exists to carry (ADR-0027).
+func TestReadMeasuresAnEqualPairAsZeroNotUnknown(t *testing.T) {
+	sameInstantResult := `{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`
+
+	result, err := read(strings.NewReader(toolUseLine+"\n"+sameInstantResult), resolver, names, Staleness{})
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 1 {
+		t.Fatalf("Read() records = %+v, want exactly one", result.Records)
+	}
+	event := result.Records[0]
+	if event.DurationMS == nil {
+		t.Fatalf("DurationMS = nil, want a measured 0")
+	}
+	if *event.DurationMS != 0 {
+		t.Errorf("DurationMS = %d, want 0", *event.DurationMS)
+	}
+}
+
+// interrupted() reaches complete with the call's own instant standing in for the
+// result instant, so a delta derived inside complete would be a non-nil 0 on the
+// one path ADR-0015 requires to stay unknown. The duration is stamped at the
+// pairing site instead, and this path never pairs.
+func TestReadLeavesDurationNilOnAnInterruptedCall(t *testing.T) {
+	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(2 * time.Hour)}
+
+	result, err := read(strings.NewReader(unterminatedCall), resolver, names, stale)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 1 || result.Interrupted != 1 {
+		t.Fatalf("Read() = %+v, want one interrupted record", result)
+	}
+	event := result.Records[0]
+	if event.Outcome == nil || *event.Outcome != record.OutcomeInterrupted {
+		t.Fatalf("Outcome = %v, want interrupted", event.Outcome)
+	}
+	if event.DurationMS != nil {
+		t.Errorf("DurationMS = %d, want nil: nothing measured this call", *event.DurationMS)
+	}
+}
+
+// The Shape-A fallback has no result entry at all. ADR-0023 makes session close its
+// terminal boundary, and a boundary is not a measurement, so the duration stays nil
+// rather than being synthesised from the session's own span.
+func TestReadLeavesDurationNilOnASkillRunWithNoTerminator(t *testing.T) {
+	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","attributionSkill":"run-sdlc","message":{"model":"sonnet","stop_reason":"end_turn"}}`
+
+	result, err := read(strings.NewReader(input), resolver, names, closedSession)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 1 {
+		t.Fatalf("Read() records = %+v, want exactly one", result.Records)
+	}
+	event := result.Records[0]
+	if event.Kind != record.KindSkill {
+		t.Fatalf("Kind = %q, want the Shape-A skill record", event.Kind)
+	}
+	if event.DurationMS != nil {
+		t.Errorf("DurationMS = %d, want nil", *event.DurationMS)
+	}
+}
+
+// A result instant that precedes its own call's measured nothing. The record is
+// still written — the invocation happened and only its duration is unknown — and
+// the duration is left nil rather than clamped to 0 or made positive with abs():
+// ADR-0027 reserves a wire-level 0 for a genuine zero-duration call and delivers
+// it into a receiver store that can never be rebuilt. The occurrence is counted so
+// the unknown stays visible rather than silent (plan §12).
+//
+// The counter is about timestamp order, not line order, so both line orders of the
+// same inverted pair count exactly once and derive byte-identical records.
+func TestReadLeavesDurationNilOnAnOutOfOrderPair(t *testing.T) {
+	lateUse := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","version":"1.0.0","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`
+	earlyResult := `{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`
+
+	encoded := make([]string, 0, 2)
+	for _, transcript := range []string{lateUse + "\n" + earlyResult, earlyResult + "\n" + lateUse} {
+		result, err := read(strings.NewReader(transcript), resolver, names, Staleness{})
+		if err != nil {
+			t.Fatalf("Read() error = %v", err)
+		}
+		if len(result.Records) != 1 {
+			t.Fatalf("Read() records = %+v, want exactly one: the invocation still happened", result.Records)
+		}
+		if result.OutOfOrderPairs != 1 {
+			t.Errorf("OutOfOrderPairs = %d, want 1", result.OutOfOrderPairs)
+		}
+		if result.Refused != 0 || result.Malformed != 0 {
+			t.Errorf("Read() = %+v, want no refusal and no malformed line: this is neither", result)
+		}
+		event := result.Records[0]
+		if event.DurationMS != nil {
+			t.Errorf("DurationMS = %d, want nil: the pair measured no interval", *event.DurationMS)
+		}
+		if invalid := record.Validate(event); invalid != nil {
+			t.Errorf("Validate() error = %v", invalid)
+		}
+		marshalled, err := record.Marshal(event)
+		if err != nil {
+			t.Fatalf("Marshal() error = %v", err)
+		}
+		encoded = append(encoded, string(marshalled))
+	}
+	if encoded[0] != encoded[1] {
+		t.Errorf("record differs by line order:\n forward  = %s\n reversed = %s", encoded[0], encoded[1])
+	}
+}

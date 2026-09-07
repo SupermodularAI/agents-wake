@@ -112,6 +112,30 @@ func TestDoctorReportsRefusedSubagentRunsWithoutBlindingTheState(t *testing.T) {
 	}
 }
 
+// A call and its result whose instants came back out of order is a number that
+// could not be measured on a record that exists — not lost collection. It gets its
+// own line and deliberately does not blind the state word: with no incremental
+// cursor every scan re-reads the same transcript and re-counts the same pairs, so a
+// state word following it would pin the machine to "collects nothing" for good.
+func TestDoctorReportsOutOfOrderPairsWithoutBlindingTheState(t *testing.T) {
+	paths := isolate(t)
+	if err := health.New(paths.HealthFile).RecordScan(health.Scan{
+		At: time.Now().UTC(), Transcripts: 1, EventsWritten: 6, OutOfOrderPairs: 3,
+	}); err != nil {
+		t.Fatalf("RecordScan() error = %v", err)
+	}
+
+	out, _, err := runSplit(t, "doctor")
+	if err != nil {
+		t.Fatalf("doctor error = %v", err)
+	}
+	for _, want := range []string{"out-of-order call and result pairs: 3", "integration: collecting"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output is missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestDoctorReportsPendingAndInterruptedCallsSeparately(t *testing.T) {
 	// Two lines, not one. "Buffered, may still finish" and "resolved as never
 	// finishing" are different facts, and one number would conflate them — which is

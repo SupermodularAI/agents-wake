@@ -160,6 +160,10 @@ func writeDiagnosis(out io.Writer, paths config.Paths, claudeDir string) error {
 		{"interrupted calls", report.Scan.InterruptedCalls},
 		{"ambiguous skill runs", report.Scan.AmbiguousSkillRuns},
 		{"skipped typed invocations", report.Scan.SkippedTypedInvocations},
+		// "call and result", not "call/result": TestDoctorOutputNamesNoPathOrLabel
+		// reads any slash in this output as a leaked path, and that check is worth
+		// more than the punctuation.
+		{"out-of-order call and result pairs", report.Scan.OutOfOrderPairs},
 	} {
 		if _, err := fmt.Fprintf(out, "%s: %d\n", line.key, line.value); err != nil {
 			return err
