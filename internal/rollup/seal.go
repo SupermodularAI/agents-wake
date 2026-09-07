@@ -241,32 +241,55 @@ func seal(dataDir string, source *store.Store, head uint64, backfill bool) (Seal
 	result := SealResult{}
 	dir := Dir(dataDir)
 
-	// The floor is established before the early return below, so enabling on an
-	// empty store records a floor of zero rather than deferring the decision to
-	// the next scan. Deferring it was a real bug: the mark would then be written
-	// at whatever the head had grown to, so the records appended in between were
-	// permanently below the floor and nothing was ever sealed.
+	// The floor is where sealing may begin: on a first run it is the current
+	// head, so nothing already in the spool is summarised and rollups describe
+	// only what happens from now on. A backfill lowers it to zero.
 	//
-	// The floor is where sealing may begin. On a first run it is the current
-	// head, so nothing already in the spool is sealed and rollups describe only
-	// what happens from now on; a backfill lowers it to zero and records that.
+	// It is established before the early return below, so enabling on an empty
+	// store records a floor of zero rather than deferring the decision. That
+	// deferral was a real bug: the mark would then be written at whatever the
+	// head had grown to, leaving every record appended in between permanently
+	// below the floor and never sealed.
 	mark, found := ReadEnablement(dir)
-	if !found {
+	switch {
+	case !found && backfill:
+		mark = Enablement{Backfilled: true}
+	case !found:
 		mark = Enablement{Floor: head}
-		if backfill {
-			mark.Floor = 0
-		}
-		if err := WriteEnablement(dir, mark); err != nil {
-			return result, err
-		}
-		mark, _ = ReadEnablement(dir)
-	} else if backfill && !mark.Backfilled {
+	case backfill && !mark.Backfilled:
 		mark.Floor, mark.Backfilled = 0, true
-		if err := WriteEnablement(dir, mark); err != nil {
-			return result, err
-		}
+	default:
+		// A mark already exists and says what this run needs. Nothing to write.
+		mark.Floor = snapToFanout(mark.Floor)
+		return sealFrom(dir, source, head, mark.Floor)
 	}
-	floor := mark.Floor
+	// Backfilled is set wherever the floor is lowered, including on a first run
+	// that is itself a backfill — the flag is what stops a later plain seal
+	// raising the floor again, so a backfill it did not record would be one a
+	// later run could undo.
+	if err := WriteEnablement(dir, mark); err != nil {
+		return result, err
+	}
+	// Snapped by the same rule WriteEnablement applies, rather than re-reading
+	// the file to discover what it did. The write is the authority on what is
+	// stored; relying on a re-read to learn the snapped value made the coupling
+	// invisible and the value easy to use unsnapped.
+	floor := snapToFanout(mark.Floor)
+	return sealFrom(dir, source, head, floor)
+}
+
+// snapToFanout rounds a floor down to a fanout boundary. It is the rule
+// WriteEnablement stores by, kept as a function so the in-memory value and the
+// stored one cannot disagree.
+//
+// The snap is what prevents a permanent coverage hole: a floor mid-block leaves
+// that block neither sealable whole nor coverable by anything finer, and a block
+// is sealed once and never revisited.
+func snapToFanout(floor uint64) uint64 { return floor - floor%Fanout }
+
+// sealFrom does the sealing itself, given a settled floor.
+func sealFrom(dir string, source *store.Store, head, floor uint64) (SealResult, error) {
+	result := SealResult{}
 
 	complete := head / Fanout
 	if complete == 0 {

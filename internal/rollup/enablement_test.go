@@ -157,3 +157,57 @@ func TestPruneKeepsTheEnablementMark(t *testing.T) {
 		t.Error("prune removed the enablement mark")
 	}
 }
+
+// TestFirstRunBackfillRecordsTheFlag is a regression guard.
+//
+// Backfilled is what stops a later plain seal raising the floor again, so a
+// backfill that did not record it would be one a later run could silently undo.
+// A first run that is itself a backfill lowers the floor without going through
+// the "raise an existing mark" branch, and an earlier version set the floor
+// there without setting the flag.
+func TestFirstRunBackfillRecordsTheFlag(t *testing.T) {
+	dataDir, events := seededStore(t, 100)
+	if _, err := Backfill(dataDir, events, 100); err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+	mark, found := ReadEnablement(Dir(dataDir))
+	if !found {
+		t.Fatal("no mark was recorded")
+	}
+	if mark.Floor != 0 {
+		t.Errorf("floor = %d after a first-run backfill, want 0", mark.Floor)
+	}
+	if !mark.Backfilled {
+		t.Error("a first-run backfill did not record Backfilled, so a later plain seal could raise the floor")
+	}
+
+	// And a plain seal afterwards must leave it alone.
+	if _, err := Seal(dataDir, events, 100); err != nil {
+		t.Fatalf("seal after backfill: %v", err)
+	}
+	after, _ := ReadEnablement(Dir(dataDir))
+	if after.Floor != 0 || !after.Backfilled {
+		t.Errorf("a plain seal after a first-run backfill changed the mark to %+v", after)
+	}
+}
+
+// TestSnapToFanoutIsTheStoredRule asserts the in-memory snap and the stored one
+// are the same rule, since a floor used unsnapped would seal a partial block.
+func TestSnapToFanoutIsTheStoredRule(t *testing.T) {
+	dir := Dir(t.TempDir())
+	for _, floor := range []uint64{0, 1, 9, 10, 34, 99, 100, 31_288} {
+		if err := WriteEnablement(dir, Enablement{Floor: floor}); err != nil {
+			t.Fatalf("WriteEnablement(%d): %v", floor, err)
+		}
+		mark, found := ReadEnablement(dir)
+		if !found {
+			t.Fatalf("floor %d: the mark was not readable", floor)
+		}
+		if want := snapToFanout(floor); mark.Floor != want {
+			t.Errorf("stored floor for %d = %d, want %d from snapToFanout", floor, mark.Floor, want)
+		}
+		if mark.Floor%Fanout != 0 {
+			t.Errorf("stored floor %d is not a fanout boundary", mark.Floor)
+		}
+	}
+}

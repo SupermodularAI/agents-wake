@@ -79,7 +79,7 @@ func WriteEnablement(dir string, mark Enablement) error {
 	}
 	mark.BlockVersion = BlockVersion
 	mark.SchemaVersion = record.SchemaVersion
-	mark.Floor -= mark.Floor % Fanout
+	mark.Floor = snapToFanout(mark.Floor)
 	data, err := json.Marshal(mark)
 	if err != nil {
 		return fmt.Errorf("encoding the enablement mark: %w", err)
