@@ -28,11 +28,11 @@ const (
 // Usage is a locally available primitive and its activity derived from the
 // event spool. Its fields are identifiers, enums, timestamps, and counters only.
 //
-// Failures and Unknown are raw counts, not a Ratio: metrics.Ratio's fields are
-// private so it cannot round-trip through JSON, and a renderer that wants a
-// rate can rebuild one with metrics.NewRatio(Failures, Invocations-Unknown,
-// Unknown, Invocations) — every terminal invocation is either known or
-// unknown, so those four counts are always consistent.
+// Failures and Unknown are raw counts, not a Ratio, for one reason only:
+// metrics.Ratio's fields are private, so it cannot round-trip through JSON. A
+// renderer that wants a rate calls ErrorRate and never assembles one from these
+// counts — this comment used to invite exactly that, and two renderers took the
+// invitation and drifted apart (DG-103).
 //
 // Repo is the salted repository id, never a readable label: it is an identifier
 // like every other field here (ADR-0007, ADR-0019 §3). It is empty exactly when
@@ -47,6 +47,22 @@ type Usage struct {
 	Failures    uint64            `json:"failures,omitempty"`
 	Unknown     uint64            `json:"unknown,omitempty"`
 	LastUsed    time.Time         `json:"last_used,omitempty"`
+}
+
+// ErrorRate is this row's failure rate carrying the population it was measured
+// over. It is the exact inverse of the flattening derive performs, and it exists
+// so that no renderer reconstructs a rate from raw counts: that is the
+// alternative ADR-0006 rejected, and the one that let the ERRORS cell print a
+// percentage with no visible denominator (DG-103).
+//
+// Unknown is excluded from the denominator and reported beside it rather than
+// folded into either side: an unreported outcome is not a success (ADR-0005).
+//
+// It panics for counts valid would refuse, deliberately. NewRatio treats
+// impossible counts as a bug in this layer rather than as data (ADR-0006), and
+// any snapshot that reached a renderer has already passed valid.
+func (u Usage) ErrorRate() metrics.Ratio {
+	return metrics.NewRatio(u.Failures, u.Invocations-u.Unknown, u.Unknown, u.Invocations)
 }
 
 // EventSource is the read side of the event spool a refresh derives usage from.
