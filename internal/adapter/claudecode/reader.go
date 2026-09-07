@@ -1126,7 +1126,14 @@ func outcomeFor(entry transcriptEntry, block contentBlock) (*record.Outcome, boo
 		return &outcome, false
 	}
 	if block.IsError == nil {
-		return nil, true
+		// The omission is this line's own only when nothing else on it points at a
+		// failure. A denial kind the switch above could not name is still a denial
+		// the source spelled — a vocabulary this reader does not map, never the
+		// absence of one — so the family's omission licence does not reach it and the
+		// verdict stays unknown. Unknown is never success (ADR-0005), and a denial
+		// spelling the harness adds later has to surface as a rising null rate rather
+		// than be absorbed as ok (plan §3.3, §12).
+		return nil, entry.ToolDenialKind == ""
 	}
 	if *block.IsError {
 		outcome := record.OutcomeError

@@ -2503,15 +2503,9 @@ func TestReadKeepsFailureSignalPrecedenceForAFamilyThatOmitsOnSuccess(t *testing
 		{label: "denied by policy", entryFields: `"toolDenialKind":"permission-rule",`, want: record.OutcomeDeniedPolicy},
 		{label: "denied by user", entryFields: `"toolDenialKind":"user-rejected",`, want: record.OutcomeDeniedUser},
 		{label: "interrupted", entryFields: `"toolUseResult":{"interrupted":true},`, want: record.OutcomeInterrupted},
-		// The one row worth reading twice. An unrecognised denial kind is not a denial
-		// — the switch falls through, exactly as it always has — so the result line's
-		// own omission decides, and for a member family that is ok.
-		//
-		// TestReadRetainsNothingFromAnEarlyResultLine feeds the same hostile denial
-		// kinds and asserts the outcome stays nil. Both are correct: that test's pair is
-		// a Bash call, the one family whose absences are outside its measured
-		// vocabulary. The family is the whole difference between the two assertions.
-		{label: "unrecognised denial kind", entryFields: `"toolDenialKind":"something-else",`, want: record.OutcomeOK},
+		// A denial kind this reader cannot name is asserted by the companion test
+		// below rather than here: it is a failure marker whose verdict is unknown,
+		// not one of the enum values this table ranks.
 	} {
 		t.Run(testCase.label, func(t *testing.T) {
 			use := fmt.Sprintf(`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","version":"1.0.0","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-1","name":%q}]}}`, toolName)
@@ -2532,6 +2526,80 @@ func TestReadKeepsFailureSignalPrecedenceForAFamilyThatOmitsOnSuccess(t *testing
 				}
 			}
 		})
+	}
+}
+
+// memberFamilies are the tool names whose omitted is_error resolves to ok: one
+// measured built-in and one MCP tool, the two ways into omitsOnSuccess's true arms.
+// A guarantee asserted over Bash alone would hold for the wrong reason — Bash's
+// absences were never a success token, so nothing there can be swallowed.
+var memberFamilies = []string{"Read", "mcp__atlassian__search"}
+
+// A denial kind this reader does not recognise is a denial spelled in a vocabulary
+// it cannot map, never the absence of one. The line still carries a positive failure
+// marker, so the family's omission licence does not reach it: the verdict stays
+// unknown, and unknown is never success (ADR-0005).
+//
+// This is the property TestReadRetainsNothingFromAnEarlyResultLine already asserted
+// before DG-100, over a Bash pair. Asserting it over a member family is what keeps
+// it a guarantee about every tool rather than about the one family whose absences
+// mean nothing anyway — and it is what makes a denial spelling Claude Code adds
+// later surface as a rising null rate instead of being absorbed as ok (plan §3.3,
+// §12).
+func TestReadKeepsAnUnrecognisedDenialKindUnknownForAFamilyThatOmitsOnSuccess(t *testing.T) {
+	for _, toolName := range memberFamilies {
+		for _, value := range append([]string{"something-else", "sandbox-denied"}, hostileValues...) {
+			use := fmt.Sprintf(`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","version":"1.0.0","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-1","name":%q}]}}`, toolName)
+			line := fmt.Sprintf(
+				`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","toolDenialKind":%s,"message":{"content":[{"type":"tool_result","tool_use_id":"call-1"}]}}`,
+				quoted(t, value))
+			for _, transcript := range []string{use + "\n" + line, line + "\n" + use} {
+				got, err := read(strings.NewReader(transcript), resolver, names, Staleness{})
+				if err != nil {
+					t.Fatalf("Read() error = %v", err)
+				}
+				if len(got.Records) != 1 {
+					t.Fatalf("Read(%q, %q) records = %+v, want exactly one", toolName, value, got.Records)
+				}
+				event := got.Records[0]
+				if event.Outcome != nil {
+					t.Errorf("Read(%q, toolDenialKind=%q) outcome = %q, want unknown", toolName, value, *event.Outcome)
+				}
+				encoded, err := record.Marshal(event)
+				if err != nil {
+					t.Fatalf("Marshal() error = %v", err)
+				}
+				if strings.Contains(string(encoded), value) {
+					t.Fatalf("record retains the denial kind %q: %s", value, encoded)
+				}
+			}
+		}
+	}
+}
+
+// A call whose session went quiet is interrupted, for a member family as much as for
+// Bash: interrupted() builds its callResult literally, so the omission flag is false
+// by construction and the resolving arm is unreachable from the staleness path
+// (ADR-0015, ADR-0005).
+//
+// TestReadRetainsNothingFromAnInterruptedCall covers the same path over Bash, where
+// the arm could not fire whatever the flag said. This pins the verdict where it
+// could, so a refactor that starts stamping the flag on this path fails here.
+func TestReadInterruptsAStaleCallForAFamilyThatOmitsOnSuccess(t *testing.T) {
+	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
+	for _, toolName := range memberFamilies {
+		transcript := fmt.Sprintf(`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","version":"1.0.0","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-1","name":%q}]}}`, toolName)
+		result, err := read(strings.NewReader(transcript), resolver, names, stale)
+		if err != nil {
+			t.Fatalf("Read() error = %v", err)
+		}
+		if result.Interrupted != 1 || len(result.Records) != 1 {
+			t.Fatalf("Read(%q) = %+v, want one interrupted record", toolName, result)
+		}
+		event := result.Records[0]
+		if event.Outcome == nil || *event.Outcome != record.OutcomeInterrupted {
+			t.Errorf("Read(%q) outcome = %v, want interrupted", toolName, event.Outcome)
+		}
 	}
 }
 

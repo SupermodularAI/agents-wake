@@ -35,8 +35,15 @@ func TestOmitsOnSuccessIsAClosedMeasuredSet(t *testing.T) {
 		{label: "unmeasured TodoWrite", kind: record.KindBuiltinTool, name: "TodoWrite", want: false},
 		{label: "unmeasured WebFetch", kind: record.KindBuiltinTool, name: "WebFetch", want: false},
 		{label: "unmeasured NotebookEdit", kind: record.KindBuiltinTool, name: "NotebookEdit", want: false},
-		{label: "unmeasured Task", kind: record.KindBuiltinTool, name: "Task", want: false},
 		{label: "unmeasured empty name", kind: record.KindBuiltinTool, name: "", want: false},
+
+		// Task is the one row that is outside the set for a reason other than the
+		// measurement: it was measured (44 absences, zero explicit false) and is still
+		// excluded, because a subagent invocation is skipped before a call is built and
+		// never reaches this function at all. Membership would be inert rather than
+		// wrong — the set stays to families this gate can actually decide
+		// (ADR-0023 §3, ADR-0036 §2-§3).
+		{label: "Task never reaches this function", kind: record.KindBuiltinTool, name: "Task", want: false},
 
 		// MCP membership is by kind, so both the bare and the plugin-scoped spelling of
 		// a server's tool are members. Per-server allowlisting could not hold: the names

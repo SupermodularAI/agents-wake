@@ -4,8 +4,9 @@ import "github.com/SupermodularAI/agents-wake/internal/record"
 
 // builtinsOmittingOnSuccess is the closed set of Claude Code built-in tools measured
 // never to write an explicit is_error: false. Membership is data rather than a branch
-// so the set can be asserted in both directions, and it is never written after
-// initialisation.
+// so the set can be asserted in both directions. Go has no immutable map, so "never
+// written after initialisation" is an invariant this package keeps rather than one the
+// type enforces; the set is unexported and read from exactly one place.
 var builtinsOmittingOnSuccess = map[record.Identifier]struct{}{
 	"Read":  {},
 	"Edit":  {},
@@ -17,6 +18,11 @@ var builtinsOmittingOnSuccess = map[record.Identifier]struct{}{
 // omitsOnSuccess reports whether this tool family was measured never to spell
 // is_error: false — in which case an omitted field on its tool_result is the
 // family's own success token rather than the source saying nothing.
+//
+// It is only ever asked about a result line outcomeFor found clean: no denial kind of
+// any spelling, no interrupted flag, is_error absent. A denial kind the switch there
+// could not name is a failure marker rather than an omission, so it never reaches this
+// function and its verdict stays unknown (ADR-0005).
 //
 // That distinction is the whole of the function. Mapping a harness's vocabulary onto
 // the outcome enum is what ADR-0005's consequences require of an adapter; guessing at
