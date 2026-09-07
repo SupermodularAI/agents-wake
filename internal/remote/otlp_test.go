@@ -477,10 +477,36 @@ func TestUnknownDurationRendersZeroLengthSpan(t *testing.T) {
 			if end-start != testCase.wantNano {
 				t.Fatalf("end - start = %d ns, want %d", end-start, testCase.wantNano)
 			}
-			if want := r.Timestamp.UTC().UnixNano(); start != want {
-				t.Fatalf("startTimeUnixNano = %d, want %d", start, want)
+			// The record's ts is the span's END: complete stamps a paired record
+			// from the tool_result instant, so ts is when the invocation
+			// finished and the start is derived backwards from it.
+			if want := r.Timestamp.UTC().UnixNano(); end != want {
+				t.Fatalf("endTimeUnixNano = %d, want the record's ts %d", end, want)
 			}
 		})
+	}
+}
+
+// The acceptance criterion in test form. A paired call's ts is the instant its
+// result came back, so the span ends there and reaches back over the duration —
+// rather than starting at its own finish time and running forward, which is what
+// adding the duration to ts drew before.
+func TestAPairedDurationExtendsTheSpanBackwards(t *testing.T) {
+	r := fullRecord()
+	span := encodeOne(t, r)
+
+	start := parseNano(t, span, "startTimeUnixNano")
+	end := parseNano(t, span, "endTimeUnixNano")
+
+	if end <= start {
+		t.Fatalf("endTimeUnixNano = %d, startTimeUnixNano = %d, want end after start", end, start)
+	}
+	if want := r.Timestamp.UTC().UnixNano(); end != want {
+		t.Errorf("endTimeUnixNano = %d, want the record's ts %d", end, want)
+	}
+	// fullRecord carries DurationMS = 1500.
+	if want := end - 1_500_000_000; start != want {
+		t.Errorf("startTimeUnixNano = %d, want ts - duration %d", start, want)
 	}
 }
 
@@ -514,11 +540,21 @@ func TestEncodeDropsUnrepresentableTimestamps(t *testing.T) {
 	overflow := fullRecord()
 	overflow.DurationMS = ptr(int64(math.MaxInt64))
 
+	// The other direction, live only now that durations are populated: a valid
+	// record whose derived start would land a second before the epoch, which
+	// OTLP's unsigned nano fields cannot express at all. Dropped and counted
+	// like every other unrepresentable pair, never wrapped and never emitted
+	// with the duration quietly discarded.
+	underflow := fullRecord()
+	underflow.Timestamp = time.Unix(1, 0).UTC()
+	underflow.DurationMS = ptr(int64(2000))
+
 	for name, r := range map[string]record.Record{
-		"pre-epoch":         preEpoch,
-		"pre-1678 wrap":     preRepresentable,
-		"post-2262 wrap":    postRepresentable,
-		"duration overflow": overflow,
+		"pre-epoch":          preEpoch,
+		"pre-1678 wrap":      preRepresentable,
+		"post-2262 wrap":     postRepresentable,
+		"duration overflow":  overflow,
+		"duration underflow": underflow,
 	} {
 		t.Run(name, func(t *testing.T) {
 			// record.Validate imposes no range on Timestamp, so every row here

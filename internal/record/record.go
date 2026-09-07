@@ -167,7 +167,17 @@ type Record struct {
 	Invoker       Invoker    `json:"invoker"`
 	Entrypoint    Entrypoint `json:"entrypoint,omitempty"`
 	Outcome       *Outcome   `json:"outcome"`
-	DurationMS    *int64     `json:"duration_ms"`
+	// DurationMS is how long the invocation took from request to result, in
+	// milliseconds: from the instant the primitive was called to the instant its
+	// result came back. The interval includes scheduling and any human
+	// permission-approval wait, so a permission-gated call reads as slow — it is
+	// not tool execution time and is never named or described as it.
+	//
+	// Nullable, and nil is first-class: an invocation nothing terminated with a real
+	// result measured no interval, and nil says so. A non-nil value is always a
+	// measurement, so 0 means a call that returned inside the source's resolution,
+	// never an unknown one (ADR-0005 applied to time, ADR-0027).
+	DurationMS *int64 `json:"duration_ms"`
 
 	// The session grain's totals (ADR-0002, ADR-0034 §3). They are populated only
 	// on a session_end record and are nil on every invocation-grain record. All

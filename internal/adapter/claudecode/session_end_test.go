@@ -810,3 +810,20 @@ func TestSessionEndDatesItselfFromATrailingUserTurn(t *testing.T) {
 		t.Errorf("Timestamp = %v, want the trailing user turn's %v", event.Timestamp, want)
 	}
 }
+
+// The session grain has no result entry to pair with (ADR-0034), so its duration
+// stays nil rather than being synthesised from first-to-last activity. That span
+// is the session's lifetime, not a request-to-result interval, and duration_ms
+// means only the latter.
+func TestSessionEndCarriesNoDuration(t *testing.T) {
+	input := assistantLine("entry-1", "session-1", "2026-08-13T12:00:00Z", "msg_1", realUsage)
+
+	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, Staleness{}, finished)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	event := onlySessionEnd(t, result)
+	if event.DurationMS != nil {
+		t.Errorf("DurationMS = %d, want nil", *event.DurationMS)
+	}
+}
