@@ -435,3 +435,147 @@ func TestReadTreatsAPreviousVersionSnapshotAsAnEmptyInventory(t *testing.T) {
 		t.Fatalf("Read() = %+v, want no inventory", items)
 	}
 }
+
+// DG-106's join: the two discovered spellings of one plugin skill collapse to one
+// row under the namespaced name, and usage recorded under either spelling
+// accumulates on it. The kind is asserted unchanged — no fold ever moves a
+// primitive between kinds (ADR-0005).
+func TestRefreshFoldsBothSpellingsOntoOneRowUnderTheNamespacedName(t *testing.T) {
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	events := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	if _, err := events.Append([]record.Record{
+		inventoryRecord("one", "superpowers:brainstorming", at),
+		inventoryRecord("two", "superpowers:brainstorming", at.Add(time.Minute)),
+		inventoryRecord("three", "brainstorming", at.Add(2*time.Minute)),
+	}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
+	if err := primitives.Refresh(events, foldedDiscovery(true)); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	items, err := primitives.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("inventory = %+v, want one row", items)
+	}
+	if items[0].Name != "superpowers:brainstorming" || items[0].Kind != record.KindSkill {
+		t.Fatalf("row = %+v, want the namespaced name under kind skill", items[0])
+	}
+	if items[0].Invocations != 3 || !items[0].LastUsed.Equal(at.Add(2*time.Minute)) {
+		t.Fatalf("row = %+v, want 3 invocations last used at %v", items[0], at.Add(2*time.Minute))
+	}
+}
+
+// Summing across the fold has to preserve what Usage.valid() checks: unknown
+// outcomes stay excluded from the failure denominator rather than counting as ok
+// (ADR-0005, ADR-0006).
+func TestRefreshFoldedRowKeepsFailureAndUnknownInvariants(t *testing.T) {
+	failed, ok := record.OutcomeError, record.OutcomeOK
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	events := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	if _, err := events.Append([]record.Record{
+		outcomeRecord("one", "brainstorming", &failed, at),
+		outcomeRecord("two", "superpowers:brainstorming", &ok, at.Add(time.Minute)),
+		outcomeRecord("three", "superpowers:brainstorming", nil, at.Add(2*time.Minute)),
+	}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
+	if err := primitives.Refresh(events, foldedDiscovery(true)); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	items, err := primitives.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(items) != 1 || items[0].Invocations != 3 || items[0].Failures != 1 || items[0].Unknown != 1 {
+		t.Fatalf("inventory = %+v, want one row with 3 invocations, 1 failure, 1 unknown", items)
+	}
+}
+
+// A carried name is not provenance: it comes from a previous snapshot, not from a
+// source, so it can never create a fold — it is only ever folded by one the
+// current pass proved.
+func TestRefreshFoldsACarriedForwardBareRowOntoTheCanonicalName(t *testing.T) {
+	events := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
+	bare := Discovery{
+		Primitives:     []Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "brainstorming"}},
+		ProjectScanned: true,
+	}
+	if err := primitives.Refresh(events, bare); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	partial := Discovery{
+		Primitives:     []Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "superpowers:brainstorming"}},
+		ProjectScanned: false,
+		canonical:      map[identity]record.Identifier{{harness: "claude-code", kind: record.KindSkill, name: "brainstorming"}: "superpowers:brainstorming"},
+	}
+	if err := primitives.Refresh(events, partial); err != nil {
+		t.Fatalf("second Refresh() error = %v", err)
+	}
+
+	items, err := primitives.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(items) != 1 || items[0].Name != "superpowers:brainstorming" {
+		t.Fatalf("inventory = %+v, want one row named superpowers:brainstorming", items)
+	}
+}
+
+// With nothing proved, nothing folds: the pre-existing pair of rows survives
+// untouched rather than a merged counter being fabricated. This is also the
+// regression guard for every other test in this file, none of which supplies a
+// canonical map.
+func TestRefreshLeavesAnUnprovenPairAsTwoRows(t *testing.T) {
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	events := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	if _, err := events.Append([]record.Record{
+		inventoryRecord("one", "superpowers:brainstorming", at),
+		inventoryRecord("two", "brainstorming", at.Add(time.Minute)),
+	}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
+	if err := primitives.Refresh(events, foldedDiscovery(false)); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	items, err := primitives.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("inventory = %+v, want two rows", items)
+	}
+	for _, usage := range items {
+		if usage.Invocations != 1 {
+			t.Fatalf("row = %+v, want one invocation each", usage)
+		}
+	}
+}
+
+// foldedDiscovery is both spellings of one plugin skill, with the fold between
+// them either proved or absent.
+func foldedDiscovery(proved bool) Discovery {
+	discovery := Discovery{
+		Primitives: []Primitive{
+			{Harness: "claude-code", Kind: record.KindSkill, Name: "brainstorming"},
+			{Harness: "claude-code", Kind: record.KindSkill, Name: "superpowers:brainstorming"},
+		},
+		ProjectScanned: true,
+	}
+	if proved {
+		discovery.canonical = map[identity]record.Identifier{
+			{harness: "claude-code", kind: record.KindSkill, name: "brainstorming"}: "superpowers:brainstorming",
+		}
+	}
+	return discovery
+}

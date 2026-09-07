@@ -85,7 +85,7 @@ func (s *Store) Refresh(source EventSource, discovered Discovery) error {
 		for _, entry := range entries {
 			records = append(records, entry.Record)
 		}
-		return s.write(derive(metrics.Aggregate(records), s.available(discovered)))
+		return s.write(derive(metrics.Aggregate(records), s.available(discovered), discovered.canonical))
 	})
 }
 
@@ -105,6 +105,10 @@ func (s *Store) Refresh(source EventSource, discovered Discovery) error {
 //
 // A previous snapshot Read refuses is not carried. Fail closed: bytes that do not
 // validate are not worth preserving (plan §3.4).
+//
+// A carried entry brings no provenance of its own — it is a name from a previous
+// snapshot, not a source — so it can never create a fold; it is only ever folded by
+// one the current pass proved.
 func (s *Store) available(discovered Discovery) []Primitive {
 	if discovered.ProjectScanned {
 		return discovered.Primitives
@@ -158,7 +162,11 @@ type primitiveFile struct {
 	Primitives  []Usage   `json:"primitives"`
 }
 
-func derive(summary metrics.Summary, available []Primitive) []Usage {
+// derive joins the aggregate against what discovery may write. canonical is the
+// fold discovery proved between two spellings of one primitive; it is applied to
+// both sides of the join, so the folded row exists and the events recorded under
+// either spelling land on it.
+func derive(summary metrics.Summary, available []Primitive, canonical map[identity]record.Identifier) []Usage {
 	observed := make(map[usageKey]Usage)
 	// repos is which repositories observed each identity, in first-seen order. The
 	// join below is on the identity — discovery has no repository to join on
@@ -168,13 +176,13 @@ func derive(summary metrics.Summary, available []Primitive) []Usage {
 		if primitive.Kind == record.KindBuiltinTool {
 			continue
 		}
-		id := identity{harness: primitive.Harness, kind: primitive.Kind, name: primitive.Name}
+		id := canonicalIdentity(canonical, identity{harness: primitive.Harness, kind: primitive.Kind, name: primitive.Name})
 		key := usageKey{identity: id, repo: primitive.Repo}
 		usage, seen := observed[key]
 		if !seen {
 			repos[id] = append(repos[id], primitive.Repo)
 		}
-		usage.Harness, usage.Kind, usage.Name, usage.Repo = primitive.Harness, primitive.Kind, primitive.Name, primitive.Repo
+		usage.Harness, usage.Kind, usage.Name, usage.Repo = id.harness, id.kind, id.name, primitive.Repo
 		usage.Invocations += primitive.Invocations
 		usage.Failures += primitive.ErrorRate.Numerator()
 		usage.Unknown += primitive.ErrorRate.Excluded()
@@ -189,12 +197,12 @@ func derive(summary metrics.Summary, available []Primitive) []Usage {
 		if primitive.Kind == record.KindBuiltinTool {
 			continue
 		}
-		id := identity{harness: primitive.Harness, kind: primitive.Kind, name: primitive.Name}
+		id := canonicalIdentity(canonical, identity{harness: primitive.Harness, kind: primitive.Kind, name: primitive.Name})
 		seen := repos[id]
 		if len(seen) == 0 {
 			// Nothing invoked it, so it has no repository to name and belongs to the
 			// inventory grain alone.
-			usage := Usage{Harness: primitive.Harness, Kind: primitive.Kind, Name: primitive.Name}
+			usage := Usage{Harness: id.harness, Kind: id.kind, Name: id.name}
 			// Fail closed: a name the record contract would refuse must not reach the
 			// snapshot either, whatever a caller handed us (ADR-0007, plan §3.4).
 			if !usage.valid() {
@@ -206,7 +214,7 @@ func derive(summary metrics.Summary, available []Primitive) []Usage {
 		for _, repo := range seen {
 			key := usageKey{identity: id, repo: repo}
 			usage := observed[key]
-			usage.Harness, usage.Kind, usage.Name, usage.Repo = primitive.Harness, primitive.Kind, primitive.Name, repo
+			usage.Harness, usage.Kind, usage.Name, usage.Repo = id.harness, id.kind, id.name, repo
 			if !usage.valid() {
 				continue
 			}
@@ -232,6 +240,22 @@ type identity struct {
 	harness record.Identifier
 	kind    record.Kind
 	name    record.Identifier
+}
+
+// canonicalIdentity applies the fold discovery proved for one primitive: the two
+// discovered spellings of one skill collapse onto one row, and usage recorded under
+// either spelling accumulates there.
+//
+// Both sides of the join go through it. Folding discovery alone would leave an event
+// recorded under the bare spelling with no row to land on and drop it from the
+// snapshot — the opposite of what the fold is for. The kind is never touched: a fold
+// whose target belongs to another kind was refused at discovery, so nothing here has
+// to pick one (ADR-0005).
+func canonicalIdentity(canonical map[identity]record.Identifier, id identity) identity {
+	if name, folded := canonical[id]; folded {
+		id.name = name
+	}
+	return id
 }
 
 // usageKey is one snapshot row: an identity in one repository, or — for a
