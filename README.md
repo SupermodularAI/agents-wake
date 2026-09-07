@@ -95,6 +95,13 @@ encloses — including any you consented with a plain `wake init` before the
 boundary existed, so the number is what is under the boundary rather than what
 the boundary found.
 
+Git worktrees are their own projects to Wake: run `wake init` inside a worktree
+the way you would in any checkout. It gets its own identity, and it records which
+repository it belongs to, so `wake report` and the dashboard count its activity
+under that repository instead of showing it as a separate one. If the parent
+checkout has not been consented, the worktree simply stands on its own; nothing is
+attributed to a project you never consented.
+
 Open the local dashboard when you want a browser view:
 
 ```sh

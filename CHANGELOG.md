@@ -14,6 +14,20 @@ called out under Changed.
 - `SECURITY.md`, `CODE_OF_CONDUCT.md`, and this changelog.
 - Secret, vulnerability, and commit-style gates in CI.
 
+### Fixed
+
+- A git worktree no longer splits one project across several rows in `wake report`,
+  the dashboard and `primitives.json`. A worktree is still its own consented
+  repository with its own identity and still needs its own `wake init`; what is new
+  is that the entry records which repository it belongs to, and reports count its
+  invocations under that repository. Delivery follows: `wake.repo_label` and
+  `langfuse.trace.name` carry the parent repository's label, while `wake.repo` keeps
+  the worktree's own hash, so grouping by hash still tells worktrees apart. A
+  worktree consented before this release keeps its own row until you run `wake init`
+  inside it again — nothing is rewritten on read. Spans already delivered keep the
+  labels they were sent with; the correction is not retroactive, and no re-ingest or
+  `--rebuild` is needed for local reports, because no repository hash changed.
+
 ## [0.2.0] - 2026-08-28
 
 Remote delivery. Wake can now ship its derived records to an OTLP/HTTP
