@@ -160,7 +160,7 @@ func TestScanCountsOneSubagentRunAsOneRecord(t *testing.T) {
 	if event.Outcome != nil {
 		t.Errorf("Outcome = %v, want nil: a synthesized outcome is forbidden", *event.Outcome)
 	}
-	summary := metrics.Aggregate(records)
+	summary := metrics.Aggregate(records, nil)
 	if len(summary.Primitives) != 1 || summary.Primitives[0].Invocations != 1 {
 		t.Errorf("Aggregate() primitives = %+v, want explorer with one invocation", summary.Primitives)
 	}
@@ -179,7 +179,7 @@ func TestScanDerivesTwoRecordsForTwoRunsOfOneSubagent(t *testing.T) {
 	if records[0].EventID == records[1].EventID {
 		t.Errorf("both runs derived the same event id %q", records[0].EventID)
 	}
-	summary := metrics.Aggregate(records)
+	summary := metrics.Aggregate(records, nil)
 	if len(summary.Primitives) != 1 || summary.Primitives[0].Invocations != 2 {
 		t.Errorf("Aggregate() primitives = %+v, want one explorer primitive with two invocations", summary.Primitives)
 	}

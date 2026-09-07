@@ -8,6 +8,7 @@ import (
 
 	"github.com/SupermodularAI/agents-wake/internal/config"
 	"github.com/SupermodularAI/agents-wake/internal/inventory"
+	"github.com/SupermodularAI/agents-wake/internal/metrics"
 	"github.com/SupermodularAI/agents-wake/internal/repolabel"
 	"github.com/SupermodularAI/agents-wake/internal/store"
 	"github.com/SupermodularAI/agents-wake/internal/style"
@@ -44,6 +45,11 @@ func runServe(cmd *cobra.Command, port int) error {
 	}
 	events := store.New(filepath.Join(paths.DataDir, "events.ndjson"))
 	primitives := inventory.New(paths.PrimitivesFile)
+	// Resolved here for the reason the labels below are: internal/cli is the only
+	// layer holding config.Paths. It is handed to the refresh *and* to the
+	// dashboard, so the persisted snapshot and every rendered request count under
+	// the same grain.
+	rollup := metrics.RepoRollup(config.RepoRollup(paths))
 	// Assigned, not redeclared: err is read again below, and a shadowed copy here
 	// would make the later reads ambiguous to a reader and to govet.
 	if err = style.WithSpinner(cmd.OutOrStdout(), ttyOutput(cmd), "Refreshing primitive inventory", func() error {
@@ -51,7 +57,7 @@ func runServe(cmd *cobra.Command, port int) error {
 		if discoverErr != nil {
 			return discoverErr
 		}
-		return primitives.Refresh(events, discovery)
+		return primitives.Refresh(events, discovery, rollup)
 	}); err != nil {
 		return err
 	}
@@ -64,5 +70,5 @@ func runServe(cmd *cobra.Command, port int) error {
 	_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "Serving dashboard at http://"+listener.Addr().String())
 	// Resolved once, here: internal/cli is the only layer holding
 	// config.Paths, and the dashboard never reads the file itself.
-	return ui.Serve(listener, events, primitives, repolabel.Labels(config.ProjectLabels(paths)))
+	return ui.Serve(listener, events, primitives, repolabel.Labels(config.ProjectLabels(paths)), rollup)
 }

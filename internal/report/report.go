@@ -36,6 +36,11 @@ type Options struct {
 	Unused bool
 	Pretty bool
 	Labels repolabel.Labels
+	// Rollup is which repository each repository's activity is counted under, and it
+	// is resolved by internal/cli and handed in for the reason Labels is: this
+	// package reads no config and no file. A nil map is valid — every repository then
+	// stands alone.
+	Rollup metrics.RepoRollup
 }
 
 // Print reads the local event and primitive stores and writes current metrics.
@@ -52,7 +57,7 @@ func Print(writer io.Writer, source *store.Store, primitives *inventory.Store, o
 	if err != nil {
 		return err
 	}
-	return Render(writer, metrics.Aggregate(records), available, options)
+	return Render(writer, metrics.Aggregate(records, options.Rollup), available, options)
 }
 
 // Render writes one readable report. Its content is identical whatever the

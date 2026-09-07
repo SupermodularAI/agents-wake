@@ -56,9 +56,13 @@ func (r Ratio) Percent() (float64, bool) {
 // salted id, never a readable name — internal/repolabel is where a renderer
 // turns it into a cell.
 type PrimitiveUsage struct {
-	Name        record.Identifier
-	Kind        record.Kind
-	Harness     record.Identifier
+	Name    record.Identifier
+	Kind    record.Kind
+	Harness record.Identifier
+	// Repo is the salted id of the repository this invocation is counted under —
+	// which for a linked git worktree is the repository it belongs to, not the
+	// worktree (see RepoRollup). The record's own Repo in the store is untouched, so
+	// no repository hash changes and grouping by wake.repo still separates worktrees.
 	Repo        record.Hash
 	Invoker     record.Invoker
 	ViaAgent    record.Identifier
@@ -66,6 +70,36 @@ type PrimitiveUsage struct {
 	Sessions    uint64
 	LastUsed    time.Time
 	ErrorRate   Ratio
+}
+
+// RepoRollup maps a repository id to the id of the repository its activity is
+// counted under: a linked git worktree's id maps to the id of the repository it
+// belongs to. Every other id is absent, and an absent id is its own.
+//
+// It is resolved by internal/cli through config.RepoRollup and handed in, for the
+// reason repolabel.Labels is handed in: this package reads no config and no file
+// (ADR-0019 §1). A nil map is valid and means every repository stands alone.
+//
+// It is applied at the counting input and nowhere else. Merging two rows after they
+// have been counted would sum two rates, and a rate summed from rendered ratios has
+// no denominator of its own (ADR-0006); merging at the input recomputes the
+// denominator and the excluded-unknown count over the merged population. Doing it
+// once in this layer is also what makes `wake report`, the dashboard and the static
+// report agree by construction rather than by three matching edits (ADR-0011).
+//
+// It changes what is counted, never what is stored: the record's own Repo is
+// untouched, so no repository hash changes and nothing needs rebuilding (ADR-0004).
+type RepoRollup map[string]string
+
+// Repo returns the repository id a record's activity is counted under. One hop,
+// never transitive, for the reason config.rollupOf gives: the relation is only ever
+// recorded for a worktree whose parent records none of its own, so a chain is a
+// table nothing writes — and chasing one would turn a hand-edited cycle into a hang.
+func (r RepoRollup) Repo(repo record.Hash) record.Hash {
+	if parent, related := r[string(repo)]; related {
+		return record.Hash(parent)
+	}
+	return repo
 }
 
 // Summary is the MVP dashboard's real-data contract.
@@ -103,7 +137,14 @@ func (s Summary) Observed() bool { return s.Invocations > 0 || s.Sessions > 0 }
 // with no primitive use visible at all, the plan §2.7 baseline — and toward nothing
 // else. Its Sessions figure therefore includes sessions no primitive row accounts
 // for, which is the point.
-func Aggregate(records []record.Record) Summary {
+//
+// rollup is applied here, at the counting input, so a linked git worktree's rows are
+// counted under the repository it belongs to and one project reads as one row. It is
+// applied before a primitive is keyed rather than to two finished rows, because a
+// rate merged from two rendered ratios has no denominator of its own (ADR-0006) and
+// an unknown outcome excluded from one of them would be lost (ADR-0005). A nil map
+// leaves every repository standing alone.
+func Aggregate(records []record.Record, rollup RepoRollup) Summary {
 	summary := Summary{Outcomes: make(map[record.Outcome]uint64)}
 	allSessions := make(map[record.Identifier]struct{})
 	primitives := make(map[primitiveKey]*primitiveAccumulator)
@@ -146,10 +187,14 @@ func Aggregate(records []record.Record) Summary {
 			}
 		}
 
-		key := primitiveKey{name: event.Name, kind: event.Kind, harness: event.Harness, repo: event.Repo, invoker: event.Invoker, viaAgent: event.ViaAgent}
+		// The one place the relation is applied. The session-grain and built-in cases
+		// returned above carry no repository dimension in the summary, so nothing there
+		// needs it.
+		repo := rollup.Repo(event.Repo)
+		key := primitiveKey{name: event.Name, kind: event.Kind, harness: event.Harness, repo: repo, invoker: event.Invoker, viaAgent: event.ViaAgent}
 		accumulator := primitives[key]
 		if accumulator == nil {
-			accumulator = &primitiveAccumulator{PrimitiveUsage: PrimitiveUsage{Name: event.Name, Kind: event.Kind, Harness: event.Harness, Repo: event.Repo, Invoker: event.Invoker, ViaAgent: event.ViaAgent}, sessions: map[record.Identifier]struct{}{}}
+			accumulator = &primitiveAccumulator{PrimitiveUsage: PrimitiveUsage{Name: event.Name, Kind: event.Kind, Harness: event.Harness, Repo: repo, Invoker: event.Invoker, ViaAgent: event.ViaAgent}, sessions: map[record.Identifier]struct{}{}}
 			primitives[key] = accumulator
 		}
 		accumulator.Invocations++

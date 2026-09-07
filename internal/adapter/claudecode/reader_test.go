@@ -197,7 +197,7 @@ func TestReadCountsOneSkillRunAsOneInvocation(t *testing.T) {
 	// Through the real aggregation layer rather than by inspection: the double count
 	// this fixes was visible only after metrics keyed the two records into separate
 	// accumulators.
-	summary := metrics.Aggregate(result.Records)
+	summary := metrics.Aggregate(result.Records, nil)
 	if len(summary.Primitives) != 1 {
 		t.Fatalf("Aggregate() primitives = %+v, want exactly one", summary.Primitives)
 	}

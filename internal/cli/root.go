@@ -63,7 +63,7 @@ func newRootCmd() *cobra.Command {
 			for _, entry := range entries {
 				records = append(records, entry.Record)
 			}
-			summary := metrics.Aggregate(records)
+			summary := metrics.Aggregate(records, metrics.RepoRollup(config.RepoRollup(paths)))
 			_, err = fmt.Fprintf(cmd.OutOrStdout(), "terminal invocations: %d\ndistinct sessions: %d\n", summary.Invocations, summary.Sessions)
 			return err
 		},

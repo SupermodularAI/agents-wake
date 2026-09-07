@@ -448,7 +448,7 @@ func TestClaudeCodeDiscoveryYieldsOneInventoryRowPerPluginSkill(t *testing.T) {
 	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
 
 	discovery := ClaudeCodeInScope(Scope{ClaudeDir: claudeDir, Root: root, Project: ProjectConsented}, names)
-	if err := primitives.Refresh(events, discovery); err != nil {
+	if err := primitives.Refresh(events, discovery, nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 	items, err := primitives.Read()

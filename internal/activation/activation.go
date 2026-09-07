@@ -15,6 +15,7 @@ import (
 	"github.com/SupermodularAI/agents-wake/internal/ingest"
 	"github.com/SupermodularAI/agents-wake/internal/inventory"
 	"github.com/SupermodularAI/agents-wake/internal/lockfile"
+	"github.com/SupermodularAI/agents-wake/internal/metrics"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 	"github.com/SupermodularAI/agents-wake/internal/store"
 )
@@ -644,7 +645,11 @@ func installedFrom(discovered inventory.Discovery) claudecode.Installed {
 }
 
 func refreshInventory(paths config.Paths, events *store.Store, discovered inventory.Discovery) error {
-	return inventory.New(paths.PrimitivesFile).Refresh(events, discovered)
+	// The roll-up is read here rather than passed down, so Init, InitGlobal and the
+	// hook-fired scan all inherit it with no further plumbing. It runs after Register
+	// has written the relation, so a `wake init` inside a linked worktree rolls up on
+	// the same call that recorded it.
+	return inventory.New(paths.PrimitivesFile).Refresh(events, discovered, metrics.RepoRollup(config.RepoRollup(paths)))
 }
 
 // AllRepoRoots resolves the Namer together with the canonical root of every
