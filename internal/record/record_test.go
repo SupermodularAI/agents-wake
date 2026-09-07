@@ -676,3 +676,66 @@ func TestValidateDoesNotRejectASelfParent(t *testing.T) {
 		t.Fatalf("Validate() rejected a self-parent: %v", err)
 	}
 }
+
+// TestValidateRefusesAnUnsafeMCPServer pins the field's domain. mcp_server is a
+// bounded token, so a colon-bearing config key like "plugin:context7:context7"
+// cannot be written into it at all — the type is what enforces that rather than a
+// convention (ADR-0007). The refusal names no value: a rejected segment is
+// transcript content (plan §4.2).
+func TestValidateRefusesAnUnsafeMCPServer(t *testing.T) {
+	for _, value := range []string{
+		"plugin:context7:context7",
+		"../etc",
+		"_leading",
+		"a b",
+		strings.Repeat("a", 129),
+	} {
+		candidate := validRecord()
+		candidate.MCPServer = Identifier(value)
+		err := Validate(candidate)
+		if err == nil {
+			t.Errorf("Validate() accepted MCPServer = %q", value)
+			continue
+		}
+		if strings.Contains(err.Error(), value) {
+			t.Errorf("Validate() error quoted the rejected value: %v", err)
+		}
+	}
+}
+
+// TestValidateAcceptsAnObservedMCPServerSegment covers the real spellings a
+// "mcp__<server>__" prefix carries, including the sanitised plugin triple.
+func TestValidateAcceptsAnObservedMCPServerSegment(t *testing.T) {
+	for _, value := range []string{
+		"claude-in-chrome",
+		"plugin_context7_context7",
+		"claude_ai_Atlassian_Rovo",
+		"linear-server",
+	} {
+		candidate := validRecord()
+		candidate.MCPServer = Identifier(value)
+		if err := Validate(candidate); err != nil {
+			t.Errorf("Validate() refused MCPServer = %q: %v", value, err)
+		}
+	}
+}
+
+func TestMarshalOmitsAnAbsentMCPServer(t *testing.T) {
+	candidate := validRecord()
+	encoded, err := Marshal(candidate)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if strings.Contains(string(encoded), "mcp_server") {
+		t.Fatalf("Marshal() emitted an absent mcp server: %s", encoded)
+	}
+
+	candidate.MCPServer = "claude-in-chrome"
+	encoded, err = Marshal(candidate)
+	if err != nil {
+		t.Fatalf("Marshal() with a server error = %v", err)
+	}
+	if want := `"mcp_server":"claude-in-chrome"`; !strings.Contains(string(encoded), want) {
+		t.Fatalf("Marshal() = %s, want it to contain %s", encoded, want)
+	}
+}
