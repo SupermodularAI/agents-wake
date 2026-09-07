@@ -32,7 +32,10 @@ import (
 // yields an entry the session grain can date itself from. Version 6, unlike 4 and 5,
 // does add a dimension: a nullable parent_event_id, the event_id of a record's parent
 // invocation, derived from the child's own source event and never generated
-// (ADR-0035 §2).
+// (ADR-0035 §2). Version 7 adds a dimension too: a nullable mcp_server, the server
+// segment of an MCP tool's own name, stored as the harness spells it and validated
+// as a bounded token, so it cannot carry a secret and cannot carry a normalised
+// guess either.
 //
 // "Refused on read" is only half of that, and the half on its own is a silent
 // shrink: every consumer reads the spool through store.Entries, so a spool nobody
@@ -45,7 +48,7 @@ import (
 // delivery watermark, which stamps this number and starts over when it changes
 // (internal/remote). What a rebuild cannot recover is a period the harness has since
 // pruned: the store was the only surviving copy of it, and ADR-0014 accepts that.
-const SchemaVersion uint = 6
+const SchemaVersion uint = 7
 
 // ErrUnsupportedVersion is the one refusal from Validate a caller is meant to
 // recognise. Every other refusal means the record was never valid; this one means
@@ -144,9 +147,23 @@ type Record struct {
 	Name           Identifier `json:"name"`
 	Package        Identifier `json:"package,omitempty"`
 	PackageVersion Version    `json:"package_version,omitempty"`
-	Source         *Source    `json:"source"`
-	ViaSkill       Identifier `json:"via_skill,omitempty"`
-	ViaAgent       Identifier `json:"via_agent,omitempty"`
+	// MCPServer is the server segment of an MCP tool's name, exactly as the
+	// harness's own "mcp__<server>__<tool>" spelling gives it — never a config key
+	// and never a normalised guess. It is a token, not a name: the token domain
+	// admits no ":", so the colon-bearing config key an MCP server may really have
+	// ("plugin:context7:context7") cannot be written here at all, and the type is
+	// what enforces that rather than a convention (ADR-0007).
+	//
+	// Matching the observed segment to a configured server is the inventory join's
+	// work, not this field's, and a segment it cannot match is reported as
+	// unmatched rather than resolved (plan §3.3, §12). Populated only on a
+	// KindMCPTool record; an MCP tool name carrying no second separator has no
+	// segment to state and leaves it absent, which is an absence and never a
+	// bucket (ADR-0005).
+	MCPServer Identifier `json:"mcp_server,omitempty"`
+	Source    *Source    `json:"source"`
+	ViaSkill  Identifier `json:"via_skill,omitempty"`
+	ViaAgent  Identifier `json:"via_agent,omitempty"`
 	// ParentEventID is the event_id of this record's parent invocation, derived by
 	// the adapter from the child's own source event and never generated here
 	// (ADR-0004, ADR-0035 §2). It is a record id, so a bare Hash with omitempty
@@ -236,7 +253,7 @@ func Validate(r Record) error {
 	if !ValidHarness(r.Harness) || !validToken(r.SessionID) || !ValidRepo(r.Repo) || !validKind(r.Kind) || !ValidName(r.Name) || !validInvoker(r.Invoker) {
 		return errors.New("invalid required record field")
 	}
-	if !validOptionalName(r.Package) || !validOptionalName(r.ViaSkill) || !validOptionalName(r.ViaAgent) || !validOptionalName(r.Model) || !validOptionalName(r.Effort) || !validOptionalVersion(r.HarnessVersion) || !validOptionalVersion(r.PackageVersion) {
+	if !validOptionalName(r.Package) || !validOptionalName(r.ViaSkill) || !validOptionalName(r.ViaAgent) || !validOptionalName(r.Model) || !validOptionalName(r.Effort) || !validOptionalVersion(r.HarnessVersion) || !validOptionalVersion(r.PackageVersion) || !validOptionalToken(r.MCPServer) {
 		return errors.New("invalid optional record field")
 	}
 	if r.Entrypoint != "" && !validEntrypoint(r.Entrypoint) {

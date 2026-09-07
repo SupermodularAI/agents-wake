@@ -248,6 +248,10 @@ func fullRecord() record.Record {
 	// span keeps testing the absent case and this one the present case.
 	r.ParentEventID = record.DeriveEventID("claude-code", "source-event-parent")
 	r.Model = "claude-opus-5"
+	// The widest output shape, not a semantic claim: this fixture is deliberately
+	// wider than any single adapter's real record, so the key-set assertion sees
+	// every conditional key at once.
+	r.MCPServer = "claude-in-chrome"
 	r.Effort = "high"
 	// Deliberately not the cli member: a defaulted or hard-coded "cli" anywhere in
 	// the encoder would pass an assertion built on the commonest value.
@@ -684,6 +688,10 @@ var frozenSpanAttributeKeys = []string{
 	"wake.input_tokens",
 	"wake.invoker",
 	"wake.kind",
+	// Conditional, and belongs in this list only: it is populated only on an MCP
+	// tool's record, so it is absent from every other span and deliberately absent
+	// from frozenAlwaysPresentKeys below.
+	"wake.mcp_server",
 	"wake.model",
 	"wake.name",
 	"wake.outcome",
@@ -1341,6 +1349,7 @@ func assertEveryStringIsAllowlisted(t *testing.T, payload []byte, r record.Recor
 		string(r.SessionID), string(r.Repo), string(r.Package), string(r.PackageVersion),
 		string(r.ViaSkill), string(r.ViaAgent), string(r.Model), string(r.Effort),
 		string(r.Invoker), string(r.Entrypoint), string(r.Kind) + ":" + string(r.Name),
+		string(r.MCPServer),
 		traceID(r), spanID(r), parentSpanID(r), start, end,
 		strconv.FormatUint(uint64(r.SchemaVersion), 10),
 	}
@@ -1700,5 +1709,39 @@ func TestParentSpanIDIsDeterministic(t *testing.T) {
 		if !bytes.Equal(first, next) {
 			t.Fatalf("Encode() run %d differs:\n%s\n%s", i, first, next)
 		}
+	}
+}
+
+// TestMCPServerRidesEveryMCPToolSpan pins ADR-0038 §1: an attribute a receiver
+// groups by has to ride every span the grouping should reach, carrying that span's
+// own value. It is never gated to one span of a trace and never propagated from an
+// anchor, so a parent link changes nothing about whether it is emitted.
+func TestMCPServerRidesEveryMCPToolSpan(t *testing.T) {
+	for _, parented := range []bool{false, true} {
+		call := validRecord()
+		call.Kind = record.KindMCPTool
+		call.Name = "mcp__claude-in-chrome__computer"
+		call.MCPServer = "claude-in-chrome"
+		if parented {
+			call.ParentEventID = record.DeriveEventID("claude-code", "source-event-parent")
+		}
+		attributes := attributesOf(t, encodeOne(t, call), "attributes")
+		value, emitted := attributes["wake.mcp_server"]
+		if !emitted {
+			t.Fatalf("parented=%t: no wake.mcp_server attribute", parented)
+		}
+		if value["stringValue"] != "claude-in-chrome" {
+			t.Errorf("parented=%t: wake.mcp_server = %v, want %q", parented, value["stringValue"], "claude-in-chrome")
+		}
+	}
+}
+
+// A record carrying no server emits no key at all: absence, never an empty string
+// value, because unknown is signalled by absence and never collapses into a
+// definite value (ADR-0005, ADR-0027).
+func TestMCPServerIsAbsentWhereTheRecordCarriesNone(t *testing.T) {
+	attributes := attributesOf(t, encodeOne(t, validRecord()), "attributes")
+	if _, emitted := attributes["wake.mcp_server"]; emitted {
+		t.Errorf("a skill span carried wake.mcp_server: %v", attributeKeys(attributes))
 	}
 }

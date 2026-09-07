@@ -159,11 +159,16 @@ func primitiveUsage(writer io.Writer, available []inventory.Usage, labels repola
 		return err
 	}
 	rows := newTable("PRIMITIVE", "TYPE", "HARNESS", "REPO", "LAST USED", "CALLS", "ERRORS")
+	// unmatched tracks whether a printed row needs the footnote below, so the note
+	// is earned by what this table actually shows rather than by a second pass over
+	// rows the reader cannot see.
+	unmatched := false
 	for _, usage := range available {
 		if usage.Invocations == 0 {
 			continue
 		}
-		rows.add(string(usage.Name), kind(usage.Kind), string(usage.Harness), labels.Display(usage.Repo), usage.LastUsed.UTC().Format(time.RFC3339), fmt.Sprintf("%d", usage.Invocations), errorcell.Render(usage.ErrorRate()))
+		unmatched = unmatched || usage.Unmatched
+		rows.add(string(usage.Name), usage.KindLabel(), string(usage.Harness), labels.Display(usage.Repo), usage.LastUsed.UTC().Format(time.RFC3339), fmt.Sprintf("%d", usage.Invocations), errorcell.Render(usage.ErrorRate()))
 	}
 	if len(rows.rows) == 0 {
 		_, err := fmt.Fprintln(writer, "No primitive activity observed.")
@@ -172,7 +177,15 @@ func primitiveUsage(writer io.Writer, available []inventory.Usage, labels repola
 	if err := rows.write(writer, pretty); err != nil {
 		return err
 	}
-	_, err := fmt.Fprintln(writer, "Only currently discovered, non-built-in primitives are listed.")
+	if _, err := fmt.Fprintln(writer, "Only currently discovered, non-built-in primitives are listed."); err != nil {
+		return err
+	}
+	if !unmatched {
+		return nil
+	}
+	// A footnote, not a column: a marker column would be empty on every other row,
+	// which reads as a bug rather than as an absence (plan §4.5).
+	_, err := fmt.Fprintln(writer, "A server marked (unmatched) was invoked but matches no MCP server this pass discovered; its calls are counted here and cannot be attributed to a configured server.")
 	return err
 }
 
@@ -188,7 +201,7 @@ func unusedPrimitives(writer io.Writer, available []inventory.Usage, pretty bool
 		if usage.Invocations > 0 {
 			continue
 		}
-		rows.add(string(usage.Name), kind(usage.Kind), string(usage.Harness))
+		rows.add(string(usage.Name), usage.KindLabel(), string(usage.Harness))
 	}
 	if len(rows.rows) == 0 {
 		_, err := fmt.Fprintln(writer, "Every discovered primitive has activity.")
