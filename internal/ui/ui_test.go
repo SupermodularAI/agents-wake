@@ -113,8 +113,33 @@ func TestHandlerShowsPerPrimitiveErrorCount(t *testing.T) {
 	response := httptest.NewRecorder()
 	Handler(source, primitives, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
 	body := response.Body.String()
-	if !strings.Contains(body, "Errors") || !strings.Contains(body, "2 (66.7%)") {
+	if !strings.Contains(body, "Errors") || !strings.Contains(body, "2 of 3 rated (66.7%)") {
 		t.Fatalf("dashboard did not show review's per-primitive error count: %s", body)
+	}
+}
+
+// TestHandlerShowsAPartiallyRatedPrimitiveWithItsRatedPopulation is DG-103 at
+// the dashboard: 2 calls, 1 error, 1 outcome the harness never reported. The
+// rate is 100% of the single rated call, and the cell has to say so — beside a
+// Calls column reading 2, a bare "1 (100.0%)" reads as every call failing.
+func TestHandlerShowsAPartiallyRatedPrimitiveWithItsRatedPopulation(t *testing.T) {
+	source := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	failed := record.OutcomeError
+	if _, err := source.Append([]record.Record{event("one", &failed), event("two", nil)}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	primitives := inventory.New(filepath.Join(t.TempDir(), "primitives.json"))
+	if err := primitives.Refresh(source, inventory.Discovery{Primitives: []inventory.Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "review"}}, ProjectScanned: true}); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	response := httptest.NewRecorder()
+	Handler(source, primitives, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := response.Body.String()
+	if !strings.Contains(body, "1 of 1 rated (100.0%); 1 unrated") {
+		t.Fatalf("dashboard error cell lost its rated population: %s", body)
+	}
+	if strings.Contains(body, "1 (100.0%)") {
+		t.Fatalf("dashboard still prints a percentage with no denominator: %s", body)
 	}
 }
 
