@@ -2470,6 +2470,46 @@ func TestReadLeavesTheMCPServerAbsentWhereThereIsNoSegment(t *testing.T) {
 	}
 }
 
+// The `mcp__<server>__` segment is a new derivation off transcript content, so it
+// gets the whole hostile-payload corpus rather than one hand-picked unsafe case:
+// AGENTS.md requires the corpus per adapter because each adapter is a new input
+// shape (T006, ADR-0007). No value in the corpus is inside the token domain, so
+// every one of them must leave MCPServer absent — and whichever records survive
+// must carry no path fragment anywhere in their encoding (plan §4.2).
+func TestReadKeepsAHostileMCPServerSegmentOutOfTheRecord(t *testing.T) {
+	// Most of the corpus makes the whole tool name illegal, so the call is refused
+	// before the segment is ever read. That is a pass, but it is not the case this
+	// test is for, so the surviving records are counted: a corpus that stopped
+	// producing any would leave the assertions below vacuous.
+	survived := 0
+	for _, value := range hostileValues {
+		t.Run(value, func(t *testing.T) {
+			result, err := read(strings.NewReader(mcpCallTranscript("mcp__"+value+"__x")), resolver, names, closedSession)
+			if err != nil {
+				t.Fatalf("Read() error = %v", err)
+			}
+			survived += len(result.Records)
+			for _, event := range result.Records {
+				if event.MCPServer != "" {
+					t.Errorf("MCPServer = %q, want it absent for a segment outside the token domain", event.MCPServer)
+				}
+				encoded, marshalErr := record.Marshal(event)
+				if marshalErr != nil {
+					t.Fatalf("Marshal() error = %v", marshalErr)
+				}
+				for _, fragment := range []string{consentedPath, "/", `\`} {
+					if strings.Contains(string(encoded), fragment) {
+						t.Fatalf("record retains %q: %s", fragment, encoded)
+					}
+				}
+			}
+		})
+	}
+	if survived == 0 {
+		t.Fatal("no hostile value produced a record: the segment assertions never ran")
+	}
+}
+
 // TestReadRefusesAnUnsafeMCPServerSegmentWithoutDroppingTheCall pins that the
 // segment is a dimension, not a gate. "mcp___leading__x" is a legal Name — the name
 // domain admits "_" anywhere — but its segment "_leading" is outside the token
