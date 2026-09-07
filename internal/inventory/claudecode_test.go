@@ -8,8 +8,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/SupermodularAI/agents-wake/internal/record"
+	"github.com/SupermodularAI/agents-wake/internal/store"
 )
 
 // names keys the scope digest for this package's tests, standing in for the
@@ -422,4 +424,61 @@ func writeInstalledPlugins(t *testing.T, claudeDir string, installs map[string]s
 	}
 	write(t, filepath.Join(claudeDir, "plugins", "installed_plugins.json"),
 		`{"version":1,"plugins":{`+strings.Join(entries, ",")+`}}`)
+}
+
+// DG-106's `--unused` criterion, asserted through the whole path below the
+// renderer: discovery over a real installed_plugins.json and a real skill_listing,
+// then the join that produces the rows report and serve draw.
+//
+// One row in, one line out is what makes this sufficient evidence: report renders
+// []inventory.Usage — derive's output — one line per row with no invocations, and
+// internal/cli/report.go passes Store.Read() straight in. Nothing between them can
+// duplicate a skill.
+func TestClaudeCodeDiscoveryYieldsOneInventoryRowPerPluginSkill(t *testing.T) {
+	claudeDir, root := pluginFixture(t)
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	events := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	if _, err := events.Append([]record.Record{
+		inventoryRecord("one", "superpowers:brainstorming", at),
+		inventoryRecord("two", "superpowers:brainstorming", at.Add(time.Minute)),
+		inventoryRecord("three", "brainstorming", at.Add(2*time.Minute)),
+	}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
+
+	discovery := ClaudeCodeInScope(Scope{ClaudeDir: claudeDir, Root: root, Project: ProjectConsented}, names)
+	if err := primitives.Refresh(events, discovery); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	items, err := primitives.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+
+	rows := map[usageKey]Usage{}
+	for _, usage := range items {
+		key := usageKey{identity: identity{kind: usage.Kind, name: usage.Name}, repo: usage.Repo}
+		if _, duplicate := rows[key]; duplicate {
+			t.Fatalf("%s %q is listed twice: %+v", usage.Kind, usage.Name, items)
+		}
+		rows[key] = usage
+	}
+	for _, phantom := range []record.Identifier{"brainstorming", "deploy"} {
+		for _, usage := range items {
+			if usage.Name == phantom {
+				t.Fatalf("the bare spelling %q survived as its own row: %+v", phantom, items)
+			}
+		}
+	}
+	used := rows[usageKey{identity: identity{kind: record.KindSkill, name: "superpowers:brainstorming"}, repo: "0123456789abcdef0123456789abcdef"}]
+	if used.Invocations != 3 {
+		t.Fatalf("superpowers:brainstorming = %+v, want 3 invocations accumulated from both spellings", used)
+	}
+	for _, unused := range []record.Identifier{"vercel:deploy", "gather-context"} {
+		row, found := rows[usageKey{identity: identity{kind: record.KindSkill, name: unused}}]
+		if !found || row.Invocations != 0 {
+			t.Fatalf("%q = %+v, %t; want exactly one row with no invocations", unused, row, found)
+		}
+	}
 }
