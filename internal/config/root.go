@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -79,27 +80,106 @@ func DiscoverRootForRegistration(dir, ceiling string) (string, error) {
 	return cleaned, nil
 }
 
+// discoverParentRepositoryForRegistration returns the spellings of the repository
+// root that root is a linked git worktree of, or nil when it is not one.
+//
+// Registration only, and unexported on purpose. ADR-0019 §1 makes derivation a pure
+// string operation over the recorded snapshot — no git, no os.Stat — and being
+// unexported means no package outside this one can reach this at all;
+// TestTheParentLookupIsNamedOnlyOnTheRegistrationPath keeps the in-package call
+// sites to the registration step, the way
+// TestDiscoverRootForRegistrationIsNamedOnlyOnInitsPath does for discovery.
+//
+// It registers nothing and consents nothing. ADR-0032 §2 narrowed §9 to exactly two
+// root-discovery sites and this is neither: what comes back is a set of spellings
+// the caller matches against entries *already* recorded. A parent matching none is a
+// parent this machine has not consented, and the relation is then simply not
+// recorded — hashing it would create stored data outside the consent boundary
+// (ADR-0019 §9).
+//
+// GIT_DIR and GIT_WORK_TREE are dropped for the reason boundedDiscoveryEnv drops
+// them: the hook-fired registration path inherits a session's environment, and an
+// exported GIT_DIR would otherwise make a main checkout name a common directory
+// nowhere near it. Containment is not enforced by the environment — it is enforced
+// by the caller's requirement that the answer already be a recorded entry.
+//
+// Every failure answers nil: a directory that is not a repository, a git that is not
+// installed, a bare main repository whose common directory names no working tree.
+// Fail closed — no relation is always a safe answer, a wrong one re-points a
+// repository's rows.
+//
+// It returns no error and therefore names no path in one, and git's own stderr is
+// captured and discarded, as DiscoverRootForRegistration's is (plan §4.2).
+func discoverParentRepositoryForRegistration(root string) []string {
+	cmd := exec.Command("git", "-C", root, "rev-parse", "--git-common-dir")
+	cmd.Env = scrubbedGitEnv()
+	output, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	common := strings.TrimSpace(string(output))
+	if common == "" {
+		return nil
+	}
+	// git answers relative to the directory -C moved it to when it can. Absolute
+	// first, then clean, so the comparison below is against one spelling rule.
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(root, common)
+	}
+	common = filepath.Clean(common)
+	// A linked worktree's common directory is the main working tree's `.git`.
+	// Anything else — a bare repository, a separated git directory — names no
+	// working tree, and guessing one would invent a root.
+	if filepath.Base(common) != ".git" {
+		return nil
+	}
+	parent := filepath.Dir(common)
+	// The main checkout is its own common directory's parent. Not a worktree.
+	if parent == root || !filepath.IsAbs(parent) {
+		return nil
+	}
+	spellings := []string{parent}
+	// The canonical spelling too: Register records the canonical root and may record
+	// the offered one as an alias (ADR-0019 §5), so a parent consented through a
+	// symlinked path has to be findable under either.
+	if canonical, canonErr := canonicalRoot(parent); canonErr == nil && canonical != parent {
+		spellings = append(spellings, canonical)
+	}
+	return spellings
+}
+
 // boundedDiscoveryEnv is the environment a bounded discovery runs git in.
+//
+// GIT_DIR and GIT_WORK_TREE are dropped because git documents that the ceiling "will
+// not exclude ... a GIT_DIR set on the command line or in the environment": with
+// either set, the toplevel git reports is the one they name and the ceiling is not
+// consulted at all.
+//
+// Dropped here, where a ceiling was asked for, and not from DiscoverRootForRegistration's
+// unbounded call. With no ceiling there is no boundary to escape and the directory
+// the caller is standing in is the one being consented, so plain `wake init` keeps
+// honouring the environment as it always has. Even so, this is a narrowing of the
+// exposure and not the guarantee: what makes a discovered root safe is that
+// RegisterUnderGlobalRoot checks it against the boundary afterwards, whatever git was
+// persuaded to say.
+func boundedDiscoveryEnv(ceiling string) []string {
+	return append(scrubbedGitEnv(), "GIT_CEILING_DIRECTORIES="+ceiling)
+}
+
+// scrubbedGitEnv is os.Environ with GIT_DIR and GIT_WORK_TREE removed.
 //
 // os.Environ rather than a bare slice: a caller — a test, most often — that
 // neutralised GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM has to keep doing so, or what git
-// answers here would depend on the machine's own configuration.
+// answers would depend on the machine's own configuration.
 //
-// GIT_DIR and GIT_WORK_TREE are dropped, because git documents that the ceiling "will
-// not exclude ... a GIT_DIR set on the command line or in the environment": with
-// either set, the toplevel git reports is the one they name and the ceiling is not
-// consulted at all. The bounded call is the unattended one — the scan a hook fires
-// inherits the session's environment — so a shell that exported GIT_DIR would
-// otherwise make every discovery under a collection boundary answer with a repository
-// nowhere near it.
+// The two are dropped because the calls that use this are the unattended ones — the
+// scan a hook fires inherits the session's environment — and either variable makes
+// git answer about the repository it names rather than the one the caller is asking
+// about. Shared by both call sites so the two cannot drift about which variables a
+// git call this package makes is allowed to inherit.
 //
-// Dropped only here, where a ceiling was asked for. With no ceiling there is no
-// boundary to escape and the directory the caller is standing in is the one being
-// consented, so plain `wake init` keeps honouring the environment as it always has.
-// Even so, this is a narrowing of the exposure and not the guarantee: what makes a
-// discovered root safe is that RegisterUnderGlobalRoot checks it against the boundary
-// afterwards, whatever git was persuaded to say.
-func boundedDiscoveryEnv(ceiling string) []string {
+// The +1 of capacity is boundedDiscoveryEnv's append.
+func scrubbedGitEnv() []string {
 	environ := os.Environ()
 	kept := make([]string, 0, len(environ)+1)
 	for _, entry := range environ {
@@ -108,5 +188,5 @@ func boundedDiscoveryEnv(ceiling string) []string {
 		}
 		kept = append(kept, entry)
 	}
-	return append(kept, "GIT_CEILING_DIRECTORIES="+ceiling)
+	return kept
 }

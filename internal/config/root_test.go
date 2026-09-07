@@ -41,6 +41,151 @@ func initRepo(t *testing.T) (root, nested string) {
 	return root, nested
 }
 
+// initWorktree creates a git repository with one commit and one linked worktree,
+// and returns both roots already symlink-resolved.
+//
+// The worktree is a sibling of the main checkout, never inside it: a worktree under
+// the main root would be inside a consented root, which Register refuses as nesting
+// (ADR-0019 §5), and it is not the shape the ticket is about.
+//
+// The commit identity is supplied per invocation because requireGit points
+// GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM at os.DevNull, so there is no configured
+// name to commit under — and `git worktree add` needs a commit to check out.
+func initWorktree(t *testing.T) (main, worktree string) {
+	t.Helper()
+	base := tempRealDir(t)
+	main = mkdirAll(t, filepath.Join(base, "main"))
+	worktree = filepath.Join(base, "worktree")
+	for _, step := range [][]string{
+		{"init", main},
+		{"-C", main, "-c", "user.email=wake@example.invalid", "-c", "user.name=wake", "commit", "--allow-empty", "-m", "init"},
+		{"-C", main, "worktree", "add", worktree},
+	} {
+		if output, err := exec.Command("git", step...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", step, err, output)
+		}
+	}
+	return main, worktree
+}
+
+// The lookup DG-104 adds: from inside a linked worktree, the repository it belongs
+// to. It is what lets `wake init` in a worktree record the relation without the
+// worktree ceasing to be its own repository (ADR-0019 §6).
+func TestTheParentLookupFindsTheMainCheckoutFromALinkedWorktree(t *testing.T) {
+	requireGit(t)
+	main, worktree := initWorktree(t)
+
+	got := discoverParentRepositoryForRegistration(worktree)
+	if len(got) == 0 {
+		t.Fatalf("discoverParentRepositoryForRegistration(%q) = nil, want the main checkout %q", worktree, main)
+	}
+	if got[0] != main {
+		t.Errorf("discoverParentRepositoryForRegistration() = %q, want the main checkout %q first", got, main)
+	}
+}
+
+// A main checkout is not a worktree of anything. Answering with itself would be a
+// self-relation, which valid() refuses — and rightly, since every reader would then
+// have to defend against the cycle.
+func TestTheParentLookupAnswersNothingInAMainCheckout(t *testing.T) {
+	requireGit(t)
+	root, _ := initRepo(t)
+
+	if got := discoverParentRepositoryForRegistration(root); got != nil {
+		t.Errorf("discoverParentRepositoryForRegistration(%q) = %q, want nil", root, got)
+	}
+}
+
+// A plain directory is a repository Wake will happily consent (ADR-0019 §5) and a
+// worktree of nothing. Every git failure direction answers nil, which is the
+// pre-change behaviour.
+func TestTheParentLookupAnswersNothingOutsideAGitRepository(t *testing.T) {
+	requireGit(t)
+	dir := mkdirAll(t, filepath.Join(tempRealDir(t), "plain"))
+
+	if got := discoverParentRepositoryForRegistration(dir); got != nil {
+		t.Errorf("discoverParentRepositoryForRegistration(%q) = %q, want nil", dir, got)
+	}
+}
+
+// GIT_DIR and GIT_WORK_TREE are dropped for the reason boundedDiscoveryEnv drops
+// them: the hook-fired registration path inherits a session's environment, and an
+// exported GIT_DIR would otherwise make a main checkout look like a worktree of
+// whatever it names — or point a worktree at a common directory nowhere near it.
+func TestTheParentLookupIgnoresAnInheritedGitDir(t *testing.T) {
+	requireGit(t)
+	main, worktree := initWorktree(t)
+	elsewhere, _ := initRepo(t)
+	t.Setenv("GIT_DIR", filepath.Join(elsewhere, ".git"))
+	t.Setenv("GIT_WORK_TREE", elsewhere)
+
+	if got := discoverParentRepositoryForRegistration(main); got != nil {
+		t.Errorf("discoverParentRepositoryForRegistration(%q) = %q, want nil; the environment made a main checkout look like a worktree", main, got)
+	}
+	got := discoverParentRepositoryForRegistration(worktree)
+	if len(got) == 0 || got[0] != main {
+		t.Errorf("discoverParentRepositoryForRegistration(%q) = %q, want the real main checkout %q", worktree, got, main)
+	}
+}
+
+// The mechanical half of the layering rule, for the reason
+// TestDiscoverRootForRegistrationIsNamedOnlyOnInitsPath gives: ADR-0019 §1 makes
+// derivation a pure string operation over the recorded snapshot, and a lookup that
+// shelled out from the derivation path would attribute the same event differently
+// depending on what the working tree looked like at the time.
+//
+// The function is unexported, so no package outside this one can reach it at all;
+// this keeps the in-package call sites to the registration step.
+func TestTheParentLookupIsNamedOnlyOnTheRegistrationPath(t *testing.T) {
+	root := moduleRoot(t)
+	allowed := map[string]bool{
+		"internal/config/root.go":      true,
+		"internal/config/identity.go":  true,
+		"internal/config/root_test.go": true,
+	}
+	const symbol = "discoverParentRepositoryForRegistration"
+	scanned := 0
+
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if name := d.Name(); path != root && strings.HasPrefix(name, ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(path) != ".go" {
+			return nil
+		}
+		relative, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		relative = filepath.ToSlash(relative)
+		scanned++
+		if allowed[relative] {
+			return nil
+		}
+
+		raw, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if strings.Contains(string(raw), symbol) {
+			t.Errorf("%s names %s; the parent lookup runs only on `wake init`'s registration step, never on the derivation path", relative, symbol)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking the module: %v", err)
+	}
+	if scanned == 0 {
+		t.Fatal("the walk scanned no Go file; the check proved nothing")
+	}
+}
+
 // Acceptance item 1: the discovery is exercised by a function call, with no command
 // constructed and no stream read.
 func TestDiscoverRootForRegistrationReturnsTheRepositoryRootFromASubdirectory(t *testing.T) {
