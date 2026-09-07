@@ -516,3 +516,29 @@ func TestReadRetainsNothingFromAStringShapedUserEntry(t *testing.T) {
 		}
 	}
 }
+
+// DG-106 folds a plugin skill's bare directory name onto its namespaced spelling
+// for the inventory row, but the discovered list this set is built from still
+// carries both. Admission must therefore be unchanged: a person who types either
+// spelling is still collected, and folding the list instead would have turned a
+// wrong report into lost collection. Both input orders are asserted because
+// order-independence is the property, not the outcome of one ordering (ADR-0004).
+func TestNewInstalledAdmitsAPluginSkillUnderBothSpellings(t *testing.T) {
+	bare := InstalledPrimitive{Name: "brainstorming", Kind: record.KindSkill}
+	namespaced := InstalledPrimitive{Name: "superpowers:brainstorming", Kind: record.KindSkill}
+	orders := map[string][]InstalledPrimitive{
+		"bare then namespaced": {bare, namespaced},
+		"namespaced then bare": {namespaced, bare},
+	}
+	for name, primitives := range orders {
+		t.Run(name, func(t *testing.T) {
+			installed := NewInstalled(primitives)
+			for _, spelling := range []record.Identifier{bare.Name, namespaced.Name} {
+				kind, known := installed.kindOf(spelling)
+				if !known || kind != record.KindSkill {
+					t.Fatalf("kindOf(%q) = %q, %t, want %q, true", spelling, kind, known, record.KindSkill)
+				}
+			}
+		})
+	}
+}

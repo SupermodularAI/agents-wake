@@ -3,8 +3,10 @@
 package inventory
 
 import (
+	"cmp"
 	"encoding/json"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -49,8 +51,13 @@ type Primitive struct {
 //
 // names keys the digest that stands in for a directory-scoped primitive's scope,
 // which a session listing states as a path prefix (ADR-0020).
+//
+// It also reports which bare plugin-skill names are the same primitive as their
+// namespaced spelling, so the inventory join can render one row for one skill
+// without the collection side losing either spelling (ADR-0020).
 func ClaudeCodeInScope(scope Scope, names record.Namer) Discovery {
 	items := map[primitiveKey]Primitive{}
+	origins := newSkillOrigins()
 	add := func(kind record.Kind, name string) {
 		identifier, err := names.DerivedName(name)
 		if err != nil {
@@ -59,12 +66,12 @@ func ClaudeCodeInScope(scope Scope, names record.Namer) Discovery {
 		items[primitiveKey{kind: kind, name: identifier}] = Primitive{Harness: claudeCode, Kind: kind, Name: identifier}
 	}
 
-	claudeCodeGlobal(scope.ClaudeDir, add)
+	claudeCodeGlobal(scope.ClaudeDir, add, origins)
 	scanned := scope.allowsProject()
 	if scanned {
-		claudeCodeProject(scope.ClaudeDir, scope.Root, add)
+		claudeCodeProject(scope.ClaudeDir, scope.Root, add, origins)
 	}
-	return Discovery{Primitives: sortedPrimitives(items), ProjectScanned: scanned}
+	return Discovery{Primitives: sortedPrimitives(items), ProjectScanned: scanned, canonical: origins.canonicalSkillNames(names, items)}
 }
 
 // ClaudeCodeAcrossRepos discovers global primitives once, then project-local
@@ -87,24 +94,25 @@ func ClaudeCodeAcrossRepos(claudeDir string, roots []string, names record.Namer)
 		}
 		items[primitiveKey{kind: kind, name: identifier}] = Primitive{Harness: claudeCode, Kind: kind, Name: identifier}
 	}
-	claudeCodeGlobal(claudeDir, add)
+	origins := newSkillOrigins()
+	claudeCodeGlobal(claudeDir, add, origins)
 	for _, root := range roots {
-		claudeCodeProject(claudeDir, root, add)
+		claudeCodeProject(claudeDir, root, add, origins)
 	}
-	return Discovery{Primitives: sortedPrimitives(items), ProjectScanned: true}
+	return Discovery{Primitives: sortedPrimitives(items), ProjectScanned: true, canonical: origins.canonicalSkillNames(names, items)}
 }
 
 // claudeCodeGlobal scans the harness's own directory and its installed plugins.
 // It never reads a working directory, so it needs no consent answer.
-func claudeCodeGlobal(claudeDir string, add func(record.Kind, string)) {
-	scanPrimitives(filepath.Join(claudeDir, "skills"), "SKILL.md", record.KindSkill, add)
+func claudeCodeGlobal(claudeDir string, add func(record.Kind, string), origins *skillOrigins) {
+	scanPrimitives(filepath.Join(claudeDir, "skills"), "SKILL.md", record.KindSkill, origins.fromElsewhere(add))
 	scanPrimitives(filepath.Join(claudeDir, "agents"), "", record.KindSubagent, add)
 	scanPrimitives(filepath.Join(claudeDir, "commands"), "", record.KindCommand, add)
-	for _, installPath := range installedPluginPaths(filepath.Join(claudeDir, "plugins", "installed_plugins.json")) {
-		scanPrimitives(filepath.Join(installPath, "skills"), "SKILL.md", record.KindSkill, add)
-		scanPrimitives(filepath.Join(installPath, "agents"), "", record.KindSubagent, add)
-		scanPrimitives(filepath.Join(installPath, "commands"), "", record.KindCommand, add)
-		scanMCP(filepath.Join(installPath, ".mcp.json"), add)
+	for _, plugin := range installedPlugins(filepath.Join(claudeDir, "plugins", "installed_plugins.json")) {
+		scanPrimitives(filepath.Join(plugin.installPath, "skills"), "SKILL.md", record.KindSkill, origins.fromPlugin(plugin.namespace, add))
+		scanPrimitives(filepath.Join(plugin.installPath, "agents"), "", record.KindSubagent, add)
+		scanPrimitives(filepath.Join(plugin.installPath, "commands"), "", record.KindCommand, add)
+		scanMCP(filepath.Join(plugin.installPath, ".mcp.json"), add)
 	}
 	scanMCP(filepath.Join(claudeDir, "settings.json"), add)
 }
@@ -112,9 +120,9 @@ func claudeCodeGlobal(claudeDir string, add func(record.Kind, string)) {
 // claudeCodeProject scans one consented working directory. Every source it reads
 // belongs to that directory — including the harness's session listings, which are
 // filtered to it — so the caller must have resolved consent first.
-func claudeCodeProject(claudeDir, root string, add func(record.Kind, string)) {
-	scanListings(filepath.Join(claudeDir, "projects"), root, add)
-	scanPrimitives(filepath.Join(root, ".claude", "skills"), "SKILL.md", record.KindSkill, add)
+func claudeCodeProject(claudeDir, root string, add func(record.Kind, string), origins *skillOrigins) {
+	scanListings(filepath.Join(claudeDir, "projects"), root, origins.fromElsewhere(add))
+	scanPrimitives(filepath.Join(root, ".claude", "skills"), "SKILL.md", record.KindSkill, origins.fromElsewhere(add))
 	scanPrimitives(filepath.Join(root, ".claude", "agents"), "", record.KindSubagent, add)
 	scanPrimitives(filepath.Join(root, ".claude", "commands"), "", record.KindCommand, add)
 	scanMCP(filepath.Join(root, ".claude", "settings.json"), add)
@@ -162,7 +170,32 @@ func scanPrimitives(path, exactName string, kind record.Kind, add func(record.Ki
 	}
 }
 
-func installedPluginPaths(path string) []string {
+// pluginInstall is one installed plugin version as installed_plugins.json states
+// it: the namespace Claude Code invokes its primitives under, and the directory
+// they live in.
+//
+// The namespace used to be discarded. That is why one plugin skill was discovered
+// twice — once bare from <installPath>/skills, once namespaced from a session
+// listing — and the bare row could never be reached by an event, which reported a
+// skill used daily as unused (DG-106).
+type pluginInstall struct {
+	namespace   string
+	installPath string
+}
+
+// installedPlugins reads installed_plugins.json and returns one entry per
+// installed version.
+//
+// The map key is "<plugin>@<marketplace>" and only the plugin half is the
+// namespace a primitive is invoked under ("superpowers:brainstorming"), so the
+// marketplace qualifier is cut here; a key carrying no "@" is its own namespace.
+// Keeping the whole key would compose a name nothing ever invokes, which is a
+// worse failure than the one this fixes — the phantom row would be renamed rather
+// than removed.
+//
+// The result is sorted because Go walks a map in a random order and discovery must
+// not depend on the order it saw plugins in (ADR-0004).
+func installedPlugins(path string) []pluginInstall {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
@@ -175,15 +208,125 @@ func installedPluginPaths(path string) []string {
 	if json.Unmarshal(data, &document) != nil {
 		return nil
 	}
-	paths := make([]string, 0)
-	for _, versions := range document.Plugins {
+	installs := make([]pluginInstall, 0, len(document.Plugins))
+	for key, versions := range document.Plugins {
+		namespace, _, _ := strings.Cut(key, "@")
 		for _, plugin := range versions {
-			if plugin.InstallPath != "" {
-				paths = append(paths, plugin.InstallPath)
+			if plugin.InstallPath == "" {
+				continue
 			}
+			installs = append(installs, pluginInstall{namespace: namespace, installPath: plugin.InstallPath})
 		}
 	}
-	return paths
+	slices.SortFunc(installs, func(left, right pluginInstall) int {
+		return cmp.Or(strings.Compare(left.namespace, right.namespace), strings.Compare(left.installPath, right.installPath))
+	})
+	return installs
+}
+
+// skillOrigins records which source contributed each bare skill name, so the
+// inventory join can tell a plugin's own skill from a name that merely looks like
+// one. Provenance is the whole proof: ADR-0020 refuses to fold two spellings onto
+// one name unless they are provably the same primitive, because a wrong fold makes
+// one primitive's counters absorb another's.
+//
+// Only record.KindSkill is tracked. DG-106 is confined to one kind on purpose — a
+// fold that had to pick a kind would be guessing a record dimension (ADR-0005), and
+// that question is DG-108's.
+type skillOrigins struct {
+	plugins map[string]map[string]struct{} // bare name -> namespaces that contributed it
+	others  map[string]struct{}            // bare names some non-plugin source contributed
+}
+
+func newSkillOrigins() *skillOrigins {
+	return &skillOrigins{plugins: map[string]map[string]struct{}{}, others: map[string]struct{}{}}
+}
+
+// fromPlugin wraps add so every skill name passing through it is recorded as
+// contributed by namespace.
+func (o *skillOrigins) fromPlugin(namespace string, add func(record.Kind, string)) func(record.Kind, string) {
+	return func(kind record.Kind, name string) {
+		if kind == record.KindSkill {
+			namespaces, seen := o.plugins[name]
+			if !seen {
+				namespaces = map[string]struct{}{}
+				o.plugins[name] = namespaces
+			}
+			namespaces[namespace] = struct{}{}
+		}
+		add(kind, name)
+	}
+}
+
+// fromElsewhere wraps add so every skill name passing through it is recorded as
+// contributed by something that is not a plugin's own skills directory — the user's
+// ~/.claude/skills, a project's .claude/skills, or a session listing. A bare name
+// two sources contribute is not provably one primitive, so it is never folded.
+func (o *skillOrigins) fromElsewhere(add func(record.Kind, string)) func(record.Kind, string) {
+	return func(kind record.Kind, name string) {
+		if kind == record.KindSkill {
+			o.others[name] = struct{}{}
+		}
+		add(kind, name)
+	}
+}
+
+// canonicalSkillNames returns the fold from a plugin skill's bare directory name
+// onto the namespaced spelling every invocation of it carries.
+//
+// A name folds only where discovery proved it: exactly one plugin contributed it and
+// no other source did, the namespace is a plain token, the composed name is one
+// record.Namer will persist — which refuses the scope-<digest>: shape ADR-0020
+// reserves for a directory scope — and no primitive of another kind already holds
+// that name. Every other case is refused rather than resolved. Refusing leaves one
+// pre-existing phantom row; folding wrongly merges two primitives' counters, which
+// is the metric corruption ADR-0020 exists to prevent.
+//
+// The result is a function of the discovered set, never of the order it was walked
+// in (ADR-0004).
+func (o *skillOrigins) canonicalSkillNames(names record.Namer, discovered map[primitiveKey]Primitive) map[identity]record.Identifier {
+	canonical := map[identity]record.Identifier{}
+	for bare, contributors := range o.plugins {
+		if _, elsewhere := o.others[bare]; elsewhere {
+			continue
+		}
+		namespaces := slices.Sorted(maps.Keys(contributors))
+		if len(namespaces) != 1 || strings.ContainsAny(bare, ":/") {
+			continue
+		}
+		if _, err := record.BoundedToken(namespaces[0]); err != nil {
+			continue
+		}
+		from, err := names.DerivedName(bare)
+		if err != nil {
+			continue
+		}
+		to, err := names.DerivedName(namespaces[0] + ":" + bare)
+		if err != nil {
+			continue
+		}
+		if _, found := discovered[primitiveKey{kind: record.KindSkill, name: from}]; !found {
+			continue
+		}
+		if heldByAnotherKind(discovered, to) {
+			continue
+		}
+		canonical[identity{harness: claudeCode, kind: record.KindSkill, name: from}] = to
+	}
+	return canonical
+}
+
+// heldByAnotherKind reports whether the discovered set already holds name under a
+// kind that is not a skill. Landing a skill's canonical name on it would change a
+// primitive's kind, which this ticket refuses rather than resolves (ADR-0005);
+// deciding that case is DG-108's.
+func heldByAnotherKind(discovered map[primitiveKey]Primitive, name record.Identifier) bool {
+	for key := range discovered {
+		if key.name == name && key.kind != record.KindSkill {
+			return true
+		}
+	}
+	return false
 }
 
 func scanMCP(path string, add func(record.Kind, string)) {

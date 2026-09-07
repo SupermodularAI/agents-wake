@@ -1,5 +1,7 @@
 package inventory
 
+import "github.com/SupermodularAI/agents-wake/internal/record"
+
 // ProjectScope is the consent answer for the working directory a discovery pass
 // was asked about. It is an answer, never a path: the working directory itself
 // never reaches this type (plan §3.4).
@@ -53,4 +55,19 @@ type Discovery struct {
 	// wrongly claiming completeness deletes recorded state, while wrongly claiming
 	// partialness only keeps a name around one refresh longer.
 	ProjectScanned bool
+	// canonical is the fold from a spelling discovery found onto the one the harness
+	// actually invokes the primitive under — today, a plugin skill's bare directory
+	// name onto "<plugin>:<name>". Its keys are inventory identities; derive applies
+	// it to both sides of its join.
+	//
+	// It is private, and the two constructors above are the only way to fill it, for
+	// the same reason claudecode.NewInstalled keeps its map private: the fold is only
+	// sound where discovery proved the two spellings are one primitive, and a caller
+	// handed a public map could assert that without holding the proof (ADR-0020).
+	//
+	// Primitives keeps both spellings on purpose. That slice is what activation hands
+	// claudecode.NewInstalled, and folding it would stop wake collecting a person who
+	// types the bare form — a wrong report turned into lost collection. One row out,
+	// both spellings still admitted in.
+	canonical map[identity]record.Identifier
 }
