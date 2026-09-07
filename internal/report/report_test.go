@@ -384,3 +384,66 @@ func sessionEndRecord(sessionID record.Identifier, at time.Time) record.Record {
 		BuiltinToolCalls: &zero,
 	}
 }
+
+// unmatchedNote is the sentence primitiveUsage prints once, and only when a printed
+// row is unmatched. It is a footnote rather than a column: an unmatched row would
+// leave every other row's cell empty, which is the empty column plan §4.5 forbids.
+const unmatchedNote = "A server marked (unmatched) was invoked but matches no MCP server this pass discovered"
+
+func TestRenderMarksAnUnmatchedServerAndExplainsIt(t *testing.T) {
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	available := []inventory.Usage{
+		{Harness: "claude-code", Kind: record.KindMCPServer, Name: "linear-server", Repo: "0123456789abcdef0123456789abcdef", Invocations: 3, Unmatched: true, LastUsed: at},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "review", Repo: "0123456789abcdef0123456789abcdef", Invocations: 1, LastUsed: at},
+	}
+	var output bytes.Buffer
+	if err := Render(&output, metrics.Aggregate(nil, nil), available, Options{}); err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	text := output.String()
+	for _, want := range []string{"mcp server (unmatched)", unmatchedNote} {
+		if !strings.Contains(text, want) {
+			t.Errorf("report missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestRenderOmitsTheUnmatchedNoteWhenNoRowIsUnmatched(t *testing.T) {
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	available := []inventory.Usage{
+		{Harness: "claude-code", Kind: record.KindMCPServer, Name: "claude-in-chrome", Repo: "0123456789abcdef0123456789abcdef", Invocations: 3, LastUsed: at},
+	}
+	var output bytes.Buffer
+	if err := Render(&output, metrics.Aggregate(nil, nil), available, Options{}); err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	text := output.String()
+	if strings.Contains(text, unmatchedNote) {
+		t.Errorf("report printed the unmatched note with no unmatched row:\n%s", text)
+	}
+	if strings.Contains(text, "(unmatched)") {
+		t.Errorf("report marked a matched server:\n%s", text)
+	}
+}
+
+// DG-99's user-visible symptom, at the renderer: a server with activity must not be
+// listed as unused, and must not be counted in the unused overview either.
+func TestRenderKeepsAUsedServerOutOfUnusedPrimitives(t *testing.T) {
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	available := []inventory.Usage{
+		{Harness: "claude-code", Kind: record.KindMCPServer, Name: "claude-in-chrome", Repo: "0123456789abcdef0123456789abcdef", Invocations: 4, LastUsed: at},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "unused-skill"},
+	}
+	var output bytes.Buffer
+	if err := Render(&output, metrics.Aggregate(nil, nil), available, Options{Unused: true}); err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	text := output.String()
+	unused := text[strings.Index(text, "UNUSED PRIMITIVES"):]
+	if strings.Contains(unused, "claude-in-chrome") {
+		t.Errorf("a used MCP server was listed as unused:\n%s", text)
+	}
+	if !strings.Contains(text, "Total unused\t1") && !strings.Contains(text, "Total unused  1") {
+		t.Errorf("Total unused counted the used server:\n%s", text)
+	}
+}

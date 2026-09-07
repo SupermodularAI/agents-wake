@@ -63,9 +63,14 @@ type PrimitiveUsage struct {
 	// which for a linked git worktree is the repository it belongs to, not the
 	// worktree (see RepoRollup). The record's own Repo in the store is untouched, so
 	// no repository hash changes and grouping by wake.repo still separates worktrees.
-	Repo        record.Hash
-	Invoker     record.Invoker
-	ViaAgent    record.Identifier
+	Repo     record.Hash
+	Invoker  record.Invoker
+	ViaAgent record.Identifier
+	// MCPServer is the server segment the record carried, passed through so the
+	// inventory join can roll an MCP tool's calls onto its server's row. It is a
+	// dimension of this row, never a grain of it — two tools of one server stay two
+	// rows. Empty on every row that is not an MCP tool's.
+	MCPServer   record.Identifier
 	Invocations uint64
 	Sessions    uint64
 	LastUsed    time.Time
@@ -191,10 +196,10 @@ func Aggregate(records []record.Record, rollup RepoRollup) Summary {
 		// returned above carry no repository dimension in the summary, so nothing there
 		// needs it.
 		repo := rollup.Repo(event.Repo)
-		key := primitiveKey{name: event.Name, kind: event.Kind, harness: event.Harness, repo: repo, invoker: event.Invoker, viaAgent: event.ViaAgent}
+		key := primitiveKey{name: event.Name, kind: event.Kind, harness: event.Harness, repo: repo, invoker: event.Invoker, viaAgent: event.ViaAgent, mcpServer: event.MCPServer}
 		accumulator := primitives[key]
 		if accumulator == nil {
-			accumulator = &primitiveAccumulator{PrimitiveUsage: PrimitiveUsage{Name: event.Name, Kind: event.Kind, Harness: event.Harness, Repo: repo, Invoker: event.Invoker, ViaAgent: event.ViaAgent}, sessions: map[record.Identifier]struct{}{}}
+			accumulator = &primitiveAccumulator{PrimitiveUsage: PrimitiveUsage{Name: event.Name, Kind: event.Kind, Harness: event.Harness, Repo: repo, Invoker: event.Invoker, ViaAgent: event.ViaAgent, MCPServer: event.MCPServer}, sessions: map[record.Identifier]struct{}{}}
 			primitives[key] = accumulator
 		}
 		accumulator.Invocations++
@@ -221,7 +226,7 @@ func Aggregate(records []record.Record, rollup RepoRollup) Summary {
 		summary.Primitives = append(summary.Primitives, accumulator.PrimitiveUsage)
 	}
 	slices.SortFunc(summary.Primitives, func(left, right PrimitiveUsage) int {
-		return cmp.Or(cmp.Compare(right.Invocations, left.Invocations), cmp.Compare(string(left.Harness), string(right.Harness)), cmp.Compare(string(left.Name), string(right.Name)), cmp.Compare(string(left.Repo), string(right.Repo)), cmp.Compare(string(left.Invoker), string(right.Invoker)), cmp.Compare(string(left.ViaAgent), string(right.ViaAgent)))
+		return cmp.Or(cmp.Compare(right.Invocations, left.Invocations), cmp.Compare(string(left.Harness), string(right.Harness)), cmp.Compare(string(left.Name), string(right.Name)), cmp.Compare(string(left.Repo), string(right.Repo)), cmp.Compare(string(left.Invoker), string(right.Invoker)), cmp.Compare(string(left.ViaAgent), string(right.ViaAgent)), cmp.Compare(string(left.MCPServer), string(right.MCPServer)))
 	})
 	return summary
 }
@@ -233,6 +238,10 @@ type primitiveKey struct {
 	repo     record.Hash
 	invoker  record.Invoker
 	viaAgent record.Identifier
+	// mcpServer is functionally determined by name for an MCP tool, so it splits no
+	// real row. It is in the key anyway, so the key spans every field the value
+	// carries and no accumulator can merge two rows that differ.
+	mcpServer record.Identifier
 }
 
 type primitiveAccumulator struct {

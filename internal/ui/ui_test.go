@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/SupermodularAI/agents-wake/internal/inventory"
+	"github.com/SupermodularAI/agents-wake/internal/metrics"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 	"github.com/SupermodularAI/agents-wake/internal/repolabel"
 	"github.com/SupermodularAI/agents-wake/internal/store"
@@ -326,5 +327,22 @@ func TestPartialRequestDoesNotHoldTheConnection(t *testing.T) {
 	// A deadline error here means the server kept the half-written request open.
 	if _, err := io.ReadAll(conn); err != nil {
 		t.Errorf("reading a half-written request's connection error = %v, want the server to close it", err)
+	}
+}
+
+// TestViewLabelsAnUnmatchedServer pins that the dashboard reads its kind label from
+// the same accessor `wake report` does. Two renderers each deriving a display value
+// from raw fields is how the ERRORS cell drifted (DG-103).
+func TestViewLabelsAnUnmatchedServer(t *testing.T) {
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	result := view(metrics.Aggregate(nil, nil), []inventory.Usage{
+		{Harness: "claude-code", Kind: record.KindMCPServer, Name: "linear-server", Repo: "0123456789abcdef0123456789abcdef", Invocations: 3, Unmatched: true, LastUsed: at},
+	}, repolabel.Labels{})
+
+	if len(result.Usage) != 1 || len(result.Unused) != 0 {
+		t.Fatalf("view() = %+v, want the used server in Usage", result)
+	}
+	if result.Usage[0].Kind != "mcp server (unmatched)" {
+		t.Errorf("Kind = %q, want %q", result.Usage[0].Kind, "mcp server (unmatched)")
 	}
 }

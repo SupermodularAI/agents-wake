@@ -124,7 +124,7 @@ const (
 	// langfuse.trace.name and the twelve session-grain keys are all conditional —
 	// the first two on a resolved label and nothing else (ADR-0038 §1) — so this
 	// sizes the allocation for the widest span rather than for every span.
-	maxSpanAttributes = 35
+	maxSpanAttributes = 36
 )
 
 // errEncode is deliberately valueless. A diagnostic that quoted the record it
@@ -314,6 +314,19 @@ func spanAttributes(r record.Record, labels RepoLabels) []keyValue {
 	attrs = appendString(attrs, "langfuse.trace.name", labelFor(labels, r.Repo))
 	attrs = appendString(attrs, "wake.package", string(r.Package))
 	attrs = appendString(attrs, "wake.package_version", string(r.PackageVersion))
+	// wake.mcp_server is the server segment the record already carries. It is a
+	// widening of the key set, not of the exposure: the same characters already
+	// leave the machine inside wake.name ("mcp__claude-in-chrome__computer"), and
+	// this projects them into their own bounded attribute so a receiver can group by
+	// server instead of parsing a tool name. No prompt text, no tool arguments, no
+	// tool output (ADR-0027, ADR-0030).
+	//
+	// Emitted on every span whose record carries the field, never gated to one span
+	// of a trace and never propagated from an anchor: an attribute a receiver groups
+	// by has to ride every span the grouping should reach, carrying that span's own
+	// value (ADR-0038 §1, §2). appendString turns absent into no attribute, so a
+	// non-MCP span emits nothing.
+	attrs = appendString(attrs, "wake.mcp_server", string(r.MCPServer))
 	if r.Source != nil {
 		attrs = appendString(attrs, "wake.source", string(*r.Source))
 	}
