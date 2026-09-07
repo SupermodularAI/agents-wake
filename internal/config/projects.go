@@ -74,6 +74,13 @@ type projectEntry struct {
 	// form. The separator rejection in valid() below is the floor; the encoder
 	// re-validates the value as a bounded token on the way out and omits it whole
 	// when it fails.
+	//
+	// It is this entry's own name. Since DG-104 the value that travels for a *linked
+	// worktree's* records is not this field but the label of the repository it
+	// belongs to, resolved by ProjectLabels from BelongsTo — the worktree's own hash
+	// still travels as wake.repo, so the two attributes disagree on purpose. This is
+	// still the only field of this file whose value may leave the machine, whichever
+	// entry it is read from.
 	Label string `json:"label"`
 	// Root is the canonical consented root — absolute, clean, and with symlinks
 	// already resolved at registration.
@@ -111,10 +118,29 @@ type projectEntry struct {
 	// It is covered by MatchMAC, so a boundary edited or deleted by hand refuses the
 	// entry rather than widening what the next scan imports.
 	CollectFrom string `json:"collect_from,omitempty"`
+	// BelongsTo is the id of the repository this entry is a linked git worktree of,
+	// or empty when it is not one — or when its parent was never consented on this
+	// machine.
+	//
+	// It is a relation and never an identity. This entry keeps its own id, its own
+	// root and its own row: a worktree is its own repository and needs its own
+	// `init` (ADR-0019 §6), and derivation never reads this field, so a worktree's
+	// records still carry the worktree's own hash (ADR-0019 §1, §3). What it changes
+	// is where the entry's activity is *rendered* and which readable label its
+	// records carry on the wire — both resolved after the fact, from this id.
+	//
+	// It names an id recorded in this same table, never a path, so this file gains
+	// no second spelling of a repository location. It is recorded once, at
+	// registration, and never moved or cleared: re-pointing it would re-attribute
+	// one repository's rendered rows and its outgoing wake.repo_label at another
+	// repository — which is exactly the edit MatchMAC covers it to refuse when a
+	// hand makes it.
+	BelongsTo string `json:"belongs_to,omitempty"`
 	// MatchMAC is the keyed digest over everything resolution matches against:
 	// the canonical root, every alias, and the case-folding flag (ADR-0019 §3
 	// applied to the whole of what the entry resolves with) — and, since ADR-0025,
-	// the collection boundary it applies.
+	// the collection boundary it applies, and since DG-104 the repository it
+	// belongs to.
 	//
 	// ID covers Root and nothing else, so on its own it leaves the rest of the
 	// entry hand-editable: an alias added beside a legitimate root attributes a
@@ -156,6 +182,12 @@ func (e projectEntry) valid() bool {
 		}
 	}
 	if _, ok := parseCollectFrom(e.CollectFrom); !ok {
+		return false
+	}
+	// A relation names an entry in this table by id. Self-reference is refused
+	// rather than ignored: an entry that belongs to itself is not a worktree, and
+	// every reader of the field would have to defend against the cycle.
+	if e.BelongsTo != "" && (!validID(e.BelongsTo) || e.BelongsTo == e.ID) {
 		return false
 	}
 	return true

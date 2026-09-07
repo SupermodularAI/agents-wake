@@ -160,12 +160,18 @@ func (r *Repos) trustworthy(entries []projectEntry) (kept []projectEntry, refuse
 	for _, entry := range entries {
 		idOK := hmac.Equal([]byte(entry.ID), []byte(r.hashRoot(entry.Root)))
 		matchOK := hmac.Equal([]byte(entry.MatchMAC), []byte(r.matchMAC(entry)))
-		// An unbounded entry may also carry the digest a build from before the
-		// collection boundary existed wrote (legacyMatchMAC): the alternative is that
-		// adding a field to the digest silently stops resolving every repository
-		// already recorded. A bounded entry has exactly one acceptable digest.
-		if !matchOK && entry.CollectFrom == "" {
-			matchOK = hmac.Equal([]byte(entry.MatchMAC), []byte(r.legacyMatchMAC(entry)))
+		// An entry that records no relation may also carry the digest a build from
+		// before the relation existed wrote, and one that records neither a relation
+		// nor a boundary may carry the one from before the boundary existed. The
+		// alternative is that adding a field to the digest silently stops resolving
+		// every repository already recorded. Each fallback is admitted only for an
+		// entry that lacks the field it drops: a field this build wrote can never be
+		// edited out into a digest this build honours.
+		if !matchOK && entry.BelongsTo == "" {
+			matchOK = hmac.Equal([]byte(entry.MatchMAC), []byte(r.preRelationMatchMAC(entry)))
+			if !matchOK && entry.CollectFrom == "" {
+				matchOK = hmac.Equal([]byte(entry.MatchMAC), []byte(r.legacyMatchMAC(entry)))
+			}
 		}
 		if !idOK || !matchOK {
 			refused++
@@ -600,7 +606,7 @@ const matchMACDomain = "wake/match-mac/v1"
 // matchMAC is the keyed digest over everything resolution matches an observed
 // working directory against — the entry's canonical root, its aliases in recorded
 // order, and its case-folding flag — followed by the instant collection begins for
-// it.
+// it and by the repository it belongs to.
 //
 // The boundary is in here because nothing else protects it. The id covers the root
 // alone, so a `collect_from` deleted out of a 0600 file would leave an entry that
@@ -608,26 +614,56 @@ const matchMACDomain = "wake/match-mac/v1"
 // counter, and a disclosure that had already promised otherwise (ADR-0025). Covered,
 // the same edit refuses the entry.
 //
+// The relation is in here for the same reason. It decides which repository this
+// entry's invocations are counted under and whose readable label its records carry
+// on the wire, so a `belongs_to` written or removed by hand would re-attribute one
+// repository's rendered rows — and one repository's outgoing wake.repo_label — at
+// another, with nothing else in the file to refuse it.
+//
 // Not truncated, unlike the id: this value is never printed and never persisted
 // anywhere but the local table, so there is no brevity to trade the margin for.
 //
-// The parts are NUL-separated, which is injective here because neither a path nor an
-// RFC3339 timestamp can contain a NUL byte — so no two different entries encode to
-// the same input, and moving an alias's spelling into the root cannot produce the
-// same digest as leaving it where it was. The boundary sits last and is always
-// terminated, so an entry with no boundary is not the same input as one whose
-// boundary was dropped from the encoding.
+// The parts are NUL-separated, which is injective here because neither a path, an
+// RFC3339 timestamp nor a hex id can contain a NUL byte — so no two different
+// entries encode to the same input, and moving an alias's spelling into the root
+// cannot produce the same digest as leaving it where it was. The boundary and the
+// relation each sit last in turn and are always terminated, so an entry with neither
+// is not the same input as one whose boundary or relation was dropped from the
+// encoding.
 func (r *Repos) matchMAC(entry projectEntry) string {
-	buf := append(matchInput(entry), entry.CollectFrom...)
+	buf := append(preRelationMatchInput(entry), entry.BelongsTo...)
 	return hex.EncodeToString(keyeddigest.Sum(r.salt, append(buf, 0)))
+}
+
+// preRelationMatchMAC is matchMAC's construction from before the worktree relation
+// joined what the digest covers (DG-104).
+//
+// It is accepted on read, and only for an entry that records no relation — which is
+// every entry a build writing this construction could have written. Both halves are
+// load-bearing, for the reason legacyMatchMAC gives: without the fallback, adding a
+// field to the digest stops resolving every repository already recorded; without the
+// restriction, stripping a recorded relation would produce an entry this build still
+// accepts, and a worktree's rows would quietly stop being counted under the
+// repository they were consented to.
+func (r *Repos) preRelationMatchMAC(entry projectEntry) string {
+	return hex.EncodeToString(keyeddigest.Sum(r.salt, preRelationMatchInput(entry)))
+}
+
+// preRelationMatchInput is the NUL-separated digest input up to but not including
+// the relation. It is split out for the reason matchInput is: the accepted older
+// construction is this input exactly, which is what makes accepting it a statement
+// about one appended field rather than about a second encoder.
+func preRelationMatchInput(entry projectEntry) []byte {
+	return append(append(matchInput(entry), entry.CollectFrom...), 0)
 }
 
 // legacyMatchMAC is matchMAC's construction from before the collection boundary
 // joined what the digest covers (ADR-0025).
 //
-// It is accepted on read, and only for an entry that records no boundary — which is
-// every entry a build writing this construction could have written. Both halves of
-// that sentence are load-bearing. Without the fallback, adding a field to the digest
+// It is accepted on read, and only for an entry that records neither a boundary nor
+// a relation — every entry a build writing this construction could have written is
+// in exactly that state. Both halves of that sentence are load-bearing. Without the
+// fallback, adding a field to the digest
 // would stop resolving every repository already in projects.json, and each would
 // hash as itself with Matched false until the user happened to re-run `wake init`.
 // Without the restriction, stripping a recorded boundary would produce an entry this

@@ -1285,6 +1285,7 @@ func TestTheKeyedDigestSitesMatchTheConstructionWrittenLonghand(t *testing.T) {
 		Aliases:         []string{"/private/some/consented/root"},
 		CaseInsensitive: true,
 		CollectFrom:     "2026-08-19T12:00:00Z",
+		BelongsTo:       strings.Repeat("ab", idHexLen/2),
 	}
 	buf := append([]byte(matchMACDomain), 0)
 	buf = append(buf, 'f', 0)
@@ -1298,13 +1299,28 @@ func TestTheKeyedDigestSitesMatchTheConstructionWrittenLonghand(t *testing.T) {
 	legacy := hex.EncodeToString(longhand(salt, buf))
 	buf = append(buf, entry.CollectFrom...)
 	buf = append(buf, 0)
+	// The relation sits after the boundary, terminated for the same reason
+	// (DG-104, matchMAC).
+	preRelation := hex.EncodeToString(longhand(salt, buf))
+	buf = append(buf, entry.BelongsTo...)
+	buf = append(buf, 0)
 	got := repos.matchMAC(entry)
 	if want := hex.EncodeToString(longhand(salt, buf)); got != want {
 		t.Errorf("matchMAC() = %q, want %q", got, want)
 	}
-	// And the construction from before the boundary joined the digest is exactly the
+	// And the construction from before the relation joined the digest is exactly the
 	// input without it, which is the whole of what accepting it on read admits.
-	unbounded := entry
+	unrelated := entry
+	unrelated.BelongsTo = ""
+	if before := repos.preRelationMatchMAC(unrelated); before != preRelation {
+		t.Errorf("preRelationMatchMAC() = %q, want %q", before, preRelation)
+	}
+	if repos.matchMAC(unrelated) == preRelation {
+		t.Error("matchMAC() equals the pre-relation construction for an unrelated entry; a stripped relation would then verify")
+	}
+	// The construction from before the boundary joined the digest drops both, and is
+	// admitted only for an entry that records neither.
+	unbounded := unrelated
 	unbounded.CollectFrom = ""
 	if before := repos.legacyMatchMAC(unbounded); before != legacy {
 		t.Errorf("legacyMatchMAC() = %q, want %q", before, legacy)
@@ -1776,5 +1792,142 @@ func TestABoundaryDeletedByHandRefusesTheEntry(t *testing.T) {
 	// §9), and asserting on it would prove nothing either way.
 	if identity := mustIdentify(t, r, filepath.Join(root, "pkg")); identity.Matched || identity.ID == id {
 		t.Errorf("Identify() = %+v, want an unmatched identity different from %q", identity, id)
+	}
+}
+
+// The worktree relation is covered by the match digest, so adding one by hand
+// refuses the entry instead of re-pointing where a repository's rows are rendered.
+//
+// This is the same argument the boundary makes, on a different field. An entry's id
+// covers its root alone, so without this a `belongs_to` could be written into a 0600
+// file and the next report would count one repository's invocations under another —
+// and send that other repository's label out as wake.repo_label.
+func TestARelationAddedByHandRefusesTheEntry(t *testing.T) {
+	p := testPaths(t)
+	root := mkdirAll(t, filepath.Join(tempRealDir(t), "repo"))
+	id := mustRegister(t, openRepos(t, p), root, "repo")
+
+	var table projectsFile
+	if err := json.Unmarshal([]byte(readFileOrFail(t, p.ProjectsFile)), &table); err != nil {
+		t.Fatalf("re-reading the recorded table: %v", err)
+	}
+	if len(table.Projects) != 1 || table.Projects[0].BelongsTo != "" {
+		t.Fatalf("projects.json = %s, want one entry recording no relation", readFileOrFail(t, p.ProjectsFile))
+	}
+	// Only the relation is inserted. Every other byte, the recorded digest included,
+	// is the one this build wrote.
+	edited := table
+	edited.Projects = []projectEntry{table.Projects[0]}
+	edited.Projects[0].BelongsTo = hexID('a')
+	raw, err := json.MarshalIndent(edited, "", "  ")
+	if err != nil {
+		t.Fatalf("re-encoding the edited table: %v", err)
+	}
+	writeProjectsJSON(t, p, string(raw)+"\n")
+
+	r := openRepos(t, p)
+	if dropped := r.DroppedEntries(); dropped != 1 {
+		t.Errorf("DroppedEntries() = %d, want 1 — a relation added by hand must refuse the entry", dropped)
+	}
+	if identity := mustIdentify(t, r, filepath.Join(root, "pkg")); identity.Matched || identity.ID == id {
+		t.Errorf("Identify() = %+v, want an unmatched identity different from %q", identity, id)
+	}
+}
+
+// And the other direction: a relation this build recorded cannot be edited out into
+// an entry this build still accepts.
+//
+// Without this half, the pre-relation construction accepted on read would be a hole
+// rather than a compatibility step — strip `belongs_to` and a worktree's rows quietly
+// stop being counted under the repository the user consented them to.
+func TestARelationDeletedByHandRefusesTheEntry(t *testing.T) {
+	p := testPaths(t)
+	const root = "/a/worktree"
+	entry := projectEntry{
+		ID:        derivedID(t, p, root),
+		Label:     "worktree",
+		Root:      root,
+		BelongsTo: hexID('a'),
+	}
+	entry.MatchMAC = derivedMAC(t, p, entry)
+	table := projectsFile{Version: projectsVersion, Projects: []projectEntry{entry}}
+	raw, err := json.MarshalIndent(table, "", "  ")
+	if err != nil {
+		t.Fatalf("encoding the table: %v", err)
+	}
+	writeProjectsJSON(t, p, string(raw)+"\n")
+	if r := openRepos(t, p); r.DroppedEntries() != 0 {
+		t.Fatalf("DroppedEntries() = %d before the edit, want 0 — the table under test must start out trusted", r.DroppedEntries())
+	}
+
+	stripped := table
+	stripped.Projects = []projectEntry{entry}
+	stripped.Projects[0].BelongsTo = ""
+	raw, err = json.MarshalIndent(stripped, "", "  ")
+	if err != nil {
+		t.Fatalf("re-encoding the edited table: %v", err)
+	}
+	writeProjectsJSON(t, p, string(raw)+"\n")
+
+	r := openRepos(t, p)
+	if dropped := r.DroppedEntries(); dropped != 1 {
+		t.Errorf("DroppedEntries() = %d, want 1 — a relation removed by hand must refuse the entry", dropped)
+	}
+	if identity := mustIdentify(t, r, root+"/pkg"); identity.Matched {
+		t.Errorf("Identify() = %+v, want an unmatched identity", identity)
+	}
+}
+
+// The upgrade half: a table digested before the relation joined the digest still
+// resolves, so adding the field does not silently stop recognising every repository
+// already in projects.json.
+//
+// It is the same compatibility statement ADR-0025 made for the collection boundary,
+// applied a second time — and it is the reason the pre-relation construction is
+// accepted on read at all.
+func TestATableSignedBeforeTheRelationExistedStillResolves(t *testing.T) {
+	p := testPaths(t)
+	// Opened once so the salt exists, then read directly: the expected digest must
+	// come from the salt rather than from the code under test.
+	openRepos(t, p)
+	salt, err := os.ReadFile(p.SaltFile)
+	if err != nil {
+		t.Fatalf("reading the salt: %v", err)
+	}
+	longhand := func(data []byte) []byte {
+		mac := hmac.New(sha256.New, salt)
+		if _, writeErr := mac.Write(data); writeErr != nil {
+			t.Fatalf("writing to the MAC: %v", writeErr)
+		}
+		return mac.Sum(nil)
+	}
+
+	const root = "/a/pre-relation"
+	const boundary = "2026-08-19T12:00:00Z"
+	id := hex.EncodeToString(longhand([]byte(root)))[:idHexLen]
+	// The construction from before the relation: domain, fold byte, spellings, then
+	// the boundary — and nothing after it.
+	buf := append([]byte(matchMACDomain), 0, 0)
+	buf = append(buf, root...)
+	buf = append(buf, 0)
+	buf = append(buf, boundary...)
+	buf = append(buf, 0)
+	mac := hex.EncodeToString(longhand(buf))
+
+	writeProjectsJSON(t, p, fmt.Sprintf(`{
+  "version": 1,
+  "projects": [
+    {"id": %q, "label": "pre-relation", "root": %q, "case_insensitive": false, "collect_from": %q, "match_mac": %q}
+  ]
+}
+`, id, root, boundary, mac))
+
+	r := openRepos(t, p)
+	if dropped := r.DroppedEntries(); dropped != 0 {
+		t.Fatalf("DroppedEntries() = %d, want 0 — this build refused a table written before the relation existed", dropped)
+	}
+	identity := mustIdentify(t, r, root+"/pkg")
+	if !identity.Matched || identity.ID != id {
+		t.Fatalf("Identify() = %+v, want the recorded id %s matched", identity, id)
 	}
 }
