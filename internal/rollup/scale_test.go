@@ -319,3 +319,62 @@ func TestPruneKeepsWhatAViewOverTheWholeStoreReads(t *testing.T) {
 		t.Errorf("a second seal wrote %d and pruned %d with a frontier below the head", again.Sealed, again.Pruned)
 	}
 }
+
+// TestChurnIsBoundedByHowFarTheHeadMoved states the steady-state cost of the
+// design, so the "cost is the new frontier" claim is a measured property rather
+// than a hope.
+//
+// A repeated seal at an unchanged head is free. A seal after the head advances
+// is not: the verbatim floor slides forward, blocks that were above it fall
+// below, and the fine blocks in the newly covered region are written and then
+// superseded by the coarser tier above them. What matters is that the work
+// scales with how far the head moved and not with how much history exists —
+// otherwise the claim is false however small the constant.
+func TestChurnIsBoundedByHowFarTheHeadMoved(t *testing.T) {
+	if testing.Short() {
+		t.Skip("seeds 12,000 records in steps")
+	}
+	dataDir := t.TempDir()
+	events := store.New(filepath.Join(dataDir, "events.ndjson"))
+	if _, err := Seal(dataDir, events, 0, 0); err != nil {
+		t.Fatalf("enabling: %v", err)
+	}
+
+	const step = 500
+	written := 0
+	var early, late int
+	for round := range 24 {
+		appendRecords(t, events, written, step)
+		written += step
+		result, err := Seal(dataDir, events, uint64(written), uint64(written))
+		if err != nil {
+			t.Fatalf("round %d: %v", round, err)
+		}
+		work := result.Sealed + result.Pruned
+		switch round {
+		case 1:
+			early = work
+		case 23:
+			late = work
+		}
+
+		// A second seal at the same head must cost nothing at all.
+		repeat, err := Seal(dataDir, events, uint64(written), uint64(written))
+		if err != nil {
+			t.Fatalf("round %d repeat: %v", round, err)
+		}
+		if repeat.Sealed != 0 || repeat.Pruned != 0 {
+			t.Fatalf("round %d: a repeated seal at head %d wrote %d and pruned %d, want 0 and 0",
+				round, written, repeat.Sealed, repeat.Pruned)
+		}
+	}
+
+	// Twenty-four times the history, and the per-step work must not have grown
+	// with it. Generous slack: the assertion is about the shape, not the
+	// constant.
+	if late > 3*early {
+		t.Errorf("per-step work grew from %d to %d blocks as history grew 24x, which is not bounded by the frontier",
+			early, late)
+	}
+	t.Logf("per-step work: %d blocks at 1,000 records, %d at %d", early, late, written)
+}

@@ -318,10 +318,7 @@ func sealFrom(dir string, source *store.Store, frontier, head, floor uint64) (Se
 
 	// Which blocks a view would read, decided before anything is written, so a
 	// block that would be pruned is never written in the first place.
-	wanted, err := plannedBlocks(dir, head, frontier, floor)
-	if err != nil {
-		return result, err
-	}
+	wanted := plannedBlocks(head, frontier, floor)
 
 	// Tier 1 is reduced from records; every higher tier is merged from the tier
 	// below. Blocks live in this map whether or not they are written, so a tier
@@ -486,7 +483,17 @@ func reduceTier1(dir string, source *store.Store, complete, floor uint64, wanted
 // and no block is written only to be pruned. Blocks above the verbatim floor are
 // included even though today's walk does not read them: the floor moves forward
 // with the head, and they are the coarse material the next walk will use.
-func plannedBlocks(dir string, head, frontier, floor uint64) (map[blockID]struct{}, error) {
+//
+// A repeated seal at an unchanged head is therefore free — nothing written,
+// nothing pruned, which is the case a hook-fired scan hits on every session end.
+// A seal after the head advances is not free and is not meant to be: the
+// verbatim floor slides forward, so blocks that were above it fall below and the
+// fine blocks in the newly covered region are written and then superseded by the
+// coarser tier above them. That churn is bounded by how far the head moved
+// rather than by how much history exists — about Fanout blocks per Fanout new
+// positions — which is the "cost is the new frontier" property. It is not zero,
+// and a reader of these numbers should not expect it to be.
+func plannedBlocks(head, frontier, floor uint64) map[blockID]struct{} {
 	available := make(map[blockID]Block)
 	span := uint64(1)
 	for tier := uint(1); tier <= MaxTier; tier++ {
@@ -508,7 +515,7 @@ func plannedBlocks(dir string, head, frontier, floor uint64) (map[blockID]struct
 			wanted[id] = struct{}{}
 		}
 	}
-	return wanted, nil
+	return wanted
 }
 
 // blockState reports whether a block is present and readable, present but
