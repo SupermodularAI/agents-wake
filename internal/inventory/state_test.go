@@ -2,6 +2,7 @@ package inventory
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -578,4 +579,38 @@ func foldedDiscovery(proved bool) Discovery {
 		}
 	}
 	return discovery
+}
+
+// TestUsageErrorRateCarriesTheStoredCountsAsAPopulation pins the inverse of the
+// flattening derive does: the four counts a snapshot stores go back out as the
+// Ratio they came from, with the unrated calls excluded from the denominator
+// rather than counted as successes (ADR-0005, ADR-0006). It lives here because
+// this is where a renderer used to be told to rebuild the rate itself (DG-103).
+func TestUsageErrorRateCarriesTheStoredCountsAsAPopulation(t *testing.T) {
+	usage := Usage{Harness: "claude-code", Kind: record.KindSkill, Name: "flaky", Repo: "0123456789abcdef0123456789abcdef", Invocations: 4, Failures: 1, Unknown: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)}
+	if !usage.valid() {
+		t.Fatalf("fixture is not a snapshot row Read would accept: %+v", usage)
+	}
+	ratio := usage.ErrorRate()
+	for _, test := range []struct {
+		name string
+		got  uint64
+		want uint64
+	}{
+		{name: "numerator", got: ratio.Numerator(), want: 1},
+		{name: "denominator", got: ratio.Denominator(), want: 3},
+		{name: "excluded", got: ratio.Excluded(), want: 1},
+		{name: "total", got: ratio.Total(), want: 4},
+	} {
+		if test.got != test.want {
+			t.Errorf("ErrorRate().%s = %d, want %d", test.name, test.got, test.want)
+		}
+	}
+	percent, ok := ratio.Percent()
+	if !ok {
+		t.Fatalf("ErrorRate().Percent() reported no rate for a rated population")
+	}
+	if got := fmt.Sprintf("%.1f", percent); got != "33.3" {
+		t.Errorf("ErrorRate().Percent() = %s, want 33.3", got)
+	}
 }

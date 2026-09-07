@@ -67,9 +67,11 @@ func spoolLines(t *testing.T, path string) int {
 // PRIMITIVE, TYPE, HARNESS, REPO and LAST USED, rather than a substring search or a
 // from-the-end offset: those five columns are each a single token by construction — a
 // repository cell is either a bounded token or repo-<hex>, neither of which holds
-// whitespace — but ERRORS (last) renders as two tokens ("1 (33.3%)") whenever a primitive
-// has failures, which would shift a from-the-end offset onto the failure count instead of
-// CALLS.
+// whitespace — but ERRORS (last) is multi-token whenever a primitive has failures, which
+// would shift a from-the-end offset onto some part of the error cell instead of CALLS.
+// Since DG-103 that cell carries its own denominator ("1 of 3 rated (33.3%); 1 unrated"),
+// so it now runs to six tokens rather than two: anchoring from the front was already the
+// only stable choice, and the widened cell makes it more so, not less.
 func reportedCalls(t *testing.T, rendered, name string) string {
 	t.Helper()
 	const callsIndex = 5 // PRIMITIVE, TYPE, HARNESS, REPO, LAST USED, then CALLS

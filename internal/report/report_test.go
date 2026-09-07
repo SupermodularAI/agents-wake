@@ -50,10 +50,11 @@ func TestRenderShowsPrimitiveActivityAndLastObserved(t *testing.T) {
 	}
 }
 
-func TestRenderShowsPerPrimitiveErrorsAsCountAndPercentage(t *testing.T) {
+func TestRenderShowsPerPrimitiveErrorsWithTheRatedPopulation(t *testing.T) {
 	summary := metrics.Aggregate(nil)
 	available := []inventory.Usage{
 		{Harness: "claude-code", Kind: record.KindSkill, Name: "flaky", Repo: "0123456789abcdef0123456789abcdef", Invocations: 4, Failures: 1, Unknown: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "partly-rated", Repo: "0123456789abcdef0123456789abcdef", Invocations: 2, Failures: 1, Unknown: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)},
 		{Harness: "claude-code", Kind: record.KindSkill, Name: "solid", Repo: "0123456789abcdef0123456789abcdef", Invocations: 2, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)},
 	}
 
@@ -62,9 +63,21 @@ func TestRenderShowsPerPrimitiveErrorsAsCountAndPercentage(t *testing.T) {
 		t.Fatalf("Render() error = %v", err)
 	}
 	text := output.String()
-	// flaky: 1 failure out of 3 known (4 invocations, 1 excluded as unknown).
-	if !strings.Contains(text, "flaky") || !strings.Contains(text, "33.3%") {
-		t.Fatalf("report missing flaky primitive's error rate:\n%s", text)
+	// flaky: 1 failure out of the 3 calls that were rated at all (4 invocations,
+	// 1 excluded as unknown). The denominator is in the cell because it is not
+	// the CALLS column beside it.
+	if line := lineStartingWith(text, "flaky"); !strings.Contains(line, "1 of 3 rated (33.3%); 1 unrated") {
+		t.Fatalf("flaky primitive's error cell lost its rated population, got %q:\n%s", line, text)
+	}
+	// DG-103's case. The first assertion is the shape; the second is the bug:
+	// 2 calls with 1 error and 1 unreported outcome used to render "1 (100.0%)",
+	// two correct numbers a reader joins into a false one against CALLS.
+	line := lineStartingWith(text, "partly-rated")
+	if !strings.Contains(line, "1 of 1 rated (100.0%); 1 unrated") {
+		t.Fatalf("partially-rated primitive's error cell = %q, want its rated population:\n%s", line, text)
+	}
+	if strings.Contains(line, "1 (100.0%)") {
+		t.Fatalf("partially-rated primitive still prints a percentage with no denominator: %q", line)
 	}
 	if line := lineStartingWith(text, "solid"); !strings.Contains(line, "0") || strings.Contains(line, "%") {
 		t.Fatalf("failure-free primitive should report a bare 0, got %q:\n%s", line, text)
