@@ -147,6 +147,15 @@ func (s *Store) Refresh(source EventSource, discovered Discovery) error {
 // A carried entry brings no provenance of its own — it is a name from a previous
 // snapshot, not a source — so it can never create a fold; it is only ever folded by
 // one the current pass proved.
+//
+// An unmatched row is not carried, because it is not one of those names: it was
+// derived from invocations of an MCP server no discovered config key accounted for
+// (see Usage.Unmatched). Carrying it would hand the next pass a segment that looks
+// discovered, and the row would be republished as a plain server — the snapshot
+// asserting a match no config key supports, and a phantom the events could later
+// leave behind at zero invocations in `--unused`. Nothing is lost by dropping it:
+// derive rebuilds an unmatched row from the event spool, flagged, for as long as
+// the calls are there to justify it (ADR-0039 §4, plan §3.4).
 func (s *Store) available(discovered Discovery) []Primitive {
 	if discovered.ProjectScanned {
 		return discovered.Primitives
@@ -157,6 +166,9 @@ func (s *Store) available(discovered Discovery) []Primitive {
 	}
 	carried := slices.Clone(discovered.Primitives)
 	for _, usage := range previous {
+		if usage.Unmatched {
+			continue
+		}
 		carried = append(carried, Primitive{Harness: usage.Harness, Kind: usage.Kind, Name: usage.Name})
 	}
 	return carried

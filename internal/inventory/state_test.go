@@ -855,3 +855,39 @@ func TestRefreshDoesNotFoldAServerThroughCanonical(t *testing.T) {
 		t.Fatalf("server row = %+v, want an mcp_server with 1 invocation", server)
 	}
 }
+
+// An unmatched row is an observation, not a discovery. A pass whose project-local
+// discovery was withheld carries the previous snapshot's names forward, and if it
+// carried this one the segment would look discovered on the next pass: the flag
+// would clear and the report would assert a match no config key supports (ADR-0039
+// §4). The calls are re-derived from the spool either way, so the row comes back —
+// still flagged.
+func TestRefreshKeepsAnUnmatchedServerFlaggedAcrossAnUnscannedPass(t *testing.T) {
+	repo := record.Hash("0123456789abcdef0123456789abcdef")
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	events := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	if _, err := events.Append([]record.Record{
+		mcpToolRecord("one", "mcp__linear-server__list_issues", "linear-server", repo, at),
+	}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
+	if err := primitives.Refresh(events, mcpServerDiscovery("linear")); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	withheld := mcpServerDiscovery("linear")
+	withheld.ProjectScanned = false
+	if err := primitives.Refresh(events, withheld); err != nil {
+		t.Fatalf("unscanned Refresh() error = %v", err)
+	}
+
+	items, err := primitives.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	observed := usageNamed(t, items, "linear-server")
+	if observed.Kind != record.KindMCPServer || observed.Invocations != 1 || !observed.Unmatched {
+		t.Fatalf("observed row = %+v, want an unmatched mcp_server with 1 invocation", observed)
+	}
+}
