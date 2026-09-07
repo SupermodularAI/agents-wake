@@ -17,7 +17,13 @@ called out under Changed.
   decision about an approved set — of the 159 such records on the first machine
   Wake was installed on, every one was a builtin Bash call. The old name invited
   a reader to take it for the latter. A store holding version 6 is refused on
-  read and re-derived from the harness's own history by the next scan; the
+  read and re-derived from the harness's own history by the next scan you ask
+  for (`wake ingest`) — a hook-fired scan reports the count and leaves the spool
+  alone, since it collects inside each repository's boundary and could not put
+  the records back (`wake doctor` shows the pending count under "records from an
+  earlier schema version"). If you collect only through the hooks `wake init`
+  installs, run `wake ingest` once after upgrading, or the version-6 records
+  stay unreadable and `wake report` shows only what was written since. The
   delivery watermark stamps the schema version and starts over on a bump, so
   nothing needs migrating by hand. Anything grouping on the old string — a saved
   query or a dashboard panel — needs updating.

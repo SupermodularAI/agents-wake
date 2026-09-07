@@ -32,14 +32,22 @@ import (
 // yields an entry the session grain can date itself from. Version 6, unlike 4 and 5,
 // does add a dimension: a nullable parent_event_id, the event_id of a record's parent
 // invocation, derived from the child's own source event and never generated
-// (ADR-0035 §2). Version 7 adds no field: it renames the outcome value the harness's
-// own permission rule produces, from denied_policy to denied_by_harness_rule. The old
-// name claimed more than the value could carry — it reads as a governance decision,
-// and what it records is the developer's own Claude Code permission rule refusing a
-// tool. Every one of the 159 such records on the first machine Wake was installed on
-// was a builtin Bash call; none was a skill, subagent or MCP server. A stored value
-// whose name overstates the check is the defect ADR-0004 exists to prevent, so the
-// rename is a schema change by the same rule as 4 and 5.
+// (ADR-0035 §2). Version 7 adds no field and derives no id differently: it renames
+// the outcome value the harness's own permission rule produces, from denied_policy to
+// denied_by_harness_rule. The old name claimed more than the value could carry — it
+// reads as a governance decision, and what it records is the developer's own Claude
+// Code permission rule refusing a tool. Every one of the 159 such records on the first
+// machine Wake was installed on was a builtin Bash call; none was a skill, subagent or
+// MCP server. The outcome domain is part of the stored contract this file refuses to
+// pass an unrecognised value through (ADR-0005, ADR-0007), so narrowing it is a schema
+// change — not by 4 and 5's id-derivation rule, which a rename does not touch, but
+// because the bump is the only thing that routes the old value to the arm that can
+// repair it. Validate checks the version before it checks the outcome, so without
+// the bump a version-6 line carrying denied_policy would match SchemaVersion and then
+// fail validOutcome: Decode returns a plain "invalid outcome", never
+// ErrUnsupportedVersion. Store.Stale counts only the latter (internal/store), so those
+// records would be dropped by store.Entries, counted by no health.Scan.StaleRecords,
+// and never rebuilt — the silent shrink the next paragraph is about.
 //
 // "Refused on read" is only half of that, and the half on its own is a silent
 // shrink: every consumer reads the spool through store.Entries, so a spool nobody
