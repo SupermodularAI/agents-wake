@@ -551,10 +551,10 @@ func spanTimes(r record.Record) (start, end string, ok bool) {
 //
 // denied_by_harness_rule and denied_user are also UNSET, and for a different
 // reason: they are known outcomes that are neither success nor failure. A
-// permission denial is the system working. record.IsFailure already draws that line for the local
-// metrics, so it is reused here rather than reimplemented — one classification,
-// one place to change it. It takes a non-pointer Outcome and is only reachable
-// after the nil branch has returned.
+// permission denial is the system working. record.IsFailure already draws that
+// line for the local metrics, so it is reused here rather than reimplemented —
+// one classification, one place to change it. It takes a non-pointer Outcome and
+// is only reachable after the nil branch has returned.
 func statusCode(outcome *record.Outcome) int {
 	switch {
 	case outcome == nil:
