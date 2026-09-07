@@ -614,3 +614,244 @@ func TestUsageErrorRateCarriesTheStoredCountsAsAPopulation(t *testing.T) {
 		t.Errorf("ErrorRate().Percent() = %s, want 33.3", got)
 	}
 }
+
+// mcpToolRecord is one MCP tool invocation carrying its observed server segment —
+// exactly what the Claude Code reader writes for an "mcp__<server>__<tool>" call.
+func mcpToolRecord(id, toolName, server string, repo record.Hash, timestamp time.Time) record.Record {
+	r := inventoryRecord(id, toolName, timestamp)
+	r.Kind = record.KindMCPTool
+	r.MCPServer = record.Identifier(server)
+	r.Repo = repo
+	return r
+}
+
+func mcpServerDiscovery(names ...string) Discovery {
+	discovery := Discovery{ProjectScanned: true}
+	for _, name := range names {
+		discovery.Primitives = append(discovery.Primitives, Primitive{Harness: "claude-code", Kind: record.KindMCPServer, Name: record.Identifier(name)})
+	}
+	return discovery
+}
+
+func usageNamed(t *testing.T, items []Usage, name record.Identifier) Usage {
+	t.Helper()
+	for _, item := range items {
+		if item.Name == name {
+			return item
+		}
+	}
+	t.Fatalf("inventory = %+v, want a row named %q", items, name)
+	return Usage{}
+}
+
+// TestRefreshRollsMCPToolCallsOntoAnExactlyNamedServer is DG-99's headline bug: a
+// configured server whose tools are used heavily still reported zero invocations,
+// so `--unused` recommended removing it. Its tools' calls now land on its row.
+func TestRefreshRollsMCPToolCallsOntoAnExactlyNamedServer(t *testing.T) {
+	repo := record.Hash("0123456789abcdef0123456789abcdef")
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	events := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	if _, err := events.Append([]record.Record{
+		mcpToolRecord("one", "mcp__claude-in-chrome__computer", "claude-in-chrome", repo, at),
+		mcpToolRecord("two", "mcp__claude-in-chrome__navigate", "claude-in-chrome", repo, at.Add(time.Minute)),
+	}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
+	if err := primitives.Refresh(events, mcpServerDiscovery("claude-in-chrome")); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	items, err := primitives.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	server := usageNamed(t, items, "claude-in-chrome")
+	if server.Kind != record.KindMCPServer {
+		t.Fatalf("server row = %+v, want kind mcp_server", server)
+	}
+	if server.Invocations != 2 {
+		t.Fatalf("server row = %+v, want 2 invocations — a used server must never read zero", server)
+	}
+	if server.Unmatched {
+		t.Errorf("server row = %+v, want Unmatched false for an exactly named server", server)
+	}
+	if server.Repo != repo || !server.LastUsed.Equal(at.Add(time.Minute)) {
+		t.Errorf("server row = %+v, want repo %q last used %v", server, repo, at.Add(time.Minute))
+	}
+}
+
+// The plugin triple is the case the normalisation exists for: the config key
+// carries colons, the tool name carries underscores, and the record must keep the
+// spelling it observed while the row is published under the configured key.
+func TestRefreshRollsMCPToolCallsOntoASanitisedPluginTriple(t *testing.T) {
+	repo := record.Hash("0123456789abcdef0123456789abcdef")
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	seeded := mcpToolRecord("one", "mcp__plugin_context7_context7__query-docs", "plugin_context7_context7", repo, at)
+	if seeded.MCPServer != "plugin_context7_context7" {
+		t.Fatalf("record stored a normalised guess: %q", seeded.MCPServer)
+	}
+	events := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	if _, err := events.Append([]record.Record{seeded}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
+	if err := primitives.Refresh(events, mcpServerDiscovery("plugin:context7:context7")); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	items, err := primitives.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	server := usageNamed(t, items, "plugin:context7:context7")
+	if server.Invocations != 1 || server.Unmatched {
+		t.Fatalf("server row = %+v, want 1 invocation and Unmatched false", server)
+	}
+}
+
+// A server the index cannot name still gets a row carrying its calls, flagged
+// unmatched. "collects nothing" is not "collects zero" (plan §12): reporting a used
+// server as zero is the failure mode this ticket exists to end.
+func TestRefreshReportsAServerWithNoDiscoveredMatchAsUnmatched(t *testing.T) {
+	repo := record.Hash("0123456789abcdef0123456789abcdef")
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	events := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	if _, err := events.Append([]record.Record{
+		mcpToolRecord("one", "mcp__linear-server__list_issues", "linear-server", repo, at),
+	}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
+	if err := primitives.Refresh(events, mcpServerDiscovery("linear")); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	items, err := primitives.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	observed := usageNamed(t, items, "linear-server")
+	if observed.Kind != record.KindMCPServer || observed.Invocations != 1 || !observed.Unmatched {
+		t.Fatalf("observed row = %+v, want an unmatched mcp_server with 1 invocation", observed)
+	}
+	configured := usageNamed(t, items, "linear")
+	if configured.Invocations != 0 || configured.Unmatched {
+		t.Fatalf("configured row = %+v, want 0 invocations and Unmatched false", configured)
+	}
+}
+
+// The roll-up is the same arithmetic the tool rows use, so the invariants
+// Usage.valid() asserts hold on a server row too: unknown outcomes stay out of the
+// failure denominator rather than counting as ok (ADR-0005, ADR-0006).
+func TestRefreshServerRowKeepsFailureAndUnknownInvariants(t *testing.T) {
+	failed, ok := record.OutcomeError, record.OutcomeOK
+	repo := record.Hash("0123456789abcdef0123456789abcdef")
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	first := mcpToolRecord("one", "mcp__claude-in-chrome__computer", "claude-in-chrome", repo, at)
+	first.Outcome = &failed
+	second := mcpToolRecord("two", "mcp__claude-in-chrome__navigate", "claude-in-chrome", repo, at.Add(time.Minute))
+	second.Outcome = &ok
+	third := mcpToolRecord("three", "mcp__claude-in-chrome__navigate", "claude-in-chrome", repo, at.Add(2*time.Minute))
+
+	events := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	if _, err := events.Append([]record.Record{first, second, third}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
+	if err := primitives.Refresh(events, mcpServerDiscovery("claude-in-chrome")); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	items, err := primitives.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	server := usageNamed(t, items, "claude-in-chrome")
+	if server.Invocations != 3 || server.Failures != 1 || server.Unknown != 1 {
+		t.Fatalf("server row = %+v, want 3 invocations, 1 failure, 1 unknown", server)
+	}
+	rate := server.ErrorRate()
+	if rate.Numerator() != 1 || rate.Denominator() != 2 || rate.Excluded() != 1 {
+		t.Fatalf("ErrorRate() = %+v", rate)
+	}
+}
+
+// A repository is a property of the invocation (ADR-0002), and the roll-up must not
+// launder that away: one server used in two repositories is two server rows.
+func TestRefreshSplitsAServerRowByRepository(t *testing.T) {
+	here, there := record.Hash("0123456789abcdef0123456789abcdef"), record.Hash("fedcba9876543210fedcba9876543210")
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	events := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	if _, err := events.Append([]record.Record{
+		mcpToolRecord("one", "mcp__claude-in-chrome__computer", "claude-in-chrome", here, at),
+		mcpToolRecord("two", "mcp__claude-in-chrome__computer", "claude-in-chrome", there, at.Add(time.Minute)),
+	}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
+	if err := primitives.Refresh(events, mcpServerDiscovery("claude-in-chrome")); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	items, err := primitives.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	repos := map[record.Hash]uint64{}
+	for _, item := range items {
+		if item.Kind == record.KindMCPServer {
+			repos[item.Repo] += item.Invocations
+		}
+	}
+	if len(repos) != 2 || repos[here] != 1 || repos[there] != 1 {
+		t.Fatalf("server rows by repo = %+v, want one invocation in each of two repositories", repos)
+	}
+}
+
+// Unmatched only ever describes an observed MCP server. A snapshot claiming
+// otherwise is refused rather than repaired (fail closed, plan §3.4).
+func TestReadRefusesAnUnmatchedFlagOnANonServerRow(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "primitives.json")
+	content := `{"version":2,"refreshed_at":"2026-08-13T12:00:00Z","primitives":[{"harness":"claude-code","kind":"skill","name":"review","repo":"0123456789abcdef0123456789abcdef","invocations":2,"unmatched":true,"last_used":"2026-08-13T12:00:00Z"}]}`
+	if err := os.WriteFile(statePath, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if _, err := New(statePath).Read(); err == nil {
+		t.Fatal("Read() accepted an unmatched flag on a skill row")
+	}
+}
+
+// The server roll-up is its own cross-kind path, built beside DG-106's fold and
+// never through it: canonicalIdentity never touches kind, and this must not make it
+// start.
+func TestRefreshDoesNotFoldAServerThroughCanonical(t *testing.T) {
+	repo := record.Hash("0123456789abcdef0123456789abcdef")
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	events := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	if _, err := events.Append([]record.Record{
+		mcpToolRecord("one", "mcp__brainstorming__go", "brainstorming", repo, at),
+	}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	discovery := foldedDiscovery(true)
+	discovery.Primitives = append(discovery.Primitives, Primitive{Harness: "claude-code", Kind: record.KindMCPServer, Name: "brainstorming"})
+	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
+	if err := primitives.Refresh(events, discovery); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	items, err := primitives.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	for _, item := range items {
+		if item.Kind == record.KindMCPServer && item.Name != "brainstorming" {
+			t.Fatalf("server row was folded onto %q", item.Name)
+		}
+	}
+	server := usageNamed(t, items, "brainstorming")
+	if server.Kind != record.KindMCPServer || server.Invocations != 1 {
+		t.Fatalf("server row = %+v, want an mcp_server with 1 invocation", server)
+	}
+}

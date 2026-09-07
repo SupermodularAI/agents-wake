@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/SupermodularAI/agents-wake/internal/atomicfile"
@@ -47,6 +48,27 @@ type Usage struct {
 	Failures    uint64            `json:"failures,omitempty"`
 	Unknown     uint64            `json:"unknown,omitempty"`
 	LastUsed    time.Time         `json:"last_used,omitempty"`
+	// Unmatched marks a row derived from invocations of an MCP server that no
+	// discovered config key accounts for: the calls happened, and the server they
+	// belong to could not be named from the inventory. It is reported rather than
+	// silently rendered as zero, which is the same discipline ADR-0005 applies to an
+	// unreported outcome and plan §12 applies to doctor — "collects nothing" is not
+	// "collects zero" (plan §3.3, §12).
+	//
+	// A bool, not a label: the snapshot's fields are identifiers, enums, timestamps
+	// and counters, and a bool is the tightest enumeration there is (ADR-0007).
+	Unmatched bool `json:"unmatched,omitempty"`
+}
+
+// KindLabel is this row's kind as a reader sees it, including the unmatched
+// marker. It lives here for ErrorRate's reason: two renderers each deriving a
+// display value from raw fields is how the ERRORS cell drifted (DG-103).
+func (u Usage) KindLabel() string {
+	label := strings.ReplaceAll(string(u.Kind), "_", " ")
+	if u.Unmatched {
+		label += " (unmatched)"
+	}
+	return label
 }
 
 // ErrorRate is this row's failure rate carrying the population it was measured
@@ -188,11 +210,11 @@ func derive(summary metrics.Summary, available []Primitive, canonical map[identi
 	// join below is on the identity — discovery has no repository to join on
 	// (ADR-0002) — while the rows it produces are per repository.
 	repos := make(map[identity][]record.Hash)
-	for _, primitive := range summary.Primitives {
-		if primitive.Kind == record.KindBuiltinTool {
-			continue
-		}
-		id := canonicalIdentity(canonical, identity{harness: primitive.Harness, kind: primitive.Kind, name: primitive.Name})
+	// accumulate sums one aggregate row onto one identity's row for one repository.
+	// It is shared by the primitive's own row and by the MCP server roll-up below,
+	// so a server's counts are the same arithmetic its tools' are and the ratio
+	// invariants Usage.valid asserts hold on both.
+	accumulate := func(id identity, primitive metrics.PrimitiveUsage) {
 		key := usageKey{identity: id, repo: primitive.Repo}
 		usage, seen := observed[key]
 		if !seen {
@@ -206,6 +228,34 @@ func derive(summary metrics.Summary, available []Primitive, canonical map[identi
 			usage.LastUsed = primitive.LastUsed
 		}
 		observed[key] = usage
+	}
+
+	index, discovered := serverIndex(available)
+	// unnamed is which server rows this pass built from invocations of a server no
+	// discovered config key accounts for, so they can still be published below.
+	// Every other kind is published from the available side alone; an MCP server is
+	// the one case where an observed row with no discovered counterpart is the
+	// answer rather than noise, because the calls provably happened.
+	unnamed := map[usageKey]struct{}{}
+
+	for _, primitive := range summary.Primitives {
+		if primitive.Kind == record.KindBuiltinTool {
+			continue
+		}
+		accumulate(canonicalIdentity(canonical, identity{harness: primitive.Harness, kind: primitive.Kind, name: primitive.Name}), primitive)
+		if primitive.Kind != record.KindMCPTool || primitive.MCPServer == "" {
+			continue
+		}
+		// Deliberately not through canonicalIdentity: that fold never touches kind,
+		// because a fold whose target belongs to another kind was refused at
+		// discovery (DG-106). This roll-up is cross-kind by construction — mcp_tool
+		// events onto an mcp_server row — so it is its own path and leaves DG-106's
+		// guarantee exactly as it was.
+		server := identity{harness: primitive.Harness, kind: record.KindMCPServer, name: serverName(index, primitive.MCPServer)}
+		accumulate(server, primitive)
+		if _, found := discovered[server.name]; !found {
+			unnamed[usageKey{identity: server, repo: primitive.Repo}] = struct{}{}
+		}
 	}
 
 	items := make(map[usageKey]Usage, len(available))
@@ -237,6 +287,21 @@ func derive(summary metrics.Summary, available []Primitive, canonical map[identi
 			items[key] = usage
 		}
 	}
+	// The observed server rows the available side could not publish, because no
+	// discovered config key names them. Published last and flagged, so `--unused` is
+	// not the only place a heavily used server shows up (plan §3.3, §12).
+	for key := range unnamed {
+		if _, published := items[key]; published {
+			continue
+		}
+		usage := observed[key]
+		usage.Unmatched = true
+		if !usage.valid() {
+			continue
+		}
+		items[key] = usage
+	}
+
 	result := make([]Usage, 0, len(items))
 	for _, usage := range items {
 		result = append(result, usage)
@@ -299,6 +364,12 @@ func (u Usage) valid() bool {
 		return false
 	}
 	if !validKind(u.Kind) {
+		return false
+	}
+	// Unmatched only ever describes an observed MCP server: a row of another kind,
+	// or one with no invocations, cannot be unmatched, and a snapshot claiming
+	// otherwise is refused rather than repaired (fail closed, plan §3.4).
+	if u.Unmatched && (u.Kind != record.KindMCPServer || u.Invocations == 0) {
 		return false
 	}
 	if u.Unknown > u.Invocations || u.Failures > u.Invocations-u.Unknown {
