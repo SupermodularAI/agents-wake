@@ -19,7 +19,21 @@ func init() { commands = append(commands, newInitCmd) }
 func newInitCmd() *cobra.Command {
 	var full bool
 	var global bool
-	cmd := &cobra.Command{Use: "init [path]", Short: "Enable local Claude Code collection for this project", Args: func(c *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "init", Short: "Enable local Claude Code collection for this project", Long: "Enable local Claude Code collection for this project.\n" +
+		"\n" +
+		"Collection is forward-only: existing Claude Code history is not imported\n" +
+		"unless --full is given, and the session triggers init installs collect only\n" +
+		"what happens from now on.\n" +
+		"\n" +
+		"Forms:\n" +
+		"  wake init                  consent this repository\n" +
+		"  wake init --full           ...and import its existing history now\n" +
+		"  wake init --global [path]  consent every project under a directory (your\n" +
+		"                             home directory when no path is given), registering\n" +
+		"                             each repository under it as sessions run in it\n" +
+		"  wake init --global --full  ...and import the existing history under it now\n" +
+		"\n" +
+		"Only --global takes a path; plain init takes none.", Args: func(c *cobra.Command, args []string) error {
 		// Plain init keeps cobra.NoArgs exactly, error text included; only --global
 		// takes a path. Widening the rule for both would let a typo consent a
 		// directory the user never named.
@@ -209,6 +223,6 @@ func newInitCmd() *cobra.Command {
 		return err
 	}}
 	cmd.Flags().BoolVar(&full, "full", false, "also import this project's existing Claude Code history now")
-	cmd.Flags().BoolVarP(&global, "global", "g", false, "consent every project under a directory (default the home directory), registering each as it is used")
+	cmd.Flags().BoolVarP(&global, "global", "g", false, "consent every project under a directory, given as a path after --global (your home directory when no path is given), registering each as it is used")
 	return cmd
 }
