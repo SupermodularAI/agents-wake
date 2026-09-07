@@ -891,3 +891,49 @@ func TestRefreshKeepsAnUnmatchedServerFlaggedAcrossAnUnscannedPass(t *testing.T)
 		t.Fatalf("observed row = %+v, want an unmatched mcp_server with 1 invocation", observed)
 	}
 }
+
+// Discovery and the roll-up must agree on what identifies a server: the roll-up
+// row is per harness (ADR-0002's grain), so a server name one harness discovered
+// says nothing about a segment observed under another. Keyed on the name alone,
+// the segment below resolves as "discovered", is never flagged unnamed, and is
+// never published — the calls vanish silently, which is the very failure DG-99
+// exists to fix.
+func TestRefreshDoesNotMatchAServerDiscoveredUnderAnotherHarness(t *testing.T) {
+	repo := record.Hash("0123456789abcdef0123456789abcdef")
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	elsewhere := mcpToolRecord("one", "mcp__linear__list_issues", "linear", repo, at)
+	elsewhere.Harness = "codex"
+	elsewhere.EventID = record.DeriveEventID("codex", "one")
+
+	events := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	if _, err := events.Append([]record.Record{elsewhere}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
+	if err := primitives.Refresh(events, mcpServerDiscovery("linear")); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	items, err := primitives.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	var observed, configured *Usage
+	for i, item := range items {
+		if item.Kind != record.KindMCPServer {
+			continue
+		}
+		switch item.Harness {
+		case "codex":
+			observed = &items[i]
+		case "claude-code":
+			configured = &items[i]
+		}
+	}
+	if observed == nil || observed.Invocations != 1 || !observed.Unmatched {
+		t.Fatalf("inventory = %+v, want an unmatched codex mcp_server row with 1 invocation", items)
+	}
+	if configured == nil || configured.Invocations != 0 || configured.Unmatched {
+		t.Fatalf("inventory = %+v, want the discovered claude-code row untouched at 0 invocations", items)
+	}
+}

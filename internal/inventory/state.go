@@ -263,9 +263,9 @@ func derive(summary metrics.Summary, available []Primitive, canonical map[identi
 		// discovery (DG-106). This roll-up is cross-kind by construction — mcp_tool
 		// events onto an mcp_server row — so it is its own path and leaves DG-106's
 		// guarantee exactly as it was.
-		server := identity{harness: primitive.Harness, kind: record.KindMCPServer, name: serverName(index, primitive.MCPServer)}
+		server := identity{harness: primitive.Harness, kind: record.KindMCPServer, name: serverName(index, primitive.Harness, primitive.MCPServer)}
 		accumulate(server, primitive)
-		if _, found := discovered[server.name]; !found {
+		if _, found := discovered[server]; !found {
 			unnamed[usageKey{identity: server, repo: primitive.Repo}] = struct{}{}
 		}
 	}
