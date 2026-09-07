@@ -354,7 +354,14 @@ func (r *Repos) match(cwd string) (root, id string) {
 //   - a root — or a new spelling of one — nested inside a recorded root or alias,
 //     or containing one, is refused (ADR-0019 §5) in both directions. That is what
 //     keeps the recorded spellings mutually non-nested, and therefore
-//     longest-prefix resolution unique.
+//     longest-prefix resolution unique;
+//   - a linked git worktree records the repository it belongs to, once, onto an
+//     entry that records none. It is never moved and never cleared, for the reason
+//     given at the code site: a relation that changed would re-point one
+//     repository's rendered rows and its outgoing wake.repo_label at another. The
+//     relation is only ever recorded when the parent is already a consented entry
+//     of this same table — nothing is attributed to a directory this machine never
+//     consented — and it changes no id, no root and no label.
 //
 // Append-only holds across writers, not only within one: the table is re-read
 // under an exclusive lock and the decision is made against what is on disk, never
@@ -408,6 +415,10 @@ func (r *Repos) Register(root, label string, from time.Time) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// The third disk-dependent answer, taken with the other two and before the lock:
+	// it is about the offered directory, not about the table. What it returns is
+	// matched against the table inside the lock, against the re-read table.
+	parentSpellings := discoverParentRepositoryForRegistration(canonical)
 
 	aliases := []string{}
 	if given != canonical {
@@ -428,7 +439,7 @@ func (r *Repos) Register(root, label string, from time.Time) (string, error) {
 		if readErr != nil {
 			return readErr
 		}
-		updated, entryID, changed, decideErr := r.registration(table, canonical, aliases, label, fold, from)
+		updated, entryID, changed, decideErr := r.registration(table, canonical, aliases, label, fold, from, parentSpellings)
 		if decideErr != nil {
 			return decideErr
 		}
@@ -458,7 +469,7 @@ func (r *Repos) Register(root, label string, from time.Time) (string, error) {
 // canonical spelling and the case-folding flag, was obtained before the lock was
 // taken — so the caller can read the table, decide, and write inside one locked
 // section. changed reports whether there is anything to write.
-func (r *Repos) registration(table projectsFile, canonical string, aliases []string, label string, fold bool, from time.Time) (updated projectsFile, id string, changed bool, err error) {
+func (r *Repos) registration(table projectsFile, canonical string, aliases []string, label string, fold bool, from time.Time, parentSpellings []string) (updated projectsFile, id string, changed bool, err error) {
 	// An exact match is a re-registration, not nesting: the id stands, and the
 	// only thing that may change is the set of spellings it answers to, plus a
 	// recorded boundary an explicit full import clears.
@@ -485,7 +496,17 @@ func (r *Repos) registration(table projectsFile, canonical string, aliases []str
 		// disclosure is unconditional, so this is what makes it true.
 		clearBoundary := from.IsZero() && existing.CollectFrom != ""
 		recordBoundary := !from.IsZero() && existing.CollectFrom == ""
-		if len(added) == 0 && !clearBoundary && !recordBoundary {
+		// The relation is recorded onto an entry that records none, and never moved
+		// and never cleared. A relation that changed would re-point this repository's
+		// rendered rows and its outgoing wake.repo_label at a different repository —
+		// the edit MatchMAC covers the field to refuse when a hand makes it, and no
+		// less of an edit for being made by a command. A worktree registered before
+		// this build therefore gains its relation on the next `wake init` inside it,
+		// which is the whole migration (ADR-0019 §9: nothing is absorbed, reassigned
+		// or removed).
+		parentID := entryIDForRoot(table.Projects, parentSpellings)
+		recordRelation := parentID != "" && parentID != existing.ID && existing.BelongsTo == ""
+		if len(added) == 0 && !clearBoundary && !recordBoundary && !recordRelation {
 			return table, existing.ID, false, nil
 		}
 		if len(added) > 0 {
@@ -507,12 +528,16 @@ func (r *Repos) registration(table projectsFile, canonical string, aliases []str
 		case recordBoundary:
 			existing.CollectFrom = formatCollectFrom(from)
 		}
+		if recordRelation {
+			existing.BelongsTo = parentID
+		}
 		// Cloned before appending: the entry is a copy of the recorded one, but its
 		// alias slice still shares the recorded backing array.
 		existing.Aliases = append(slices.Clone(existing.Aliases), added...)
-		// Re-signed, because the digest covers the spellings and the boundary and this
-		// changed one of them. The id is not: this is the same repository, under a new
-		// spelling or with the history it declined now asked for.
+		// Re-signed, because the digest covers the spellings, the boundary and the
+		// relation, and this changed one of them. The id is not: this is the same
+		// repository, under a new spelling, with the history it declined now asked
+		// for, or with the repository it belongs to now consented.
 		existing = r.signed(existing)
 		if !existing.valid() {
 			return table, "", false, errUnreadableEntry
@@ -533,6 +558,9 @@ func (r *Repos) registration(table projectsFile, canonical string, aliases []str
 		Aliases:         aliases,
 		CaseInsensitive: fold,
 		CollectFrom:     formatCollectFrom(from),
+		// The new entry's own id is not in table.Projects yet, so no self-relation is
+		// reachable here and valid()'s refusal of one is a floor rather than a case.
+		BelongsTo: entryIDForRoot(table.Projects, parentSpellings),
 	})
 	if !entry.valid() {
 		return table, "", false, errUnreadableEntry
@@ -780,6 +808,52 @@ func hasPathPrefix(cwd, root string, fold bool) bool {
 		root += separator
 	}
 	return strings.HasPrefix(cwd, root)
+}
+
+// entryIDForRoot returns the id of the recorded entry whose canonical root — or one
+// of its recorded aliases — is exactly one of the offered spellings, or the empty
+// string when none is.
+//
+// Exact equality, not the longest-prefix rule Identify uses, and deliberately: this
+// asks whether one specific repository root has been consented, not which consented
+// repository encloses a working directory. A prefix match would relate a worktree to
+// whatever repository happened to enclose its parent.
+//
+// Spellings are compared under each entry's own recorded case-folding flag — the
+// same rule match applies — so a parent consented on a case-insensitive filesystem
+// is found whatever case discovery reported (ADR-0019 §5).
+//
+// It reads the table and derives nothing. A parent this table does not hold is a
+// parent this machine has not consented, and hashing it would create stored data
+// outside the consent boundary (ADR-0019 §9).
+func entryIDForRoot(entries []projectEntry, offered []string) string {
+	for _, entry := range entries {
+		for _, recorded := range entry.spellings() {
+			for _, candidate := range offered {
+				if equalPath(candidate, recorded, entry.CaseInsensitive) {
+					return entry.ID
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// equalPath reports whether two lexically clean paths name the same directory,
+// folding case for the reason hasPathPrefix gives: simple case folding, adequate
+// for the ASCII-dominated path elements this compares, rather than an x/text
+// dependency for a corner case.
+//
+// strings.EqualFold rather than hasPathPrefix's pair of strings.ToLower calls,
+// because staticcheck SA6005 refuses the latter for an equality comparison. The two
+// agree on every path either function will be handed here; where full Unicode
+// folding would disagree with lowercasing, both are already approximations of what
+// the filesystem does.
+func equalPath(left, right string, fold bool) bool {
+	if fold {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
 }
 
 // canonicalRoot resolves a root to the spelling every other spelling of it

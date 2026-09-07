@@ -927,7 +927,7 @@ func TestRegistrationRefusesAnEntryItCouldNotReadBack(t *testing.T) {
 		{"an alias appended to a recorded entry", projectsFile{Version: projectsVersion, Projects: []projectEntry{recorded}}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			_, id, changed, err := r.registration(c.table, "/repo", []string{"not-absolute"}, "repo", false, time.Time{})
+			_, id, changed, err := r.registration(c.table, "/repo", []string{"not-absolute"}, "repo", false, time.Time{}, nil)
 			if !errors.Is(err, errUnreadableEntry) {
 				t.Fatalf("registration() = (%q, %v, %v), want errUnreadableEntry", id, changed, err)
 			}
@@ -1929,5 +1929,188 @@ func TestATableSignedBeforeTheRelationExistedStillResolves(t *testing.T) {
 	identity := mustIdentify(t, r, root+"/pkg")
 	if !identity.Matched || identity.ID != id {
 		t.Fatalf("Identify() = %+v, want the recorded id %s matched", identity, id)
+	}
+}
+
+// recordedEntries re-reads projects.json as it sits on disk. The relation is only
+// ever asserted from the file, never from the in-memory snapshot, because what the
+// next process resolves against is the file.
+func recordedEntries(t *testing.T, p Paths) []projectEntry {
+	t.Helper()
+	var table projectsFile
+	if err := json.Unmarshal([]byte(readFileOrFail(t, p.ProjectsFile)), &table); err != nil {
+		t.Fatalf("re-reading the recorded table: %v", err)
+	}
+	return table.Projects
+}
+
+func recordedEntry(t *testing.T, p Paths, id string) projectEntry {
+	t.Helper()
+	for _, entry := range recordedEntries(t, p) {
+		if entry.ID == id {
+			return entry
+		}
+	}
+	t.Fatalf("projects.json holds no entry with id %q", id)
+	return projectEntry{}
+}
+
+// The ticket in one test: `wake init` inside a linked worktree registers the
+// worktree *and* records the repository it belongs to. It does not register under
+// the parent's identity, and it absorbs, reassigns and removes nothing (ADR-0019 §6,
+// §9).
+func TestRegisteringAWorktreeRecordsTheRepositoryItBelongsTo(t *testing.T) {
+	requireGit(t)
+	p := testPaths(t)
+	main, worktree := initWorktree(t)
+	r := openRepos(t, p)
+
+	mainID := mustRegister(t, r, main, "alpha")
+	worktreeID := mustRegister(t, r, worktree, "beta")
+
+	if mainID == worktreeID {
+		t.Fatalf("the worktree registered under the main checkout's identity %q; a worktree is its own repository", mainID)
+	}
+	if got := recordedEntry(t, p, worktreeID).BelongsTo; got != mainID {
+		t.Errorf("the worktree's belongs_to = %q, want the main checkout's id %q", got, mainID)
+	}
+	if got := recordedEntry(t, p, mainID).BelongsTo; got != "" {
+		t.Errorf("the main checkout's belongs_to = %q, want none", got)
+	}
+	// Nothing absorbed and nothing reassigned: two entries, each with the root and
+	// the label it was registered with.
+	entries := recordedEntries(t, p)
+	if len(entries) != 2 {
+		t.Fatalf("projects.json holds %d entries, want 2", len(entries))
+	}
+	for _, want := range []struct {
+		id    string
+		root  string
+		label string
+	}{{mainID, main, "alpha"}, {worktreeID, worktree, "beta"}} {
+		got := recordedEntry(t, p, want.id)
+		if got.Root != want.root || got.Label != want.label {
+			t.Errorf("entry %q = (root %q, label %q), want (%q, %q)", want.id, got.Root, got.Label, want.root, want.label)
+		}
+	}
+}
+
+// The relation is never consulted on the derivation path: a directory inside the
+// worktree still resolves to the worktree's own id, so its records still carry the
+// worktree's own hash (ADR-0019 §1, §3, §6). Everything DG-104 changes happens after
+// the fact, at render and flush time.
+func TestAWorktreeStillResolvesToItsOwnIdentity(t *testing.T) {
+	requireGit(t)
+	p := testPaths(t)
+	main, worktree := initWorktree(t)
+	r := openRepos(t, p)
+
+	mainID := mustRegister(t, r, main, "alpha")
+	worktreeID := mustRegister(t, r, worktree, "beta")
+
+	identity := mustIdentify(t, r, filepath.Join(worktree, "sub"))
+	if !identity.Matched || identity.ID != worktreeID {
+		t.Fatalf("Identify() = %+v, want the worktree's own id %q matched", identity, worktreeID)
+	}
+	if identity.ID == mainID {
+		t.Error("Identify() answered with the parent's id; derivation must not read the relation")
+	}
+}
+
+// A parent this machine has not consented is a parent nothing may be attributed to.
+// The *relation* is refused; the registration is not — refusing that would reverse
+// ADR-0019 §6, which makes a worktree its own repository with its own consent.
+func TestAWorktreeWhoseParentIsNotConsentedIsStillRegisteredWithNoRelation(t *testing.T) {
+	requireGit(t)
+	p := testPaths(t)
+	_, worktree := initWorktree(t)
+	r := openRepos(t, p)
+
+	worktreeID, err := r.Register(worktree, "beta", time.Time{})
+	if err != nil {
+		t.Fatalf("Register() error = %v; a worktree is its own repository whether or not its parent is consented", err)
+	}
+	if worktreeID == "" {
+		t.Fatal("Register() returned no id")
+	}
+	if dropped := r.DroppedEntries(); dropped != 0 {
+		t.Errorf("DroppedEntries() = %d, want 0", dropped)
+	}
+	if got := recordedEntry(t, p, worktreeID).BelongsTo; got != "" {
+		t.Errorf("belongs_to = %q, want none; nothing may be attributed to a directory this machine never consented", got)
+	}
+}
+
+func TestAMainCheckoutRecordsNoRelation(t *testing.T) {
+	requireGit(t)
+	p := testPaths(t)
+	root, _ := initRepo(t)
+
+	id := mustRegister(t, openRepos(t, p), root, "alpha")
+	if got := recordedEntry(t, p, id).BelongsTo; got != "" {
+		t.Errorf("belongs_to = %q, want none", got)
+	}
+}
+
+func TestADirectoryThatIsNotAGitRepositoryRecordsNoRelation(t *testing.T) {
+	p := testPaths(t)
+	dir := mkdirAll(t, filepath.Join(tempRealDir(t), "plain"))
+
+	id := mustRegister(t, openRepos(t, p), dir, "alpha")
+	if got := recordedEntry(t, p, id).BelongsTo; got != "" {
+		t.Errorf("belongs_to = %q, want none", got)
+	}
+}
+
+// The migration, executed. A worktree consented before its parent was — or before
+// this build existed — gains its relation on the next `wake init` inside it, and
+// gains nothing else: same id, same root, same label. Nothing is rewritten on read
+// (ADR-0019 §9), so re-running `init` is the whole of it.
+func TestReRunningInitInAWorktreeRecordsTheRelationOntoTheExistingEntry(t *testing.T) {
+	requireGit(t)
+	p := testPaths(t)
+	main, worktree := initWorktree(t)
+	r := openRepos(t, p)
+
+	first := mustRegister(t, r, worktree, "beta")
+	if got := recordedEntry(t, p, first).BelongsTo; got != "" {
+		t.Fatalf("belongs_to = %q after the first registration, want none — the parent was not consented yet", got)
+	}
+
+	mainID := mustRegister(t, r, main, "alpha")
+	second := mustRegister(t, r, worktree, "beta")
+
+	if second != first {
+		t.Errorf("the worktree's id changed from %q to %q; a registered root is never re-identified", first, second)
+	}
+	entry := recordedEntry(t, p, first)
+	if entry.BelongsTo != mainID {
+		t.Errorf("belongs_to = %q, want the main checkout's id %q", entry.BelongsTo, mainID)
+	}
+	if entry.Root != worktree || entry.Label != "beta" {
+		t.Errorf("entry = (root %q, label %q), want (%q, %q) unchanged", entry.Root, entry.Label, worktree, "beta")
+	}
+	if entries := recordedEntries(t, p); len(entries) != 2 {
+		t.Errorf("projects.json holds %d entries, want 2", len(entries))
+	}
+}
+
+// Recorded once, never moved. A second registration of a worktree whose relation is
+// already recorded writes nothing at all: re-pointing a relation would re-attribute
+// one repository's rendered rows and its outgoing wake.repo_label at another, and a
+// command is no better placed to do that than a hand edit.
+func TestASecondRegistrationOfARelatedWorktreeRewritesNothing(t *testing.T) {
+	requireGit(t)
+	p := testPaths(t)
+	main, worktree := initWorktree(t)
+	r := openRepos(t, p)
+
+	mustRegister(t, r, main, "alpha")
+	mustRegister(t, r, worktree, "beta")
+	before := readFileOrFail(t, p.ProjectsFile)
+
+	mustRegister(t, r, worktree, "beta")
+	if after := readFileOrFail(t, p.ProjectsFile); after != before {
+		t.Errorf("projects.json changed on a second registration:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 }
