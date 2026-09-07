@@ -522,6 +522,18 @@ type callResult struct {
 	// It is a number, never a transcript value: nothing here widens ADR-0007's
 	// allowlist.
 	duration *int64
+	// omitted reports that this result line reached its is_error check with no
+	// denial kind and no interrupted flag, and found the field absent. It is the
+	// half of the outcome derivation the result line cannot finish alone: whether an
+	// omission is this family's success token or genuinely unknown depends on the
+	// tool the call named, which lives on the other half of the pair — the same
+	// reason the duration is stamped at pairing time rather than derived here.
+	//
+	// It is a bool, never a transcript value: no tool name is added to this struct
+	// and nothing here widens ADR-0007's allowlist.
+	//
+	// Invariant: omitted is true only when outcome is nil.
+	omitted bool
 }
 
 // resultOf derives the terminal half of a call from the tool_result entry and
@@ -531,7 +543,8 @@ type callResult struct {
 // The duration is deliberately left nil here: this function sees the result line
 // alone, and an interval needs the call it terminated. pairedWith stamps it.
 func resultOf(entry transcriptEntry, block contentBlock) callResult {
-	return callResult{timestamp: entry.Timestamp, outcome: outcomeFor(entry, block)}
+	outcome, omitted := outcomeFor(entry, block)
+	return callResult{timestamp: entry.Timestamp, outcome: outcome, omitted: omitted}
 }
 
 // pairedWith stamps onto the result that terminated this call the interval the
@@ -975,7 +988,22 @@ func subagentInvocation(name string) bool { return name == "Agent" || name == "T
 // computed here. interrupted() reaches this function with the call's own instant
 // standing in for the result instant, so a delta taken here would be a non-nil 0
 // on the one path that must stay unknown (ADR-0015, ADR-0005 applied to time).
+//
+// The outcome arrives almost derived. The one verdict a result line cannot reach
+// alone is whether an omitted is_error is that family's success token or the source
+// saying nothing, because it turns on the tool the call named — which only this
+// side of the pair holds. It is resolved here rather than in pairedWith because
+// pairedWith returns early for a pair whose instants came back inverted, and a
+// verdict that skipped that early return would depend on instant order, against
+// ADR-0004's byte-identical rescan bar and ADR-0015's cursor-is-an-optimisation
+// rule. interrupted() reaches here with omitted false by construction, so the
+// staleness path cannot acquire an ok (ADR-0015).
 func (call call) complete(result callResult) record.Record {
+	outcome := result.outcome
+	if result.omitted && omitsOnSuccess(call.kind, call.name) {
+		resolved := record.OutcomeOK
+		outcome = &resolved
+	}
 	return record.Record{
 		SchemaVersion:  record.SchemaVersion,
 		EventID:        call.eventID,
@@ -992,7 +1020,7 @@ func (call call) complete(result callResult) record.Record {
 		Model:          call.model,
 		Invoker:        call.invoker,
 		Entrypoint:     call.entrypoint,
-		Outcome:        result.outcome,
+		Outcome:        outcome,
 		DurationMS:     result.duration,
 	}
 }
@@ -1074,26 +1102,36 @@ func packageFromAttribution(value string) (record.Identifier, bool) {
 	return "", false
 }
 
-func outcomeFor(entry transcriptEntry, block contentBlock) *record.Outcome {
+// outcomeFor derives everything about a call's verdict that its result line can
+// state on its own, in a fixed precedence: a recognised denial kind first, then the
+// interrupted flag, then is_error. A failure signal always outranks the field's
+// presence or absence — a denied or interrupted call did not succeed, whatever
+// is_error says or omits (ADR-0005, ADR-0015).
+//
+// The second result is the half of the derivation this function cannot finish. It
+// is true only on the last arm — is_error absent, with no denial kind and no
+// interrupted flag — and reports that the verdict now turns on which tool the call
+// named, which no result line carries. complete finishes it.
+func outcomeFor(entry transcriptEntry, block contentBlock) (*record.Outcome, bool) {
 	switch entry.ToolDenialKind {
 	case "permission-rule":
 		outcome := record.OutcomeDeniedPolicy
-		return &outcome
+		return &outcome, false
 	case "user-rejected":
 		outcome := record.OutcomeDeniedUser
-		return &outcome
+		return &outcome, false
 	}
 	if entry.interruptedResult() {
 		outcome := record.OutcomeInterrupted
-		return &outcome
+		return &outcome, false
 	}
 	if block.IsError == nil {
-		return nil
+		return nil, true
 	}
 	if *block.IsError {
 		outcome := record.OutcomeError
-		return &outcome
+		return &outcome, false
 	}
 	outcome := record.OutcomeOK
-	return &outcome
+	return &outcome, false
 }

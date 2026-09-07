@@ -471,6 +471,12 @@ func TestReadSkipsAnEventBeforeTheInstantCollectionBegan(t *testing.T) {
 	}
 }
 
+// The outcome stays null here for a narrower reason than the name suggests. The call
+// is Bash — the one family measured to write is_error: false explicitly, 929 times and
+// never once omitted — so an absence is outside its observed vocabulary and the source
+// genuinely does not say (ADR-0005). For a family measured never to write false, the
+// same absence is that family's success token; see
+// TestReadResolvesAnOmittedIsErrorOnlyForAMeasuredFamily for the split.
 func TestReadKeepsUnknownOutcomeNull(t *testing.T) {
 	input := strings.Join([]string{
 		`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`,
@@ -2397,5 +2403,220 @@ func TestReadLeavesDurationNilOnAnOutOfOrderPair(t *testing.T) {
 	}
 	if encoded[0] != encoded[1] {
 		t.Errorf("record differs by line order:\n forward  = %s\n reversed = %s", encoded[0], encoded[1])
+	}
+}
+
+// omittedPair builds a tool_use/tool_result pair for toolName whose result line
+// omits is_error entirely — no denial kind, no interrupted flag, nothing but the
+// correlation id — in both line orders. inputFields is appended inside the
+// tool_use block and must start with a comma, or be empty.
+func omittedPair(toolName, inputFields string) (forward, reversed string) {
+	use := fmt.Sprintf(`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","version":"1.0.0","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-1","name":%q%s}]}}`, toolName, inputFields)
+	result := `{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1"}]}}`
+	return use + "\n" + result, result + "\n" + use
+}
+
+// An absent is_error is not one thing. Claude Code writes an explicit false only
+// for Bash, so for every family measured never to spell it, the field's absence is
+// that family's success token and decoding it is mapping the harness's vocabulary
+// onto the enum — what ADR-0005 requires of an adapter. For the one family that
+// does spell false, an absence is outside its observed vocabulary and stays
+// genuinely unknown, which is the safeguard that keeps this from being ADR-0005's
+// rejected "treat unknown as success".
+//
+// Both line orders are read for every row, and the marshalled bytes compared, so
+// the new arm inherits the order-independence TestReadDerivesTheSameRecordInEitherLineOrder
+// pins for the old one (ADR-0004).
+func TestReadResolvesAnOmittedIsErrorOnlyForAMeasuredFamily(t *testing.T) {
+	ok := record.OutcomeOK
+	for _, testCase := range []struct {
+		name        string
+		toolName    string
+		inputFields string
+		want        *record.Outcome
+	}{
+		// The three-state family: 929 explicit false in the measured corpus, zero
+		// absences. An absence here is outside its vocabulary (ADR-0005).
+		{name: "bash stays unknown", toolName: "Bash", want: nil},
+		// The one other tool ever measured to spell an explicit false. It is why the
+		// set is an allowlist rather than an exception for Bash.
+		{name: "send feedback stays unknown", toolName: "SendFeedback", want: nil},
+		// Never measured at all, so never measured never to spell false.
+		{name: "unmeasured builtin stays unknown", toolName: "TodoWrite", want: nil},
+		{name: "read resolves ok", toolName: "Read", want: &ok},
+		{name: "edit resolves ok", toolName: "Edit", want: &ok},
+		{name: "write resolves ok", toolName: "Write", want: &ok},
+		{name: "grep resolves ok", toolName: "Grep", want: &ok},
+		{name: "glob resolves ok", toolName: "Glob", want: &ok},
+		{name: "mcp resolves ok", toolName: "mcp__atlassian__search", want: &ok},
+		{name: "plugin-scoped mcp resolves ok", toolName: "mcp__playwright__browser_click", want: &ok},
+		{name: "skill resolves ok", toolName: "Skill", inputFields: `,"input":{"skill":"pr-review"}`, want: &ok},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			forward, reversed := omittedPair(testCase.toolName, testCase.inputFields)
+			encoded := make([]string, 0, 2)
+			for _, transcript := range []string{forward, reversed} {
+				result, err := read(strings.NewReader(transcript), resolver, names, Staleness{})
+				if err != nil {
+					t.Fatalf("Read() error = %v", err)
+				}
+				if len(result.Records) != 1 {
+					t.Fatalf("Read() records = %+v, want exactly one", result.Records)
+				}
+				event := result.Records[0]
+				switch {
+				case testCase.want == nil && event.Outcome != nil:
+					t.Fatalf("Outcome = %q, want unknown: %q was not measured never to spell is_error false",
+						*event.Outcome, testCase.toolName)
+				case testCase.want != nil && event.Outcome == nil:
+					t.Fatalf("Outcome = <nil>, want %q: an omitted is_error is %q's success signal",
+						*testCase.want, testCase.toolName)
+				case testCase.want != nil && *event.Outcome != *testCase.want:
+					t.Fatalf("Outcome = %q, want %q", *event.Outcome, *testCase.want)
+				}
+				marshalled, err := record.Marshal(event)
+				if err != nil {
+					t.Fatalf("Marshal() error = %v", err)
+				}
+				encoded = append(encoded, string(marshalled))
+			}
+			if encoded[0] != encoded[1] {
+				t.Errorf("record differs by line order:\n forward  = %s\n reversed = %s", encoded[0], encoded[1])
+			}
+		})
+	}
+}
+
+// Resolving an omission changes only the arm that had nothing to say. Every failure
+// signal still outranks it, and this asserts that over an MCP call — a member family,
+// so the new arm is reachable and the precedence is being tested rather than trivially
+// satisfied (ADR-0005, ADR-0015).
+func TestReadKeepsFailureSignalPrecedenceForAFamilyThatOmitsOnSuccess(t *testing.T) {
+	const toolName = "mcp__atlassian__search"
+	for _, testCase := range []struct {
+		label       string
+		entryFields string
+		blockFields string
+		want        record.Outcome
+	}{
+		{label: "explicit failure", blockFields: `,"is_error":true`, want: record.OutcomeError},
+		{label: "denied by policy", entryFields: `"toolDenialKind":"permission-rule",`, want: record.OutcomeDeniedPolicy},
+		{label: "denied by user", entryFields: `"toolDenialKind":"user-rejected",`, want: record.OutcomeDeniedUser},
+		{label: "interrupted", entryFields: `"toolUseResult":{"interrupted":true},`, want: record.OutcomeInterrupted},
+		// The one row worth reading twice. An unrecognised denial kind is not a denial
+		// — the switch falls through, exactly as it always has — so the result line's
+		// own omission decides, and for a member family that is ok.
+		//
+		// TestReadRetainsNothingFromAnEarlyResultLine feeds the same hostile denial
+		// kinds and asserts the outcome stays nil. Both are correct: that test's pair is
+		// a Bash call, the one family whose absences are outside its measured
+		// vocabulary. The family is the whole difference between the two assertions.
+		{label: "unrecognised denial kind", entryFields: `"toolDenialKind":"something-else",`, want: record.OutcomeOK},
+	} {
+		t.Run(testCase.label, func(t *testing.T) {
+			use := fmt.Sprintf(`{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","version":"1.0.0","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-1","name":%q}]}}`, toolName)
+			result := fmt.Sprintf(
+				`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z",%s"message":{"content":[{"type":"tool_result","tool_use_id":"call-1"%s}]}}`,
+				testCase.entryFields, testCase.blockFields)
+			for _, transcript := range []string{use + "\n" + result, result + "\n" + use} {
+				got, err := read(strings.NewReader(transcript), resolver, names, Staleness{})
+				if err != nil {
+					t.Fatalf("Read() error = %v", err)
+				}
+				if len(got.Records) != 1 {
+					t.Fatalf("Read() records = %+v, want exactly one", got.Records)
+				}
+				event := got.Records[0]
+				if event.Outcome == nil || *event.Outcome != testCase.want {
+					t.Errorf("Outcome = %v, want %q", event.Outcome, testCase.want)
+				}
+			}
+		})
+	}
+}
+
+// measuredShapeTranscript is one session mirroring the measured corpus in miniature:
+// the family that spells is_error: false explicitly, the families that omit on success,
+// and an explicit failure from each side. Every call has its own uuid and id.
+const measuredShapeTranscript = `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","version":"1.0.0","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-1","name":"Bash"},{"type":"tool_use","id":"call-2","name":"Bash"},{"type":"tool_use","id":"call-3","name":"Read"},{"type":"tool_use","id":"call-4","name":"Read"},{"type":"tool_use","id":"call-5","name":"mcp__playwright__browser_click"},{"type":"tool_use","id":"call-6","name":"mcp__atlassian__search"},{"type":"tool_use","id":"call-7","name":"mcp__atlassian__search"},{"type":"tool_use","id":"call-8","name":"Skill","input":{"skill":"pr-review"}},{"type":"tool_use","id":"call-9","name":"Edit"}]}}
+{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}
+{"uuid":"entry-3","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-2"}]}}
+{"uuid":"entry-4","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:03Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-3"}]}}
+{"uuid":"entry-5","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:04Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-4","is_error":true}]}}
+{"uuid":"entry-6","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:05Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-5"}]}}
+{"uuid":"entry-7","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:06Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-6"}]}}
+{"uuid":"entry-8","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:07Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-7","is_error":true}]}}
+{"uuid":"entry-9","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:08Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-8"}]}}
+{"uuid":"entry-10","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:09Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-9"}]}}`
+
+// The rate assertion is scoped to mcp_tool deliberately. Every MCP record this reader
+// emits comes from a matched tool_use/tool_result pair, so the class has one producer
+// and a null rate over it is a claim about this change alone. Skill records have a
+// second producer — the Shape-A fallback in typed.go, whose Outcome is deliberately nil
+// because that shape carries no completion boundary (ADR-0023 §3, narrowed by
+// ADR-0036 §4) — so a null-rate claim over skills would be a claim about that producer
+// too. The matched Skill pair below does have a completion boundary, and is asserted ok
+// individually.
+func TestReadRatesEveryMCPCallInACorpusShapedLikeTheMeasuredOne(t *testing.T) {
+	result, err := read(strings.NewReader(measuredShapeTranscript), resolver, names, Staleness{})
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(result.Records) != 9 || result.Pending != 0 || result.Malformed != 0 || result.Refused != 0 {
+		t.Fatalf("Read() = records %d, pending %d, malformed %d, refused %d; want one record per call and nothing stranded",
+			len(result.Records), result.Pending, result.Malformed, result.Refused)
+	}
+
+	// Matched by name and outcome pair rather than by position: which terminator
+	// shaped which call is the point, not emission order. Two records share the
+	// mcp__atlassian__search name with different verdicts, so the map is keyed on both.
+	type verdict struct {
+		name    record.Identifier
+		outcome string
+	}
+	const unknown = "<nil>"
+	want := map[verdict]int{
+		// Bash spells success explicitly; that path is untouched.
+		{name: "Bash", outcome: string(record.OutcomeOK)}: 1,
+		// And the safeguard, asserted in the same corpus as the rate: the near-zero
+		// mcp_tool null rate is not bought with a blanket rule. The one family measured
+		// to write is_error: false keeps its unknowns (ADR-0005).
+		{name: "Bash", outcome: unknown}:                                            1,
+		{name: "Read", outcome: string(record.OutcomeOK)}:                           1,
+		{name: "Read", outcome: string(record.OutcomeError)}:                        1,
+		{name: "mcp__playwright__browser_click", outcome: string(record.OutcomeOK)}: 1,
+		{name: "mcp__atlassian__search", outcome: string(record.OutcomeOK)}:         1,
+		{name: "mcp__atlassian__search", outcome: string(record.OutcomeError)}:      1,
+		{name: "pr-review", outcome: string(record.OutcomeOK)}:                      1,
+		{name: "Edit", outcome: string(record.OutcomeOK)}:                           1,
+	}
+
+	got := map[verdict]int{}
+	mcpNulls := 0
+	for _, event := range result.Records {
+		if err := record.Validate(event); err != nil {
+			t.Errorf("Validate(%q) error = %v", event.Name, err)
+		}
+		outcome := unknown
+		if event.Outcome != nil {
+			outcome = string(*event.Outcome)
+		} else if event.Kind == record.KindMCPTool {
+			mcpNulls++
+		}
+		got[verdict{name: event.Name, outcome: outcome}]++
+	}
+
+	// The acceptance line: over a corpus shaped like the measured one, the mcp_tool
+	// null rate is exactly 0, not merely near it.
+	if mcpNulls != 0 {
+		t.Errorf("mcp_tool records with no outcome = %d, want 0", mcpNulls)
+	}
+	for key, count := range want {
+		if got[key] != count {
+			t.Errorf("records named %q with outcome %s = %d, want %d", key.name, key.outcome, got[key], count)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("records = %v, want %v", got, want)
 	}
 }
