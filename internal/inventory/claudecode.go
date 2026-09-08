@@ -52,9 +52,11 @@ type Primitive struct {
 // names keys the digest that stands in for a directory-scoped primitive's scope,
 // which a session listing states as a path prefix (ADR-0020).
 //
-// It also reports which bare plugin-skill names are the same primitive as their
-// namespaced spelling, so the inventory join can render one row for one skill
-// without the collection side losing either spelling (ADR-0020).
+// It also reports which bare plugin-primitive names are the same primitive as their
+// namespaced spelling, so the inventory join can render one row for one primitive
+// without the collection side losing either spelling (ADR-0020). Where a session
+// listing declared the kind the harness invokes that spelling under, the fold carries
+// that kind too (ADR-0041).
 func ClaudeCodeInScope(scope Scope, names record.Namer) Discovery {
 	items := map[primitiveKey]Primitive{}
 	origins := newPrimitiveOrigins()
@@ -302,19 +304,17 @@ func (o *primitiveOrigins) declaredSkill(name string) {
 // A name folds only where discovery proved it: exactly one plugin contributed it and
 // no other source did, the namespace is a plain token, the composed name is one
 // record.Namer will persist — which refuses the scope-<digest>: shape ADR-0020
-// reserves for a directory scope — and no primitive of another kind already holds
-// that name. Every other case is refused rather than resolved. Refusing leaves one
-// pre-existing phantom row; folding wrongly merges two primitives' counters, which
-// is the metric corruption ADR-0020 exists to prevent.
+// reserves for a directory scope — and no primitive of the wrong kind already holds
+// that name. It folds only where the kind is one the harness declared or one it never
+// changed (foldKind). Every other case is refused rather than resolved. Refusing
+// leaves one pre-existing phantom row; folding wrongly merges two primitives'
+// counters, which is the metric corruption ADR-0020 exists to prevent.
 //
 // The result is a function of the discovered set, never of the order it was walked
 // in (ADR-0004).
 func (o *primitiveOrigins) canonicalNames(names record.Namer, discovered map[primitiveKey]Primitive) map[identity]identity {
 	canonical := map[identity]identity{}
 	for key, contributors := range o.plugins {
-		if key.kind != record.KindSkill {
-			continue
-		}
 		if _, elsewhere := o.others[key]; elsewhere {
 			continue
 		}
@@ -325,32 +325,61 @@ func (o *primitiveOrigins) canonicalNames(names record.Namer, discovered map[pri
 		if _, err := record.BoundedToken(namespaces[0]); err != nil {
 			continue
 		}
+		composed := namespaces[0] + ":" + key.name
+		kind, licensed := o.foldKind(key.kind, composed)
+		if !licensed {
+			continue
+		}
 		from, err := names.DerivedName(key.name)
 		if err != nil {
 			continue
 		}
-		to, err := names.DerivedName(namespaces[0] + ":" + key.name)
+		to, err := names.DerivedName(composed)
 		if err != nil {
 			continue
 		}
-		if _, found := discovered[primitiveKey{kind: record.KindSkill, name: from}]; !found {
+		if _, found := discovered[primitiveKey{kind: key.kind, name: from}]; !found {
 			continue
 		}
-		if heldByAnotherKind(discovered, to) {
+		if heldByAnotherKind(discovered, to, kind) {
 			continue
 		}
-		canonical[identity{harness: claudeCode, kind: record.KindSkill, name: from}] = identity{harness: claudeCode, kind: record.KindSkill, name: to}
+		canonical[identity{harness: claudeCode, kind: key.kind, name: from}] = identity{harness: claudeCode, kind: kind, name: to}
 	}
 	return canonical
 }
 
+// foldKind reports the kind a folded row carries, and whether the fold is licensed
+// at all.
+//
+// Two cases, and the second is ADR-0041. Where a session skill_listing names the
+// composed spelling, the harness has stated the kind it will invoke that primitive
+// under; reading that statement is mapping the harness's own vocabulary, which
+// ADR-0005 distinguishes from decoding a silence. Where no listing names it, only
+// DG-106's same-kind fold is licensed: choosing a kind from the directory a file
+// happened to sit in would be a record dimension decided by walk order, which
+// ADR-0005 forbids and ADR-0004 rules out.
+//
+// The licence is a positive, closed set with the refusal as the default outside it,
+// so a primitive nothing declares is exactly as it was before this rule existed.
+func (o *primitiveOrigins) foldKind(discovered record.Kind, composed string) (record.Kind, bool) {
+	if kind, stated := o.declared[composed]; stated {
+		return kind, true
+	}
+	if discovered == record.KindSkill {
+		return record.KindSkill, true
+	}
+	return "", false
+}
+
 // heldByAnotherKind reports whether the discovered set already holds name under a
-// kind that is not a skill. Landing a skill's canonical name on it would change a
-// primitive's kind, which this ticket refuses rather than resolves (ADR-0005);
-// deciding that case is DG-108's.
-func heldByAnotherKind(discovered map[primitiveKey]Primitive, name record.Identifier) bool {
+// kind other than the one this fold would land it on. Landing on it would make one
+// primitive's counters absorb another's, which is the merge ADR-0020 exists to
+// prevent — and unlike the kind question ADR-0041 settles, nothing states which of
+// the two the harness means, so it is refused rather than resolved.
+func heldByAnotherKind(discovered map[primitiveKey]Primitive, name record.Identifier, kind record.Kind) bool {
 	for key := range discovered {
-		if key.name == name && key.kind != record.KindSkill {
+		if key.name == name && key.kind != kind {
 			return true
 		}
 	}

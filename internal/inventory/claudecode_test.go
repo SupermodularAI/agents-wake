@@ -365,6 +365,146 @@ func TestClaudeCodeInScopeDiscoveryIsIdenticalAcrossRuns(t *testing.T) {
 	}
 }
 
+// AC1. Where a session skill_listing names the composed spelling, the harness has
+// stated the kind it will invoke that primitive under, and that declaration is the
+// kind the folded row records — whatever kind the directory scan happened to assign
+// (ADR-0041). Without it the command row is structurally unreachable by any event
+// and reads invocations: 0 forever.
+func TestClaudeCodeInScopeTakesTheKindFromTheListingDeclaration(t *testing.T) {
+	claudeDir, root := pluginCommandFixture(t)
+
+	got := ClaudeCodeInScope(Scope{ClaudeDir: claudeDir, Root: root, Project: ProjectConsented}, names)
+
+	from := identity{harness: claudeCode, kind: record.KindCommand, name: "code-review"}
+	want := identity{harness: claudeCode, kind: record.KindSkill, name: "code-review:code-review"}
+	if to, folded := got.canonical[from]; !folded || to != want {
+		t.Fatalf("canonical[%+v] = %+v, %t; want %+v, true", from, to, folded, want)
+	}
+	// One row out, both spellings still admitted in: activation hands Primitives to
+	// claudecode.NewInstalled, so folding that slice would lose collection.
+	for _, spelling := range []primitiveKey{
+		{kind: record.KindCommand, name: "code-review"},
+		{kind: record.KindSkill, name: "code-review:code-review"},
+	} {
+		if !discovered(got)[spelling] {
+			t.Fatalf("missing %+v in %+v", spelling, got.Primitives)
+		}
+	}
+}
+
+// AC2, the refusal half. Where no listing names the primitive, nothing has stated
+// which kind the harness invokes it under, and choosing one from the directory a
+// file happened to sit in would decide a record dimension by walk order (ADR-0005,
+// ADR-0004). The bare row survives, and claudecode.NewInstalled's own refusal is
+// still the whole answer for a contested name.
+func TestClaudeCodeInScopeRefusesACrossKindFoldNoListingDeclares(t *testing.T) {
+	claudeDir := filepath.Join(t.TempDir(), ".claude")
+	root := t.TempDir()
+	writeInstalledPlugins(t, claudeDir, map[string]string{
+		"code-review@claude-plugins-official": pluginCommand(t, "code-review"),
+	})
+
+	got := ClaudeCodeInScope(Scope{ClaudeDir: claudeDir, Root: root, Project: ProjectConsented}, names)
+
+	if len(got.canonical) != 0 {
+		t.Fatalf("canonical = %+v, want no entry", got.canonical)
+	}
+	if !discovered(got)[primitiveKey{kind: record.KindCommand, name: "code-review"}] {
+		t.Fatalf("the plugin's own command was lost: %+v", got.Primitives)
+	}
+}
+
+// The cross-kind fold keeps DG-106's provenance guard, which did not exist for
+// commands before this ticket. A bare name two sources contribute is not provably
+// one primitive, and folding it would make one primitive's counters absorb
+// another's (ADR-0020).
+func TestClaudeCodeInScopeRefusesToFoldACommandAnotherSourceContributes(t *testing.T) {
+	cases := map[string]func(t *testing.T, claudeDir, root string){
+		"the user's own commands directory": func(t *testing.T, claudeDir, _ string) {
+			write(t, filepath.Join(claudeDir, "commands", "code-review.md"), "# mine")
+		},
+		"the project's commands directory": func(t *testing.T, _, root string) {
+			write(t, filepath.Join(root, ".claude", "commands", "code-review.md"), "# ours")
+		},
+		"a second plugin shipping the same command": func(t *testing.T, claudeDir, _ string) {
+			writeInstalledPlugins(t, claudeDir, map[string]string{
+				"code-review@claude-plugins-official": pluginCommand(t, "code-review"),
+				"other@market":                        pluginCommand(t, "code-review"),
+			})
+		},
+	}
+	for name, disputeIt := range cases {
+		t.Run(name, func(t *testing.T) {
+			claudeDir, root := pluginCommandFixture(t)
+			disputeIt(t, claudeDir, root)
+
+			got := ClaudeCodeInScope(Scope{ClaudeDir: claudeDir, Root: root, Project: ProjectConsented}, names)
+
+			key := identity{harness: claudeCode, kind: record.KindCommand, name: "code-review"}
+			if to, folded := got.canonical[key]; folded {
+				t.Fatalf("a disputed name was folded onto %+v", to)
+			}
+			for _, want := range []primitiveKey{
+				{kind: record.KindCommand, name: "code-review"},
+				{kind: record.KindSkill, name: "code-review:code-review"},
+			} {
+				if !discovered(got)[want] {
+					t.Fatalf("a refused fold lost %+v from %+v", want, got.Primitives)
+				}
+			}
+		})
+	}
+}
+
+// The DG-108 twin of TestClaudeCodeInScopeRefusesAFoldOntoAnotherKind: generalising
+// heldByAnotherKind to take the target kind must not open a hole. A listing declares
+// the target a skill, but a subagent already holds that name, and nothing states
+// which of the two the harness means — so the fold is refused rather than resolved
+// (ADR-0020).
+func TestClaudeCodeInScopeRefusesACrossKindFoldOntoAContestedName(t *testing.T) {
+	claudeDir, root := pluginCommandFixture(t)
+	write(t, filepath.Join(claudeDir, "projects", "agents.jsonl"),
+		`{"cwd":"`+root+`","attachment":{"type":"agent_listing_delta","addedTypes":["code-review:code-review"]}}`)
+
+	got := ClaudeCodeInScope(Scope{ClaudeDir: claudeDir, Root: root, Project: ProjectConsented}, names)
+
+	key := identity{harness: claudeCode, kind: record.KindCommand, name: "code-review"}
+	if to, folded := got.canonical[key]; folded {
+		t.Fatalf("a fold landed on a contested name: %+v", to)
+	}
+	for _, want := range []primitiveKey{
+		{kind: record.KindCommand, name: "code-review"},
+		{kind: record.KindSkill, name: "code-review:code-review"},
+		{kind: record.KindSubagent, name: "code-review:code-review"},
+	} {
+		if !discovered(got)[want] {
+			t.Fatalf("missing %+v in %+v", want, got.Primitives)
+		}
+	}
+}
+
+// A listing that could not be read collects nothing and licenses nothing: format
+// drift degrades soft, and it must never be able to flip a primitive's kind
+// (plan §4.3).
+func TestClaudeCodeInScopeIgnoresADeclarationFromAnUnreadableListing(t *testing.T) {
+	claudeDir := filepath.Join(t.TempDir(), ".claude")
+	root := t.TempDir()
+	writeInstalledPlugins(t, claudeDir, map[string]string{
+		"code-review@claude-plugins-official": pluginCommand(t, "code-review"),
+	})
+	write(t, filepath.Join(claudeDir, "projects", "session.jsonl"),
+		`{"cwd":"`+root+`","attachment":{"type":"skill_listing","content":"- code-review:code-review: `+strings.Repeat("A", 2*1024*1024)+`"}}`)
+
+	got := ClaudeCodeInScope(Scope{ClaudeDir: claudeDir, Root: root, Project: ProjectConsented}, names)
+
+	if len(got.canonical) != 0 {
+		t.Fatalf("canonical = %+v, want no entry", got.canonical)
+	}
+	if !discovered(got)[primitiveKey{kind: record.KindCommand, name: "code-review"}] {
+		t.Fatalf("the plugin's own command was lost: %+v", got.Primitives)
+	}
+}
+
 // discovered indexes a pass by the key the assertions above compare on.
 func discovered(got Discovery) map[primitiveKey]bool {
 	found := map[primitiveKey]bool{}
@@ -390,6 +530,38 @@ func pluginFixture(t *testing.T) (claudeDir, root string) {
 	write(t, filepath.Join(claudeDir, "skills", "gather-context", "SKILL.md"), "# user skill")
 	write(t, filepath.Join(claudeDir, "projects", "session.jsonl"), `{"cwd":"`+root+`","attachment":{"type":"skill_listing","content":"- gather-context: Use as the first pipeline stage\n- superpowers:brainstorming: You MUST use this\n- vercel:deploy: Deploy the current project"}}`)
 	return claudeDir, root
+}
+
+// pluginCommandFixture is the machine shape DG-108 resolves: a real
+// installed_plugins.json holding a plugin that ships a command, and a real
+// skill_listing naming that same command under its namespaced spelling, as Claude
+// Code writes both. Discovery therefore finds one primitive twice — bare under
+// record.KindCommand, namespaced under record.KindSkill.
+//
+// It is separate from pluginFixture on purpose: that fixture's fold is asserted
+// exhaustively with maps.Equal, and extending it would churn DG-106's tests for no
+// gain.
+func pluginCommandFixture(t *testing.T) (claudeDir, root string) {
+	t.Helper()
+	claudeDir = filepath.Join(t.TempDir(), ".claude")
+	root = t.TempDir()
+	writeInstalledPlugins(t, claudeDir, map[string]string{
+		"code-review@claude-plugins-official": pluginCommand(t, "code-review"),
+	})
+	write(t, filepath.Join(claudeDir, "projects", "session.jsonl"),
+		`{"cwd":"`+root+`","attachment":{"type":"skill_listing","content":"- code-review:code-review: Code review a pull request"}}`)
+	return claudeDir, root
+}
+
+// pluginCommand writes one plugin install directory holding one command and returns
+// the install path installed_plugins.json would name. A plugin command is discovered
+// bare from <installPath>/commands, while the harness lists and invokes it
+// namespaced — the disagreement DG-108 resolves.
+func pluginCommand(t *testing.T, command string) string {
+	t.Helper()
+	installPath := filepath.Join(t.TempDir(), "install")
+	write(t, filepath.Join(installPath, "commands", command+".md"), "# "+command)
+	return installPath
 }
 
 // pluginSkill writes one plugin install directory holding one skill and returns
