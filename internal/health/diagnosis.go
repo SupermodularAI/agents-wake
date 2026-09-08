@@ -36,6 +36,29 @@ const (
 	StoreRebuildNeeded    StoreRebuild = "run wake ingest --rebuild"
 )
 
+// CollectionScope is the word doctor prints for which scope the last scan ran under,
+// and it is exactly one of three.
+//
+// It is derived on every read and never written to the counter file, the way State and
+// StoreRebuild are: the file keeps a bounded Scope, and the word is this package's to
+// choose because internal/cli only parses and prints (ADR-0001, plan §6.2). Three words
+// over a two-value stored enum, because "no scan to describe" is a third answer and
+// rendering either scope for it would name a scope nobody measured. No word carries a
+// path separator: doctor output is what people paste into issues (ADR-0019 §7).
+type CollectionScope string
+
+const (
+	// CollectionScopeUnrecorded is what there is to say when there is no scan to
+	// describe.
+	CollectionScopeUnrecorded CollectionScope = "not recorded"
+	// CollectionScopeConsentedWindow is the scan that honoured each repository's
+	// recorded boundary.
+	CollectionScopeConsentedWindow CollectionScope = "forward from each consent instant"
+	// CollectionScopeWholeHistory is the scan that imported everything the harness
+	// holds for a consented repository.
+	CollectionScopeWholeHistory CollectionScope = "the whole history"
+)
+
 // Diagnosis is everything doctor prints that is derived rather than counted: the one
 // state word, whether there is a scan time to render at all, and whether the spool
 // itself still needs rebuilding.
@@ -55,6 +78,10 @@ type Diagnosis struct {
 	// StoreRebuild is the spool's own readability, which is a question about the store
 	// rather than about the sources State describes.
 	StoreRebuild StoreRebuild
+	// Scope is which collection scope produced the counters, so the reader can tell
+	// which question Skipped answers. CollectionScopeUnrecorded when there is no scan
+	// to describe — the same gate ScanKnown draws.
+	Scope CollectionScope
 }
 
 // Diagnose derives the one word ADR-0010 asks for, and it is exactly one of six.
@@ -163,9 +190,14 @@ type Diagnosis struct {
 // could not determine instead of failing in turn. ADR-0016 keeps the hook-invoked
 // scan silent, so doctor is the only surface that can say so.
 func Diagnose(report Report, countersErr, hooksErr error) Diagnosis {
-	diagnosis := Diagnosis{State: StateCollecting, StoreRebuild: storeRebuild(report.Scan)}
+	diagnosis := Diagnosis{State: StateCollecting, StoreRebuild: storeRebuild(report.Scan), Scope: CollectionScopeUnrecorded}
 	if countersErr == nil && !report.Scan.At.IsZero() {
 		diagnosis.ScanAt, diagnosis.ScanKnown = report.Scan.At, true
+		// The scope joins the same gate for the same reason the scan time is on it: a
+		// report nobody scanned, and one this build could not read, have no scope to
+		// name, and naming one anyway is the "collects zero for a state nobody
+		// measured" failure this package exists to refuse (ADR-0010).
+		diagnosis.Scope = collectionScope(report.Scan.Scope)
 	}
 
 	switch {
@@ -201,5 +233,20 @@ func storeRebuild(scan Scan) StoreRebuild {
 		return StoreRebuildDone
 	default:
 		return StoreRebuildNeeded
+	}
+}
+
+// collectionScope names the stored scope, and refuses to name a value this build does
+// not know: a counter file is a file this build wrote, but it is also a file on a
+// user's disk, and an unrecognised scope reads as no scope rather than as the nearest
+// one.
+func collectionScope(scope Scope) CollectionScope {
+	switch scope {
+	case ScopeConsentedWindow:
+		return CollectionScopeConsentedWindow
+	case ScopeWholeHistory:
+		return CollectionScopeWholeHistory
+	default:
+		return CollectionScopeUnrecorded
 	}
 }
