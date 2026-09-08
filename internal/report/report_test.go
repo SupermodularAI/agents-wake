@@ -314,6 +314,12 @@ func TestRenderShowsNoRepositoryColumnForUnusedPrimitives(t *testing.T) {
 	if strings.Contains(header, "PROJECT") {
 		t.Fatalf("unused table header carries a repository column: %q", header)
 	}
+	// And the gloss travels with the column. Hoisted out of primitiveUsage it would
+	// explain a column an unused-only report never prints, which reads as the bug
+	// plan §4.5 names rather than as an absence.
+	if strings.Contains(output.String(), "PROJECT is the project") {
+		t.Errorf("unused-only report explains a column it does not print:\n%s", output.String())
+	}
 }
 
 // TestRenderMakesNoClaimThatRepositoryLabelsAreNeverShown keeps the closing
@@ -500,6 +506,8 @@ func TestRenderNamesTheProjectColumnAndNeverTheSessionGrain(t *testing.T) {
 	if start < 0 {
 		t.Fatalf("report has no used-primitives section:\n%s", text)
 	}
+	// Deliberately unbounded: the used table is the last thing Render writes here, and
+	// the constraint is meant to bind any footnote a later ticket appends below it too.
 	section := text[start:]
 	if !strings.Contains(section, "PROJECT is the project each invocation's own working directory resolved to") {
 		t.Errorf("used-primitives section does not say what the PROJECT column holds:\n%s", section)
