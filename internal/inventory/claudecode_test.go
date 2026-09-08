@@ -705,3 +705,74 @@ func TestClaudeCodeDiscoveryYieldsOneRowForAPluginCommandTheListingCallsASkill(t
 		t.Fatalf("code-review:code-review = %+v, want 3 invocations accumulated from both spellings", used)
 	}
 }
+
+// Order-independence is a property of the construction, not of one ordering: the
+// fold is computed over the completed discovered set, so nothing about it may depend
+// on which session file was walked first, which entry a listing carried first, or
+// which order installed_plugins.json's map happened to yield (ADR-0004).
+//
+// Every variant below is the same logical machine — one folding plugin skill
+// (DG-106) and one folding plugin command (DG-108) — assembled a different way, and
+// each is repeated because Go walks both o.plugins and discovered as maps.
+func TestClaudeCodeInScopeFoldsTheSameWayInAnyDiscoveryOrder(t *testing.T) {
+	skillEntry := "- superpowers:brainstorming: You MUST use this"
+	commandEntry := "- code-review:code-review: Code review a pull request"
+	variants := map[string]func(t *testing.T) (claudeDir, root string){
+		"one listing, skill entry first": func(t *testing.T) (string, string) {
+			return orderFixture(t, map[string][]string{"session.jsonl": {skillEntry, commandEntry}})
+		},
+		"one listing, command entry first": func(t *testing.T) (string, string) {
+			return orderFixture(t, map[string][]string{"session.jsonl": {commandEntry, skillEntry}})
+		},
+		"two listings, skill in the lexically first file": func(t *testing.T) (string, string) {
+			return orderFixture(t, map[string][]string{"a-session.jsonl": {skillEntry}, "z-session.jsonl": {commandEntry}})
+		},
+		"two listings, command in the lexically first file": func(t *testing.T) (string, string) {
+			return orderFixture(t, map[string][]string{"a-session.jsonl": {commandEntry}, "z-session.jsonl": {skillEntry}})
+		},
+	}
+
+	var first *Discovery
+	for name, build := range variants {
+		t.Run(name, func(t *testing.T) {
+			claudeDir, root := build(t)
+			scope := Scope{ClaudeDir: claudeDir, Root: root, Project: ProjectConsented}
+			for range 3 {
+				got := ClaudeCodeInScope(scope, names)
+				if first == nil {
+					snapshot := got
+					first = &snapshot
+					continue
+				}
+				if !slices.Equal(got.Primitives, first.Primitives) {
+					t.Fatalf("discovered %+v, want %+v", got.Primitives, first.Primitives)
+				}
+				if !maps.Equal(got.canonical, first.canonical) {
+					t.Fatalf("folded %+v, want %+v", got.canonical, first.canonical)
+				}
+			}
+		})
+	}
+	if first == nil || len(first.canonical) != 2 {
+		t.Fatalf("the fixture folds %+v, want both a skill and a command fold", first)
+	}
+}
+
+// orderFixture is one plugin skill and one plugin command, with the listing entries
+// that name them distributed across the session files named. The plugins are written
+// with marketplace qualifiers and install paths whose sorted order differs from their
+// insertion order, so installedPlugins' own sort is what decides, not the map walk.
+func orderFixture(t *testing.T, listings map[string][]string) (claudeDir, root string) {
+	t.Helper()
+	claudeDir = filepath.Join(t.TempDir(), ".claude")
+	root = t.TempDir()
+	writeInstalledPlugins(t, claudeDir, map[string]string{
+		"superpowers@zz-marketplace":          pluginSkill(t, "brainstorming"),
+		"code-review@aa-claude-plugins-first": pluginCommand(t, "code-review"),
+	})
+	for file, entries := range listings {
+		write(t, filepath.Join(claudeDir, "projects", file),
+			`{"cwd":"`+root+`","attachment":{"type":"skill_listing","content":"`+strings.Join(entries, `\n`)+`"}}`)
+	}
+	return claudeDir, root
+}
