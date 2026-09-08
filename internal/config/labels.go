@@ -17,7 +17,7 @@ package config
 // It is the projection ADR-0033 authorises and nothing wider: the label's value,
 // never the root, never an alias, never the boundary. Two callers project it, and
 // neither widens that: the OTLP encoder, which puts the value on the wire at flush
-// time (ADR-0033 §2), and the local renderers' repository column, which is the
+// time (ADR-0033 §2), and the local renderers' PROJECT column, which is the
 // readable-names purpose this local map was created for (ADR-0014 § Decision).
 // projects.json itself still never travels as a file — only these values do, the
 // way the hashed id already does.

@@ -64,7 +64,7 @@ func spoolLines(t *testing.T, path string) int {
 
 // reportedCalls returns the CALLS column of the USED PRIMITIVES row naming name — the
 // number a person reads out of `wake report`. Anchored from the front, at the field past
-// PRIMITIVE, TYPE, HARNESS, REPO and LAST USED, rather than a substring search or a
+// PRIMITIVE, TYPE, HARNESS, PROJECT and LAST USED, rather than a substring search or a
 // from-the-end offset: those five columns are each a single token by construction — a
 // repository cell is either a bounded token or repo-<hex>, neither of which holds
 // whitespace — but ERRORS (last) is multi-token whenever a primitive has failures, which
@@ -74,7 +74,7 @@ func spoolLines(t *testing.T, path string) int {
 // only stable choice, and the widened cell makes it more so, not less.
 func reportedCalls(t *testing.T, rendered, name string) string {
 	t.Helper()
-	const callsIndex = 5 // PRIMITIVE, TYPE, HARNESS, REPO, LAST USED, then CALLS
+	const callsIndex = 5 // PRIMITIVE, TYPE, HARNESS, PROJECT, LAST USED, then CALLS
 	for line := range strings.Lines(rendered) {
 		fields := strings.Fields(line)
 		if len(fields) <= callsIndex || fields[0] != name {

@@ -275,7 +275,7 @@ func TestRenderShowsOneRowPerRepositoryWithItsLabel(t *testing.T) {
 		t.Fatalf("Render() error = %v", err)
 	}
 	text := output.String()
-	for _, want := range []string{"REPO", "agents-wake", "repo-fedcba987654"} {
+	for _, want := range []string{"PROJECT", "agents-wake", "repo-fedcba987654"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("report missing %q:\n%s", want, text)
 		}
@@ -284,7 +284,7 @@ func TestRenderShowsOneRowPerRepositoryWithItsLabel(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("rows for `review` = %d, want one per repository:\n%s", len(rows), text)
 	}
-	// By field position on the plain rendering: PRIMITIVE, TYPE, HARNESS, REPO.
+	// By field position on the plain rendering: PRIMITIVE, TYPE, HARNESS, PROJECT.
 	for _, row := range rows {
 		fields := strings.Fields(row)
 		if len(fields) < 4 || fields[3] == "" {
@@ -304,13 +304,14 @@ func TestRenderShowsNoRepositoryColumnForUnusedPrimitives(t *testing.T) {
 	if err := Render(&output, metrics.Aggregate(nil, nil), available, Options{Unused: true}); err != nil {
 		t.Fatalf("Render() error = %v", err)
 	}
-	// The table's own header row, not the whole report: "WAKE REPORT" contains
-	// "REPO", and the closing disclaimer names repository paths.
+	// The table's own header row, not the whole report: the used table's header and
+	// the sentence explaining it both name the column, and the closing disclaimer
+	// names repository paths.
 	header := lineStartingWith(output.String(), "PRIMITIVE")
 	if header == "" {
 		t.Fatalf("unused-only report has no primitive table:\n%s", output.String())
 	}
-	if strings.Contains(header, "REPO") {
+	if strings.Contains(header, "PROJECT") {
 		t.Fatalf("unused table header carries a repository column: %q", header)
 	}
 }
@@ -477,5 +478,36 @@ func TestRenderKeepsAUsedServerOutOfUnusedPrimitives(t *testing.T) {
 	}
 	if !strings.Contains(text, "Total unused\t1") && !strings.Contains(text, "Total unused  1") {
 		t.Errorf("Total unused counted the used server:\n%s", text)
+	}
+}
+
+// TestRenderNamesTheProjectColumnAndNeverTheSessionGrain is DG-105 at the terminal.
+// The column holds the project an invocation is attributed to — a property of the
+// invocation grain (ADR-0002) — and the session-anchor reading was rejected on the
+// merits (ADR-0038 §2). So the used table's header and every sentence around it must
+// name the project and must not reach for "session", which is a delimited grain term
+// here (ADR-0034 §1), not a loose word for "the run".
+func TestRenderNamesTheProjectColumnAndNeverTheSessionGrain(t *testing.T) {
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	available := []inventory.Usage{{Harness: "claude-code", Kind: record.KindSkill, Name: "review", Repo: "0123456789abcdef0123456789abcdef", Invocations: 2, LastUsed: at}}
+
+	var output bytes.Buffer
+	if err := Render(&output, metrics.Aggregate(nil, nil), available, Options{Usage: true}); err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	text := output.String()
+	start := strings.Index(text, "USED PRIMITIVES")
+	if start < 0 {
+		t.Fatalf("report has no used-primitives section:\n%s", text)
+	}
+	section := text[start:]
+	if !strings.Contains(section, "PROJECT is the project each invocation's own working directory resolved to") {
+		t.Errorf("used-primitives section does not say what the PROJECT column holds:\n%s", section)
+	}
+	if strings.Contains(section, "REPO") {
+		t.Errorf("used-primitives section still names the column REPO:\n%s", section)
+	}
+	if strings.Contains(strings.ToLower(section), "session") {
+		t.Errorf("the PROJECT column's copy names the session grain:\n%s", section)
 	}
 }
