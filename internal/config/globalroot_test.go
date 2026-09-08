@@ -20,6 +20,22 @@ func setGlobalRoot(t *testing.T, r *Repos, root string) {
 	}
 }
 
+// mustRegisterUnderGlobalRoot registers a directory the boundary encloses the way a
+// scan does — the auto-registration path, with no explicit `wake init` anywhere — and
+// fails the case if it is refused. It is the counterpart of mustRegister for the one
+// other call site ADR-0032 §2 licenses.
+func mustRegisterUnderGlobalRoot(t *testing.T, r *Repos, dir string, from time.Time) string {
+	t.Helper()
+	id, err := r.RegisterUnderGlobalRoot(dir, from)
+	if err != nil {
+		t.Fatalf("RegisterUnderGlobalRoot(%q) = %v", dir, err)
+	}
+	if id == "" {
+		t.Fatal("RegisterUnderGlobalRoot() returned no id")
+	}
+	return id
+}
+
 // rewriteProjectsJSON edits the table on disk through a generic decode, so a case can
 // change one recorded field and leave every digest exactly as it was. That is the
 // hand-edit the digests exist to catch, and writeProjects would never produce it.
@@ -470,5 +486,130 @@ func TestDefaultGlobalRootIsTheHomeDirectory(t *testing.T) {
 	}
 	if got != home {
 		t.Errorf("DefaultGlobalRoot() = %q, want the home directory %q", got, home)
+	}
+}
+
+// DG-109. The path that becomes the everyday one once a global root is recorded: a
+// linked worktree a scan discovers under the boundary gains the repository it belongs
+// to, and no `wake init` is ever run inside it. Registration-during-ingest *is*
+// registration and calls the identical function (ADR-0032 §2), so it records the
+// relation the registration path records (ADR-0040 §2).
+//
+// The parent is registered first because ADR-0040 §2 is explicit that a parent this
+// table does not hold is a parent this machine has not consented: the relation would
+// be refused, which is the separate case below.
+func TestRegisterUnderGlobalRootRecordsTheWorktreeRelationWithNoExplicitInit(t *testing.T) {
+	requireGit(t)
+	p := testPaths(t)
+	// The sibling-worktree fixture DG-104 added (ADR-0019 §5: a worktree inside the
+	// main checkout would be nested with a consented root and refused). The boundary
+	// is the directory holding both siblings, and it encloses many roots legitimately
+	// because a boundary is not itself a root (ADR-0032 §3).
+	main, worktree := initWorktree(t)
+	boundary := filepath.Dir(main)
+	from := time.Now().UTC()
+
+	r := openRepos(t, p)
+	setGlobalRoot(t, r, boundary)
+
+	mainID := mustRegisterUnderGlobalRoot(t, r, main, from)
+	worktreeID := mustRegisterUnderGlobalRoot(t, r, worktree, from)
+
+	if mainID == worktreeID {
+		t.Fatalf("the worktree registered under the main checkout's identity %q; a worktree is its own repository (ADR-0019 §6)", mainID)
+	}
+	if got := recordedEntry(t, p, worktreeID).BelongsTo; got != mainID {
+		t.Errorf("the worktree's belongs_to = %q, want the main checkout's id %q — auto-registration under a boundary must record the relation without an explicit init", got, mainID)
+	}
+	// Requirement 2. An entry that belongs to itself is not a worktree, and valid()
+	// refuses one as the floor (ADR-0040 §1).
+	if got := recordedEntry(t, p, mainID).BelongsTo; got != "" {
+		t.Errorf("the main checkout's belongs_to = %q, want none", got)
+	}
+	// Nothing absorbed and nothing reassigned: two entries, each under its own root.
+	if entries := recordedEntries(t, p); len(entries) != 2 {
+		t.Fatalf("projects.json holds %d entries, want 2", len(entries))
+	}
+	for _, want := range []struct{ id, root string }{{mainID, main}, {worktreeID, worktree}} {
+		if got := recordedEntry(t, p, want.id).Root; got != want.root {
+			t.Errorf("entry %q has root %q, want %q", want.id, got, want.root)
+		}
+	}
+}
+
+// DG-109, requirement 3. Most directories under a boundary are not worktrees, and the
+// absence has to be an asserted absence rather than an untested default: belongs_to is
+// omitempty, so a wrong value and no value serialise differently but read alike.
+//
+// No requireGit: a plain directory is a repository wake will consent (ADR-0019 §5) and
+// a worktree of nothing, and the parent lookup in internal/config/root.go answers nil
+// in every git failure direction, so the absence is the same with git present and with
+// git missing. This mirrors TestRegisterUnderGlobalRootRecordsTheForwardOnlyInstant,
+// which registers a plain directory the same way.
+func TestRegisterUnderGlobalRootRecordsNoRelationForAPlainRepository(t *testing.T) {
+	p := testPaths(t)
+	boundary := tempRealDir(t)
+	plain := mkdirAll(t, filepath.Join(boundary, "plain"))
+	from := time.Now().UTC()
+
+	r := openRepos(t, p)
+	setGlobalRoot(t, r, boundary)
+
+	id := mustRegisterUnderGlobalRoot(t, r, plain, from)
+	if got := recordedEntry(t, p, id).BelongsTo; got != "" {
+		t.Errorf("belongs_to = %q, want none; a plain repository belongs to nothing", got)
+	}
+}
+
+// DG-109, requirement 4. A boundary walk has no opinion about which of two sibling
+// directories it reaches first, and the explicit-`init` path never exercises the order
+// where the worktree comes first. ADR-0040 §2 decides it: a parent this table does not
+// hold is a parent this machine has not consented, so the *relation* is refused and the
+// registration is not.
+//
+// The refusal is permanent rather than pending. §2's "never moved and never cleared"
+// and §6's "Nothing is rewritten on read" mean nothing fills it in afterwards, and the
+// scan never offers the directory again — resolverFor observes a cwd only when
+// Identify did not match it (internal/activation/activation.go), which is ADR-0032 §5's
+// "matches no recorded entry". The remedy is the one ADR-0040 §6 names: `wake init`
+// inside the worktree.
+//
+// This divergence between the two orders is not an ADR-0004 breach. Repos.Identify
+// never reads belongs_to (ADR-0040 §1), so no stored id, no event_id and no wake.repo
+// hash varies with registration order; only the render-time and flush-time roll-up
+// does (ADR-0040 §4, §5), which is an accepted consequence of ADR-0040.
+func TestRegisterUnderGlobalRootRefusesTheRelationWhenTheWorktreeIsDiscoveredFirst(t *testing.T) {
+	requireGit(t)
+	p := testPaths(t)
+	main, worktree := initWorktree(t)
+	boundary := filepath.Dir(main)
+	from := time.Now().UTC()
+
+	r := openRepos(t, p)
+	setGlobalRoot(t, r, boundary)
+
+	worktreeID := mustRegisterUnderGlobalRoot(t, r, worktree, from)
+	if got := recordedEntry(t, p, worktreeID).BelongsTo; got != "" {
+		t.Fatalf("belongs_to = %q with the parent not yet consented, want none (ADR-0040 §2)", got)
+	}
+
+	mainID := mustRegisterUnderGlobalRoot(t, r, main, from)
+	if mainID == worktreeID {
+		t.Fatalf("the two siblings share the id %q", mainID)
+	}
+	if got := recordedEntry(t, p, worktreeID).BelongsTo; got != "" {
+		t.Errorf("belongs_to = %q once the parent registered, want none; a refused relation is never filled in later (ADR-0040 §2, §6)", got)
+	}
+	if got := recordedEntry(t, p, mainID).BelongsTo; got != "" {
+		t.Errorf("the main checkout's belongs_to = %q, want none", got)
+	}
+	// Deterministic rather than merely not-yet: the worktree now matches a recorded
+	// entry, so the walk that would re-offer it never sees it again.
+	identity := mustIdentify(t, r, worktree)
+	if !identity.Matched || identity.ID != worktreeID {
+		t.Fatalf("Identify(the worktree) = %+v, want its own id %q matched", identity, worktreeID)
+	}
+	if entries := recordedEntries(t, p); len(entries) != 2 {
+		t.Errorf("projects.json holds %d entries, want 2", len(entries))
 	}
 }
