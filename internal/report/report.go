@@ -163,7 +163,7 @@ func primitiveUsage(writer io.Writer, available []inventory.Usage, labels repola
 	if _, err := fmt.Fprintln(writer, "\n"+heading(pretty, "USED PRIMITIVES")); err != nil {
 		return err
 	}
-	rows := newTable("PRIMITIVE", "TYPE", "HARNESS", "REPO", "LAST USED", "CALLS", "ERRORS")
+	rows := newTable("PRIMITIVE", "TYPE", "HARNESS", "PROJECT", "LAST USED", "CALLS", "ERRORS")
 	// unmatched tracks whether a printed row needs the footnote below, so the note
 	// is earned by what this table actually shows rather than by a second pass over
 	// rows the reader cannot see.
@@ -185,6 +185,9 @@ func primitiveUsage(writer io.Writer, available []inventory.Usage, labels repola
 	if _, err := fmt.Fprintln(writer, "Only currently discovered, non-built-in primitives are listed."); err != nil {
 		return err
 	}
+	if _, err := fmt.Fprintln(writer, "PROJECT is the project each invocation's own working directory resolved to; a linked worktree counts under the repository it belongs to."); err != nil {
+		return err
+	}
 	if !unmatched {
 		return nil
 	}
@@ -198,7 +201,7 @@ func unusedPrimitives(writer io.Writer, available []inventory.Usage, pretty bool
 	if _, err := fmt.Fprintln(writer, "\n"+heading(pretty, "UNUSED PRIMITIVES")); err != nil {
 		return err
 	}
-	// No REPO column here: an unused primitive has zero invocations, and a
+	// No PROJECT column here: an unused primitive has zero invocations, and a
 	// repository is a property of an invocation (ADR-0002), so there is nothing to
 	// put in the cell. A column of dashes is the empty column plan §4.5 forbids.
 	rows := newTable("PRIMITIVE", "TYPE", "HARNESS")

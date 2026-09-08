@@ -178,7 +178,7 @@ func TestHandlerShowsARepositoryColumnPerRepository(t *testing.T) {
 	response := httptest.NewRecorder()
 	Handler(source, primitives, repolabel.Labels{labelled: "agents-wake"}, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
 	body := response.Body.String()
-	for _, want := range []string{">Repo<", ">agents-wake<", ">repo-fedcba987654<"} {
+	for _, want := range []string{">Project<", ">agents-wake<", ">repo-fedcba987654<"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard is missing %q: %s", want, body)
 		}
@@ -187,7 +187,7 @@ func TestHandlerShowsARepositoryColumnPerRepository(t *testing.T) {
 
 // TestHandlerShowsNoRepositoryColumnForUnusedPrimitives: the usage table has the
 // column, the unused table does not — an uninvoked primitive has no repository
-// (ADR-0002), so exactly one Repo header appears in a body rendering both tables.
+// (ADR-0002), so exactly one Project header appears in a body rendering both tables.
 func TestHandlerShowsNoRepositoryColumnForUnusedPrimitives(t *testing.T) {
 	ok := record.OutcomeOK
 	source := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
@@ -211,8 +211,8 @@ func TestHandlerShowsNoRepositoryColumnForUnusedPrimitives(t *testing.T) {
 			t.Fatalf("dashboard did not render both tables (%q missing): %s", want, body)
 		}
 	}
-	if count := strings.Count(body, ">Repo<"); count != 1 {
-		t.Fatalf("Repo header count = %d, want 1 (the usage table only): %s", count, body)
+	if count := strings.Count(body, ">Project<"); count != 1 {
+		t.Fatalf("Project header count = %d, want 1 (the usage table only): %s", count, body)
 	}
 }
 
@@ -366,5 +366,42 @@ func TestViewMarksASubagentRowWithNoRatedPopulationAsUnrated(t *testing.T) {
 	}
 	if result.Usage[0].Errors != "unrated (0 of 3 rated)" {
 		t.Errorf("Errors = %q, want %q", result.Usage[0].Errors, "unrated (0 of 3 rated)")
+	}
+}
+
+// TestHandlerNamesTheProjectColumnAndNeverTheSessionGrain is DG-105 on the dashboard,
+// the same check the terminal report carries. The usage section names the project an
+// invocation is attributed to (ADR-0002), and does not reach for "session" — the
+// session grain is a different thing and ADR-0038 §2 rejected anchoring to it.
+func TestHandlerNamesTheProjectColumnAndNeverTheSessionGrain(t *testing.T) {
+	const labelled = "0123456789abcdef0123456789abcdef"
+	source := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	if _, err := source.Append([]record.Record{repoEvent("here", labelled)}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	primitives := inventory.New(filepath.Join(t.TempDir(), "primitives.json"))
+	discovered := inventory.Discovery{Primitives: []inventory.Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "review"}}, ProjectScanned: true}
+	if err := primitives.Refresh(source, discovered, nil); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	response := httptest.NewRecorder()
+	Handler(source, primitives, repolabel.Labels{labelled: "agents-wake"}, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := response.Body.String()
+	const note = "Project is the project each invocation's own working directory resolved to"
+	start := strings.Index(body, note)
+	if start < 0 {
+		t.Fatalf("dashboard does not say what the Project column holds: %s", body)
+	}
+	end := strings.Index(body[start:], "</section>")
+	if end < 0 {
+		t.Fatalf("usage section is unterminated: %s", body)
+	}
+	section := body[start : start+end]
+	if strings.Contains(strings.ToLower(section), "session") {
+		t.Errorf("the Project column's copy names the session grain: %s", section)
+	}
+	if strings.Contains(body, ">Repo<") {
+		t.Errorf("dashboard still headers the column Repo: %s", body)
 	}
 }

@@ -14,6 +14,19 @@ called out under Changed.
 - `SECURITY.md`, `CODE_OF_CONDUCT.md`, and this changelog.
 - Secret, vulnerability, and commit-style gates in CI.
 
+### Changed
+
+- `wake report` and the dashboard name the repository column **PROJECT** (`Project` in the
+  dashboard; was `REPO`), and the docs now say what that value is: the project each invocation's
+  own working directory resolved to, and for a linked worktree the repository it belongs to. Nothing about the value changes —
+  no stored record, no identity, no delivered attribute; `wake.repo` and `wake.repo_label` carry
+  exactly what they carried, and no re-ingest or `--rebuild` is needed. Only the reading changes:
+  an agent driving work from one project into another checkout has that work counted under the
+  driver. Measured on a real Claude Code corpus on 2026-09-08 (1,273 transcripts, 111,630 entries,
+  19 consented repositories): of the 69 sessions that did resolvable file-changing work, 1 (1.4 %)
+  did all of it in another project and 11 (15.9 %) touched more than one — a partial answer, not a
+  wrong one.
+
 ### Fixed
 
 - A git worktree no longer splits one project across several rows in `wake report`,

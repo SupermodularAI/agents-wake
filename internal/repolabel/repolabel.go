@@ -19,7 +19,7 @@ type Labels map[string]string
 // to keep every repository on one machine distinguishable.
 const idPrefix = 12
 
-// Display returns what a repository column shows for repo.
+// Display returns what the PROJECT column shows for repo.
 //
 // Never blank and never invented (ADR-0007; ADR-0033 §3; plan §4.5 as DG-93
 // applies it). Three cases, in order:
