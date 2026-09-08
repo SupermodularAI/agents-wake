@@ -13,8 +13,11 @@
 // ADR-0007 applied to diagnostics). A test asserts the field types, because the
 // temptation a later change will feel is to add "and here is why" as a string. A bool
 // is admitted on the same terms as an int and no looser — two values, neither of them
-// text — and only for a fact that is a yes or a no rather than a count. The
-// state word `doctor` prints is Diagnose's return value derived over these counters
+// text — and only for a fact that is a yes or a no rather than a count. A defined int
+// enum is admitted on those same terms: named values, bounded, none of them text. There
+// is one, Scope, and it says which of the two collection scopes produced the counters
+// beside it — a fact with exactly two answers, neither of which a count could carry.
+// The state word `doctor` prints is Diagnose's return value derived over these counters
 // on every read, and never a field in the file.
 //
 // The file is derived and non-precious. It lives under the data root, and deleting
@@ -69,7 +72,18 @@ import (
 // version-6 file read as this format would report 0 for a counter nobody measured, and
 // it is the only line that says a typed invocation named something this machine has no
 // primitive for. Same failure, same remedy, same cost.
-const reportVersion = 7
+//
+// Bumped to 8 when the scan gained the collection scope that produced its counters
+// (DG-110): a version-7 file carries no scope, and the zero value here is a real one —
+// ScopeConsentedWindow. Skipped is precisely the counter that turns on it, because a
+// transcript whose events all predate its repository's consent instant derives nothing
+// under one scope and derives records under the other: one machine, one afternoon and
+// no consent change reported 1041 skipped under the boundary-honouring scan and 143
+// under a scan of the whole history. So a defaulted scope would not leave a number
+// unexplained, it would explain it wrongly, which is the worse half of the failure the
+// bump to 2 avoided. Same remedy, and the same cost — one scan's diagnostics, on a file
+// that is derived and non-precious (ADR-0014).
+const reportVersion = 8
 
 // reportFileMode is the mode the counter file is written with. It holds no path and
 // no label, but it is state about this user's machine and the rest of the local
@@ -238,7 +252,42 @@ type Scan struct {
 	// that is still owed is: those records are in the store and no surface can read
 	// them, which is the definition that arm exists for.
 	StaleRebuilt bool `json:"stale_rebuilt"`
+	// Scope is which collection scope produced the counters above, and Skipped is the
+	// counter that needs it: a transcript whose events all predate its repository's
+	// consent instant derives nothing under ScopeConsentedWindow and derives records
+	// under ScopeWholeHistory, so one machine's unchanged history reports a different
+	// Skipped depending only on which scan ran — 1041 against 143 in one afternoon
+	// (DG-110). Both numbers are right; without this field a reader cannot tell which
+	// question either of them answers.
+	//
+	// It is stamped by the one function that already carries the scope
+	// (activation.scanWithBoundary) and is never derived from the counters.
+	Scope Scope `json:"scope"`
 }
+
+// Scope is which of the two collection scopes a scan ran under, and it is exactly
+// one of two.
+//
+// A defined int rather than a string, for the reason the package comment gives: this
+// file carries counts, flags and bounded values and never text (ADR-0007 applied to
+// diagnostics). internal/health owns it rather than sharing internal/activation's own
+// collectionScope, because internal/activation imports this package and the reverse
+// import would be a cycle; the two are mapped at the one place a scan is recorded.
+//
+// Its zero value is a real scope, the way StaleRebuilt's false is a real answer, so a
+// file written by a format that did not carry it must never be read as this one.
+// reportVersion 8 is what refuses it.
+type Scope int
+
+const (
+	// ScopeConsentedWindow is the scan nobody asked for — the one a hook fires —
+	// which collects inside each repository's recorded boundary (ADR-0024, ADR-0025).
+	ScopeConsentedWindow Scope = iota
+	// ScopeWholeHistory is the scan the user asked for: `wake init --full`,
+	// `wake ingest` and `wake ingest --rebuild`, which import everything the harness
+	// holds for a consented repository.
+	ScopeWholeHistory
+)
 
 // Hooks is what the last `init` or `remove` managed to do. KeptOwned is the partial
 // state the ticket asks to surface: a group carrying Wake's marker that `remove`
