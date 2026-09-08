@@ -283,3 +283,50 @@ func TestDiagnoseDoesNotBlindTheStateOnASkippedTypedInvocation(t *testing.T) {
 		t.Errorf("State = %q, want %q", got.State, StateCollecting)
 	}
 }
+
+// The scope joins the scan time on the same gate, and for the same reason: a report
+// nobody has scanned and a counter file nobody could read have no scope to name, and
+// naming one anyway renders a scope nobody measured.
+func TestDiagnoseNamesTheScopeTheScanRanUnder(t *testing.T) {
+	if got := Diagnose(Report{Scan: Scan{At: scannedAt, EventsWritten: 1, Scope: ScopeConsentedWindow}}, nil, nil); got.Scope != CollectionScopeConsentedWindow {
+		t.Errorf("Scope = %q, want %q", got.Scope, CollectionScopeConsentedWindow)
+	}
+	if got := Diagnose(Report{Scan: Scan{At: scannedAt, EventsWritten: 1, Scope: ScopeWholeHistory}}, nil, nil); got.Scope != CollectionScopeWholeHistory {
+		t.Errorf("Scope = %q, want %q", got.Scope, CollectionScopeWholeHistory)
+	}
+	if got := Diagnose(Report{}, nil, nil); got.Scope != CollectionScopeUnrecorded {
+		t.Errorf("Scope = %q for a report nobody has scanned, want %q", got.Scope, CollectionScopeUnrecorded)
+	}
+	if got := Diagnose(Report{Scan: Scan{At: scannedAt, Scope: ScopeWholeHistory}}, errors.New("corrupt"), nil); got.Scope != CollectionScopeUnrecorded {
+		t.Errorf("Scope = %q for a counter file nobody could read, want %q", got.Scope, CollectionScopeUnrecorded)
+	}
+}
+
+// The closed-enum tripwire, the way TestDiagnoseOnlyEverReturnsAKnownState is one: a
+// stored value this build does not know — a hand-edited file, or a file from a format
+// nobody here has seen — reads as no scope rather than as the nearest one.
+func TestDiagnoseOnlyEverReturnsAKnownCollectionScope(t *testing.T) {
+	known := map[CollectionScope]bool{
+		CollectionScopeUnrecorded:      true,
+		CollectionScopeConsentedWindow: true,
+		CollectionScopeWholeHistory:    true,
+	}
+
+	reports := []Report{
+		{},
+		{Scan: Scan{At: scannedAt}},
+		{Scan: Scan{At: scannedAt, Scope: ScopeWholeHistory}},
+		{Scan: Scan{At: scannedAt, Scope: Scope(9)}},
+	}
+	failures := []error{nil, errors.New("refused")}
+
+	for _, report := range reports {
+		for _, countersErr := range failures {
+			for _, hooksErr := range failures {
+				if got := Diagnose(report, countersErr, hooksErr); !known[got.Scope] {
+					t.Errorf("Diagnose(%+v, %v, %v).Scope = %q, which is not one of the three", report, countersErr, hooksErr, got.Scope)
+				}
+			}
+		}
+	}
+}

@@ -19,7 +19,7 @@ func TestDoctorReportsNeverScannedOnAFreshInstall(t *testing.T) {
 		t.Fatalf("doctor error = %v", err)
 	}
 
-	for _, want := range []string{"integration: never scanned", "last scan: never"} {
+	for _, want := range []string{"integration: never scanned", "last scan: never", "collection scope: not recorded"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output is missing %q:\n%s", want, out)
 		}
@@ -428,4 +428,102 @@ func TestDoctorReportsSkippedTypedInvocationsWithoutBlindingTheState(t *testing.
 			t.Errorf("output is missing %q:\n%s", want, out)
 		}
 	}
+}
+
+// The acceptance criterion, and the reason this ticket exists: doctor's `skipped
+// transcripts` is scope-blind. One machine, one afternoon, one unchanged set of
+// transcripts and no consent change reported 1041 skipped under the hook-fired scan and
+// 143 under `wake ingest`, and an operator read the drop as a consent boundary
+// unlocking ~900 transcripts. Both numbers are right — the boundary-honouring scan
+// derives nothing from a transcript that predates its repository's consent instant, and
+// a scan of the whole history derives records from the very same file.
+//
+// So this pins the pairing rather than the field: the count and the word are asserted
+// together, and asserted to differ across the two scopes over one fixture set. A test
+// that only asserted the field exists would still pass while the rendering regressed to
+// a constant, which is precisely the state the counter is in today.
+func TestDoctorPairsTheSkippedCountWithTheScopeThatProducedIt(t *testing.T) {
+	isolate(t)
+	dir := claudeHome(t)
+	root := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("MkdirAll() root error = %v", err)
+	}
+	t.Chdir(root)
+	// The resolved form, which is what init registers: on darwin t.TempDir() sits
+	// behind a symlink, and a transcript naming the unresolved path would resolve to
+	// no consented repository and be skipped for the wrong reason.
+	consented, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error = %v", err)
+	}
+	// A plain `init`: forward-only, so the consent instant is now and the fixture
+	// below is historical relative to it (ADR-0024).
+	if out, initErr := run(t, "init"); initErr != nil {
+		t.Fatalf("init error = %v: %s", initErr, out)
+	}
+
+	// One fixture set, written once and never touched again — both scans read exactly
+	// this, so the two numbers can differ only by the scope.
+	transcriptDir := filepath.Join(dir, "projects", "session")
+	if err = os.MkdirAll(transcriptDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll() transcript error = %v", err)
+	}
+	transcript := `{"uuid":"entry-1","sessionId":"session-1","cwd":"` + consented + `","timestamp":"2026-08-17T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}
+{"uuid":"entry-2","sessionId":"session-1","cwd":"` + consented + `","timestamp":"2026-08-17T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`
+	if err = os.WriteFile(filepath.Join(transcriptDir, "session.jsonl"), []byte(transcript), 0o600); err != nil {
+		t.Fatalf("WriteFile() transcript error = %v", err)
+	}
+
+	// The hook-fired scan first, against an empty store, so its skip cannot be
+	// confused with a source that was merely already imported. It is silent and nil
+	// whatever it found (ADR-0016).
+	out, stderr, err := runSplit(t, "ingest", "--quiet", "--hook-scan")
+	if err != nil || out != "" || stderr != "" {
+		t.Fatalf("hook scan = (%q, %q, %v), want silence and nil (ADR-0016)", out, stderr, err)
+	}
+	consentedWindowOut, _, err := runSplit(t, "doctor")
+	if err != nil {
+		t.Fatalf("doctor after the hook scan error = %v", err)
+	}
+
+	if _, _, err = runSplit(t, "ingest"); err != nil {
+		t.Fatalf("ingest error = %v", err)
+	}
+	wholeHistoryOut, _, err := runSplit(t, "doctor")
+	if err != nil {
+		t.Fatalf("doctor after ingest error = %v", err)
+	}
+
+	windowSkipped := lineValue(t, consentedWindowOut, "skipped transcripts")
+	windowScope := lineValue(t, consentedWindowOut, "collection scope")
+	historySkipped := lineValue(t, wholeHistoryOut, "skipped transcripts")
+	historyScope := lineValue(t, wholeHistoryOut, "collection scope")
+
+	if windowSkipped != "1" || windowScope != "forward from each consent instant" {
+		t.Errorf("the hook-fired scan reported skipped %q under scope %q, want \"1\" under \"forward from each consent instant\":\n%s", windowSkipped, windowScope, consentedWindowOut)
+	}
+	if historySkipped != "0" || historyScope != "the whole history" {
+		t.Errorf("`wake ingest` reported skipped %q under scope %q, want \"0\" under \"the whole history\":\n%s", historySkipped, historyScope, wholeHistoryOut)
+	}
+	// The pairing itself: one fixture set, two scopes, two different counts — and the
+	// rendered word has to move with them or the count is unreadable.
+	if windowSkipped == historySkipped {
+		t.Errorf("both scopes reported skipped transcripts: %s; the fixture no longer distinguishes them and this test proves nothing", windowSkipped)
+	}
+	if windowScope == historyScope {
+		t.Errorf("both scans rendered collection scope: %s, so the number above cannot be read", windowScope)
+	}
+}
+
+// lineValue returns the text after "key: " on doctor's line for key.
+func lineValue(t *testing.T, out, key string) string {
+	t.Helper()
+	for line := range strings.SplitSeq(out, "\n") {
+		if rest, found := strings.CutPrefix(line, key+": "); found {
+			return rest
+		}
+	}
+	t.Fatalf("output has no %q line:\n%s", key, out)
+	return ""
 }
