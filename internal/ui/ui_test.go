@@ -346,3 +346,25 @@ func TestViewLabelsAnUnmatchedServer(t *testing.T) {
 		t.Errorf("Kind = %q, want %q", result.Usage[0].Kind, "mcp server (unmatched)")
 	}
 }
+
+// AC 3 at the dashboard. It goes through view() rather than a rendered page
+// because the point is that the dashboard reads the same cell renderer
+// `wake report` does: two renderers each deriving a display value from raw
+// fields is how the ERRORS cell drifted (DG-103), and a second copy of this rule
+// is the thing to prevent, not the thing to test twice.
+func TestViewMarksASubagentRowWithNoRatedPopulationAsUnrated(t *testing.T) {
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	result := view(metrics.Aggregate(nil, nil), []inventory.Usage{
+		{Harness: "claude-code", Kind: record.KindSubagent, Name: "explorer", Repo: "0123456789abcdef0123456789abcdef", Invocations: 3, Unknown: 3, LastUsed: at},
+	}, repolabel.Labels{})
+
+	if len(result.Usage) != 1 {
+		t.Fatalf("view() = %+v, want the used subagent in Usage", result)
+	}
+	if result.Usage[0].Errors == "0" {
+		t.Errorf("Errors = %q, a bare zero that reads as health for a kind nothing has rated", result.Usage[0].Errors)
+	}
+	if result.Usage[0].Errors != "unrated (0 of 3 rated)" {
+		t.Errorf("Errors = %q, want %q", result.Usage[0].Errors, "unrated (0 of 3 rated)")
+	}
+}
