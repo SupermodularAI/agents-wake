@@ -98,7 +98,7 @@ func invocationsOf(t *testing.T, spool *store.Store, statePath string, kind reco
 		Primitives:     []inventory.Primitive{{Harness: "claude-code", Kind: kind, Name: name}},
 		ProjectScanned: true,
 	}
-	if err := primitives.Refresh(spool, discovery); err != nil {
+	if err := primitives.Refresh(spool, discovery, nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 	snapshot, err := primitives.Read()

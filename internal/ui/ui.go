@@ -32,7 +32,13 @@ var page = template.Must(template.ParseFS(assets, "dashboard.html"))
 // So a repository consented to while the dashboard is running shows its id
 // rather than its new label until the next `wake serve` — deliberate, and never
 // blank (repolabel.Display's contract). A nil map is valid.
-func Handler(source *store.Store, primitives *inventory.Store, labels repolabel.Labels) http.Handler {
+//
+// rollup — which repository each repository's activity is counted under, so a
+// linked git worktree's rows are counted under the repository it belongs to — is
+// resolved once by the caller on exactly the same grounds, and goes stale the same
+// way and for the same reason. A nil map is valid and leaves every repository
+// standing alone.
+func Handler(source *store.Store, primitives *inventory.Store, labels repolabel.Labels, rollup metrics.RepoRollup) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/" {
 			http.NotFound(writer, request)
@@ -53,7 +59,7 @@ func Handler(source *store.Store, primitives *inventory.Store, labels repolabel.
 			return
 		}
 		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := page.Execute(writer, view(metrics.Aggregate(records), available, labels)); err != nil {
+		if err := page.Execute(writer, view(metrics.Aggregate(records, rollup), available, labels)); err != nil {
 			return
 		}
 	})
@@ -84,8 +90,8 @@ func Listen(port int) (net.Listener, error) {
 
 // Serve serves the dashboard over an already-bound listener, with every request
 // phase bounded.
-func Serve(listener net.Listener, source *store.Store, primitives *inventory.Store, labels repolabel.Labels) error {
-	return serve(listener, Handler(source, primitives, labels), defaultTimeouts())
+func Serve(listener net.Listener, source *store.Store, primitives *inventory.Store, labels repolabel.Labels, rollup metrics.RepoRollup) error {
+	return serve(listener, Handler(source, primitives, labels, rollup), defaultTimeouts())
 }
 
 // serve exists so a test can bound the phases in milliseconds instead of seconds.

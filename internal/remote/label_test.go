@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -426,5 +427,135 @@ func TestNoLabelFieldReachedTheRecordOrTheSpool(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// registerWorktree consents a real repository and a linked git worktree of it,
+// seeds n spool records attributed to the *worktree*, and returns the worktree's id
+// and the parent's label — the two halves the assertions below compare.
+//
+// git is required rather than assumed, and the developer's own configuration is
+// neutralised, so what `git init` produces cannot depend on the machine. The
+// worktree is a sibling of the main checkout, never inside it: a worktree under a
+// consented root is nesting, which Register refuses (ADR-0019 §5).
+func registerWorktree(t *testing.T, p config.Paths, parentLabel, worktreeLabel string, n int) (record.Hash, string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git is not installed: %v", err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks() error = %v", err)
+	}
+	main, worktree := filepath.Join(base, "main"), filepath.Join(base, "worktree")
+	if mkErr := os.MkdirAll(main, 0o700); mkErr != nil {
+		t.Fatalf("creating the repository root: %v", mkErr)
+	}
+	for _, step := range [][]string{
+		{"init", main},
+		{"-C", main, "-c", "user.email=wake@example.invalid", "-c", "user.name=wake", "commit", "--allow-empty", "-m", "init"},
+		{"-C", main, "worktree", "add", worktree},
+	} {
+		if output, gitErr := exec.Command("git", step...).CombinedOutput(); gitErr != nil {
+			t.Fatalf("git %v: %v: %s", step, gitErr, output)
+		}
+	}
+
+	repos, err := config.OpenRepos(p)
+	if err != nil {
+		t.Fatalf("OpenRepos() error = %v", err)
+	}
+	if _, registerErr := repos.Register(main, parentLabel, time.Time{}); registerErr != nil {
+		t.Fatalf("Register(the main checkout) error = %v", registerErr)
+	}
+	worktreeID, err := repos.Register(worktree, worktreeLabel, time.Time{})
+	if err != nil {
+		t.Fatalf("Register(the worktree) error = %v", err)
+	}
+
+	records := testRecords(0, n)
+	for i := range records {
+		records[i].Repo = record.Hash(worktreeID)
+	}
+	if _, appendErr := store.New(eventsPath(p)).Append(records); appendErr != nil {
+		t.Fatalf("Append() error = %v", appendErr)
+	}
+	return record.Hash(worktreeID), parentLabel
+}
+
+// TestFlushSendsTheParentRepositoryLabelForAWorktree is DG-104 on the wire, and
+// all three halves are asserted on the same span so they cannot be satisfied
+// separately: wake.repo stays the worktree's own hash — no id changed, so nothing at
+// the receiver needs rebuilding (ADR-0004, ADR-0027) and grouping by hash still
+// tells worktrees apart — while wake.repo_label and langfuse.trace.name both carry
+// the label of the repository the worktree belongs to, from one labelFor
+// resolution (ADR-0038 §1). No wire key is added: the resolution happens entirely
+// inside config.ProjectLabels, which deliver.go and preview.go already call.
+func TestFlushSendsTheParentRepositoryLabelForAWorktree(t *testing.T) {
+	paths := testPaths(t)
+	receiver, endpoint := serve(t, http.StatusOK)
+	enable(t, paths, endpoint)
+	worktreeID, parentLabel := registerWorktree(t, paths, "alpha", "beta", 3)
+
+	if _, flushErr := FlushReport(paths); flushErr != nil {
+		t.Fatalf("FlushReport() error = %v", flushErr)
+	}
+	spans := spanAttributesOf(t, receiver.request(t, 0).body)
+	if len(spans) == 0 {
+		t.Fatal("the posted batch carries no spans")
+	}
+	for i, attrs := range spans {
+		repo, present := stringValueOf(t, attrs, "wake.repo")
+		if !present {
+			t.Errorf("span %d carries no wake.repo; the hash is unconditional", i)
+		} else if repo != string(worktreeID) {
+			t.Errorf("span %d wake.repo = %q, want the worktree's own hash %q; the relation must not change a stored id", i, repo, worktreeID)
+		}
+		for _, key := range []string{"wake.repo_label", "langfuse.trace.name"} {
+			got, ok := stringValueOf(t, attrs, key)
+			if !ok {
+				t.Errorf("span %d carries no %s", i, key)
+				continue
+			}
+			if got != parentLabel {
+				t.Errorf("span %d %s = %q, want the repository the worktree belongs to, %q", i, key, got, parentLabel)
+			}
+		}
+		if got, present := stringValueOf(t, attrs, "wake.repo_label"); present && got == "beta" {
+			t.Errorf("span %d names the worktree itself as the project", i)
+		}
+	}
+}
+
+// The byte-identity clause with a relation in play: `--dry-run` prints the exact
+// bytes a flush would send, and that stops being true the moment the preview and
+// the flush resolve the relation differently (ADR-0030).
+func TestPreviewAndFlushAgreeOnAWorktreesParentLabel(t *testing.T) {
+	paths := testPaths(t)
+	receiver, endpoint := serve(t, http.StatusOK)
+	enable(t, paths, endpoint)
+	registerWorktree(t, paths, "alpha", "beta", 3)
+
+	preview, err := PreviewFlush(paths)
+	if err != nil {
+		t.Fatalf("PreviewFlush() error = %v", err)
+	}
+	if len(preview.Batches) != 1 {
+		t.Fatalf("PreviewFlush() shows %d batches, want 1", len(preview.Batches))
+	}
+	// Asserted before the equality below, so the equality cannot pass vacuously
+	// over a payload that resolved no relation at all.
+	if !bytes.Contains(preview.Batches[0], []byte("alpha")) {
+		t.Fatal("the preview does not carry the parent repository's label; the equality below would be vacuous")
+	}
+
+	if _, err := FlushReport(paths); err != nil {
+		t.Fatalf("FlushReport() error = %v", err)
+	}
+	if got := gunzip(t, receiver.request(t, 0).body); !bytes.Equal(got, preview.Batches[0]) {
+		t.Errorf("the posted batch differs from the preview:\n%s\n%s", got, preview.Batches[0])
 	}
 }

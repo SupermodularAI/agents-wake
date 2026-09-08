@@ -25,11 +25,11 @@ func TestHandlerRendersStoredMetrics(t *testing.T) {
 		t.Fatalf("Append() error = %v", err)
 	}
 	primitives := inventory.New(filepath.Join(t.TempDir(), "primitives.json"))
-	if err := primitives.Refresh(source, inventory.Discovery{Primitives: []inventory.Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "review"}}, ProjectScanned: true}); err != nil {
+	if err := primitives.Refresh(source, inventory.Discovery{Primitives: []inventory.Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "review"}}, ProjectScanned: true}, nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 	response := httptest.NewRecorder()
-	Handler(source, primitives, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	Handler(source, primitives, nil, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d", response.Code)
 	}
@@ -43,7 +43,7 @@ func TestHandlerRendersStoredMetrics(t *testing.T) {
 
 func TestHandlerRendersEmptyState(t *testing.T) {
 	response := httptest.NewRecorder()
-	Handler(store.New(filepath.Join(t.TempDir(), "events.ndjson")), inventory.New(filepath.Join(t.TempDir(), "primitives.json")), nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	Handler(store.New(filepath.Join(t.TempDir(), "events.ndjson")), inventory.New(filepath.Join(t.TempDir(), "primitives.json")), nil, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "No primitive inventory or terminal events yet") {
 		t.Fatalf("empty dashboard = %d: %s", response.Code, response.Body.String())
 	}
@@ -60,7 +60,7 @@ func TestHandlerDoesNotClaimAnEmptyStoreForASessionWithNoPrimitiveUse(t *testing
 		t.Fatalf("Append() error = %v", err)
 	}
 	response := httptest.NewRecorder()
-	Handler(source, inventory.New(filepath.Join(t.TempDir(), "primitives.json")), nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	Handler(source, inventory.New(filepath.Join(t.TempDir(), "primitives.json")), nil, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
 	body := response.Body.String()
 	if strings.Contains(body, "No primitive inventory or terminal events yet") {
 		t.Fatalf("dashboard called a store holding a session_end empty: %s", body)
@@ -89,11 +89,11 @@ func TestHandlerExcludesBuiltinToolsFromPrimitiveTable(t *testing.T) {
 		t.Fatalf("Append() error = %v", err)
 	}
 	primitives := inventory.New(filepath.Join(t.TempDir(), "primitives.json"))
-	if err := primitives.Refresh(source, inventory.Discovery{Primitives: []inventory.Primitive{{Harness: "claude-code", Kind: record.KindBuiltinTool, Name: "Bash"}, {Harness: "claude-code", Kind: record.KindSkill, Name: "pr-review"}}, ProjectScanned: true}); err != nil {
+	if err := primitives.Refresh(source, inventory.Discovery{Primitives: []inventory.Primitive{{Harness: "claude-code", Kind: record.KindBuiltinTool, Name: "Bash"}, {Harness: "claude-code", Kind: record.KindSkill, Name: "pr-review"}}, ProjectScanned: true}, nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 	response := httptest.NewRecorder()
-	Handler(source, primitives, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	Handler(source, primitives, nil, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
 	body := response.Body.String()
 	if strings.Contains(body, ">Bash<") || !strings.Contains(body, ">pr-review<") {
 		t.Fatalf("primitive table did not filter built-ins: %s", body)
@@ -108,11 +108,11 @@ func TestHandlerShowsPerPrimitiveErrorCount(t *testing.T) {
 		t.Fatalf("Append() error = %v", err)
 	}
 	primitives := inventory.New(filepath.Join(t.TempDir(), "primitives.json"))
-	if err := primitives.Refresh(source, inventory.Discovery{Primitives: []inventory.Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "review"}}, ProjectScanned: true}); err != nil {
+	if err := primitives.Refresh(source, inventory.Discovery{Primitives: []inventory.Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "review"}}, ProjectScanned: true}, nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 	response := httptest.NewRecorder()
-	Handler(source, primitives, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	Handler(source, primitives, nil, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
 	body := response.Body.String()
 	if !strings.Contains(body, "Errors") || !strings.Contains(body, "2 of 3 rated (66.7%)") {
 		t.Fatalf("dashboard did not show review's per-primitive error count: %s", body)
@@ -130,11 +130,11 @@ func TestHandlerShowsAPartiallyRatedPrimitiveWithItsRatedPopulation(t *testing.T
 		t.Fatalf("Append() error = %v", err)
 	}
 	primitives := inventory.New(filepath.Join(t.TempDir(), "primitives.json"))
-	if err := primitives.Refresh(source, inventory.Discovery{Primitives: []inventory.Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "review"}}, ProjectScanned: true}); err != nil {
+	if err := primitives.Refresh(source, inventory.Discovery{Primitives: []inventory.Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "review"}}, ProjectScanned: true}, nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 	response := httptest.NewRecorder()
-	Handler(source, primitives, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	Handler(source, primitives, nil, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
 	body := response.Body.String()
 	if !strings.Contains(body, "1 of 1 rated (100.0%); 1 unrated") {
 		t.Fatalf("dashboard error cell lost its rated population: %s", body)
@@ -149,10 +149,10 @@ func TestHandlerShowsAvailablePrimitivesWithoutUsage(t *testing.T) {
 	available := []inventory.Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "available-skill"}}
 	source := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
 	primitives := inventory.New(filepath.Join(t.TempDir(), "primitives.json"))
-	if err := primitives.Refresh(source, inventory.Discovery{Primitives: available, ProjectScanned: true}); err != nil {
+	if err := primitives.Refresh(source, inventory.Discovery{Primitives: available, ProjectScanned: true}, nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
-	Handler(source, primitives, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	Handler(source, primitives, nil, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
 	body := response.Body.String()
 	for _, want := range []string{">available-skill<", "Unused primitives", "without any recorded activity"} {
 		if !strings.Contains(body, want) {
@@ -171,12 +171,12 @@ func TestHandlerShowsARepositoryColumnPerRepository(t *testing.T) {
 	}
 	primitives := inventory.New(filepath.Join(t.TempDir(), "primitives.json"))
 	discovered := inventory.Discovery{Primitives: []inventory.Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "review"}}, ProjectScanned: true}
-	if err := primitives.Refresh(source, discovered); err != nil {
+	if err := primitives.Refresh(source, discovered, nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 
 	response := httptest.NewRecorder()
-	Handler(source, primitives, repolabel.Labels{labelled: "agents-wake"}).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	Handler(source, primitives, repolabel.Labels{labelled: "agents-wake"}, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
 	body := response.Body.String()
 	for _, want := range []string{">Repo<", ">agents-wake<", ">repo-fedcba987654<"} {
 		if !strings.Contains(body, want) {
@@ -199,12 +199,12 @@ func TestHandlerShowsNoRepositoryColumnForUnusedPrimitives(t *testing.T) {
 		{Harness: "claude-code", Kind: record.KindSkill, Name: "review"},
 		{Harness: "claude-code", Kind: record.KindSkill, Name: "never-used"},
 	}, ProjectScanned: true}
-	if err := primitives.Refresh(source, discovered); err != nil {
+	if err := primitives.Refresh(source, discovered, nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 
 	response := httptest.NewRecorder()
-	Handler(source, primitives, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	Handler(source, primitives, nil, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
 	body := response.Body.String()
 	for _, want := range []string{">review<", ">never-used<"} {
 		if !strings.Contains(body, want) {
@@ -218,7 +218,7 @@ func TestHandlerShowsNoRepositoryColumnForUnusedPrimitives(t *testing.T) {
 
 func TestHandlerMakesNoClaimThatRepositoryLabelsAreNeverShown(t *testing.T) {
 	response := httptest.NewRecorder()
-	Handler(store.New(filepath.Join(t.TempDir(), "events.ndjson")), inventory.New(filepath.Join(t.TempDir(), "primitives.json")), nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+	Handler(store.New(filepath.Join(t.TempDir(), "events.ndjson")), inventory.New(filepath.Join(t.TempDir(), "primitives.json")), nil, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
 	body := response.Body.String()
 	if strings.Contains(body, "repository labels") {
 		t.Fatalf("dashboard still claims repository labels are never shown: %s", body)
@@ -307,6 +307,7 @@ func TestPartialRequestDoesNotHoldTheConnection(t *testing.T) {
 		store.New(filepath.Join(t.TempDir(), "events.ndjson")),
 		inventory.New(filepath.Join(t.TempDir(), "primitives.json")),
 		nil,
+		nil,
 	)
 	go func() {
 		_ = serve(listener, handler, timeouts{Header: 50 * time.Millisecond, Read: 100 * time.Millisecond, Write: time.Second, Idle: 100 * time.Millisecond})
@@ -334,7 +335,7 @@ func TestPartialRequestDoesNotHoldTheConnection(t *testing.T) {
 // from raw fields is how the ERRORS cell drifted (DG-103).
 func TestViewLabelsAnUnmatchedServer(t *testing.T) {
 	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
-	result := view(metrics.Aggregate(nil), []inventory.Usage{
+	result := view(metrics.Aggregate(nil, nil), []inventory.Usage{
 		{Harness: "claude-code", Kind: record.KindMCPServer, Name: "linear-server", Repo: "0123456789abcdef0123456789abcdef", Invocations: 3, Unmatched: true, LastUsed: at},
 	}, repolabel.Labels{})
 

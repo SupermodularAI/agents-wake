@@ -7,6 +7,7 @@ import (
 
 	"github.com/SupermodularAI/agents-wake/internal/config"
 	"github.com/SupermodularAI/agents-wake/internal/inventory"
+	"github.com/SupermodularAI/agents-wake/internal/metrics"
 	"github.com/SupermodularAI/agents-wake/internal/repolabel"
 	"github.com/SupermodularAI/agents-wake/internal/report"
 	"github.com/SupermodularAI/agents-wake/internal/store"
@@ -34,19 +35,24 @@ func newReportCmd() *cobra.Command {
 			}
 			events := store.New(filepath.Join(paths.DataDir, "events.ndjson"))
 			primitives := inventory.New(paths.PrimitivesFile)
+			// Resolved here for the reason the labels below are: internal/cli is the
+			// only layer holding config.Paths. It is handed to the refresh *and* to the
+			// renderer, so the persisted snapshot and this run's report count under the
+			// same grain.
+			rollup := metrics.RepoRollup(config.RepoRollup(paths))
 			refreshErr := style.WithSpinner(cmd.OutOrStdout(), pretty, "Refreshing primitive inventory", func() error {
 				discovery, discoverErr := discoverAllRepos(paths, scope.ClaudeDir)
 				if discoverErr != nil {
 					return discoverErr
 				}
-				return primitives.Refresh(events, discovery)
+				return primitives.Refresh(events, discovery, rollup)
 			})
 			if refreshErr != nil {
 				return refreshErr
 			}
 			// Resolved here because internal/cli is the only layer holding
 			// config.Paths: a renderer never reads the file the labels come from.
-			options := report.Options{Usage: usage, Unused: unused, Pretty: pretty, Labels: repolabel.Labels(config.ProjectLabels(paths))}
+			options := report.Options{Usage: usage, Unused: unused, Pretty: pretty, Labels: repolabel.Labels(config.ProjectLabels(paths)), Rollup: rollup}
 			return report.Print(cmd.OutOrStdout(), events, primitives, options)
 		},
 	}

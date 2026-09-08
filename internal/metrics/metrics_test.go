@@ -14,7 +14,7 @@ func TestAggregateExcludesUnknownOutcomes(t *testing.T) {
 		testRecord("one", &ok),
 		testRecord("two", nil),
 		testRecord("three", &errOutcome),
-	})
+	}, nil)
 
 	if summary.Invocations != 3 || summary.Sessions != 1 {
 		t.Fatalf("summary counts = %+v", summary)
@@ -35,7 +35,7 @@ func TestAggregateExcludesBuiltinToolActivity(t *testing.T) {
 	builtin.Kind = record.KindBuiltinTool
 	builtin.Name = "Bash"
 	builtin.SessionID = "session-builtin-only"
-	summary := Aggregate([]record.Record{skill, builtin})
+	summary := Aggregate([]record.Record{skill, builtin}, nil)
 
 	if summary.Invocations != 1 || summary.Sessions != 1 {
 		t.Fatalf("summary counts = %+v, want only the skill call counted", summary)
@@ -53,7 +53,7 @@ func TestAggregateOrdersPrimitiveUsage(t *testing.T) {
 	first := testRecord("one", &ok)
 	second := testRecord("two", &ok)
 	second.Name = "more-used"
-	summary := Aggregate([]record.Record{first, second, second})
+	summary := Aggregate([]record.Record{first, second, second}, nil)
 	if len(summary.Primitives) != 2 || summary.Primitives[0].Name != "more-used" {
 		t.Fatalf("Primitives = %+v", summary.Primitives)
 	}
@@ -65,7 +65,7 @@ func TestAggregateKeepsInvocationProvenanceSeparate(t *testing.T) {
 	direct.Invoker = record.InvokerUser
 	byAgent := testRecord("agent", &ok)
 	byAgent.ViaAgent = "sdlc-implement"
-	summary := Aggregate([]record.Record{direct, byAgent})
+	summary := Aggregate([]record.Record{direct, byAgent}, nil)
 	if len(summary.Primitives) != 2 {
 		t.Fatalf("Primitives = %+v", summary.Primitives)
 	}
@@ -105,7 +105,7 @@ func TestAggregateCountsASessionEndAsASessionNotAnInvocation(t *testing.T) {
 	summary := Aggregate([]record.Record{
 		testRecord("one", &ok),
 		sessionEndRecord("session-1", time.Date(2026, time.August, 13, 12, 5, 0, 0, time.UTC)),
-	})
+	}, nil)
 
 	if summary.Invocations != 1 {
 		t.Errorf("Invocations = %d, want 1", summary.Invocations)
@@ -138,7 +138,7 @@ func TestAggregateCountsASessionEndAsASessionNotAnInvocation(t *testing.T) {
 // population, and it is exactly the row that makes every rate above it meaningful.
 func TestAggregateCountsASessionWithNoInvocations(t *testing.T) {
 	instant := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
-	summary := Aggregate([]record.Record{sessionEndRecord("session-1", instant)})
+	summary := Aggregate([]record.Record{sessionEndRecord("session-1", instant)}, nil)
 
 	if summary.Sessions != 1 {
 		t.Errorf("Sessions = %d, want 1", summary.Sessions)
@@ -172,7 +172,7 @@ func TestSummaryObserved(t *testing.T) {
 		{name: "a session with no primitive use", records: []record.Record{sessionEndRecord("session-1", instant)}, want: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if got := Aggregate(test.records).Observed(); got != test.want {
+			if got := Aggregate(test.records, nil).Observed(); got != test.want {
 				t.Errorf("Observed() = %t, want %t", got, test.want)
 			}
 		})
@@ -205,7 +205,7 @@ func TestAggregateSplitsOnePrimitivePerRepository(t *testing.T) {
 	failing, passing := testRecord("one", &failed), testRecord("two", &ok)
 	failing.Repo, passing.Repo = first, second
 
-	summary := Aggregate([]record.Record{failing, passing})
+	summary := Aggregate([]record.Record{failing, passing}, nil)
 
 	if len(summary.Primitives) != 2 {
 		t.Fatalf("primitive rows = %d, want 2 (one per repository)", len(summary.Primitives))
@@ -236,6 +236,102 @@ func TestAggregateSplitsOnePrimitivePerRepository(t *testing.T) {
 	}
 }
 
+// worktreeRecord is testRecord under a second repository hash and a session of its
+// own — the shape a linked git worktree produces, since derivation gives a worktree
+// its own hash and always will (ADR-0019 §1, §3).
+func worktreeRecord(source string, outcome *record.Outcome) record.Record {
+	event := testRecord(source, outcome)
+	event.Repo = "fedcba9876543210fedcba9876543210"
+	event.SessionID = "session-2"
+	return event
+}
+
+const (
+	parentHash   = record.Hash("0123456789abcdef0123456789abcdef")
+	worktreeHash = record.Hash("fedcba9876543210fedcba9876543210")
+)
+
+// The ticket, in the aggregation layer: one project's activity is one row, however
+// many worktrees it was spread across. The record's own Repo is untouched, so
+// nothing was rebuilt and grouping by wake.repo still separates them.
+func TestAWorktreesInvocationsAreCountedUnderTheRepositoryItBelongsTo(t *testing.T) {
+	ok := record.OutcomeOK
+	summary := Aggregate([]record.Record{
+		testRecord("one", &ok),
+		testRecord("two", &ok),
+		worktreeRecord("three", &ok),
+		worktreeRecord("four", &ok),
+	}, RepoRollup{string(worktreeHash): string(parentHash)})
+
+	if len(summary.Primitives) != 1 {
+		t.Fatalf("Primitives = %+v, want one row; a worktree's rows are counted under the repository", summary.Primitives)
+	}
+	row := summary.Primitives[0]
+	if row.Repo != parentHash {
+		t.Errorf("Primitives[0].Repo = %q, want the repository's id %q", row.Repo, parentHash)
+	}
+	if row.Invocations != 4 {
+		t.Errorf("Primitives[0].Invocations = %d, want 4", row.Invocations)
+	}
+	if row.Sessions != 2 {
+		t.Errorf("Primitives[0].Sessions = %d, want 2 distinct sessions across both", row.Sessions)
+	}
+}
+
+// The reason the roll-up is applied at the counting input and not to two finished
+// rows: a rate summed from two rendered ratios has no denominator of its own
+// (ADR-0006), and a nil outcome excluded from one of them would be lost. The merged
+// row's ratio is recomputed over the merged population, with the unknowns still
+// excluded rather than folded into either side (ADR-0005).
+func TestARolledUpRowRecomputesItsDenominator(t *testing.T) {
+	ok, failed := record.OutcomeOK, record.OutcomeError
+	summary := Aggregate([]record.Record{
+		testRecord("one", &ok),
+		testRecord("two", nil),
+		worktreeRecord("three", &failed),
+		worktreeRecord("four", nil),
+		worktreeRecord("five", &ok),
+	}, RepoRollup{string(worktreeHash): string(parentHash)})
+
+	if len(summary.Primitives) != 1 {
+		t.Fatalf("Primitives = %+v, want one row", summary.Primitives)
+	}
+	rate := summary.Primitives[0].ErrorRate
+	if rate.Numerator() != 1 {
+		t.Errorf("ErrorRate.Numerator() = %d, want 1", rate.Numerator())
+	}
+	if rate.Denominator() != 3 {
+		t.Errorf("ErrorRate.Denominator() = %d, want 3", rate.Denominator())
+	}
+	if rate.Excluded() != 2 {
+		t.Errorf("ErrorRate.Excluded() = %d, want 2; an unknown outcome is never success and never a failure", rate.Excluded())
+	}
+	if rate.Total() != 5 {
+		t.Errorf("ErrorRate.Total() = %d, want 5", rate.Total())
+	}
+}
+
+// A nil rollup is the ordinary case — no worktree registered on this machine — and
+// means every repository stands alone.
+func TestANilRollupLeavesEveryRepositoryStandingAlone(t *testing.T) {
+	ok := record.OutcomeOK
+	summary := Aggregate([]record.Record{
+		testRecord("one", &ok),
+		worktreeRecord("two", &ok),
+	}, nil)
+
+	if len(summary.Primitives) != 2 {
+		t.Fatalf("Primitives = %+v, want two rows", summary.Primitives)
+	}
+	seen := map[record.Hash]bool{}
+	for _, row := range summary.Primitives {
+		seen[row.Repo] = true
+	}
+	if !seen[parentHash] || !seen[worktreeHash] {
+		t.Errorf("Primitives carry repositories %v, want both %q and %q", seen, parentHash, worktreeHash)
+	}
+}
+
 // TestAggregateCarriesTheMCPServerOntoThePrimitiveRow pins the pass-through the
 // inventory join needs: an MCP tool's row has to say which server it belongs to, or
 // the server can never be credited with its own tools' calls. It is a dimension of
@@ -251,7 +347,7 @@ func TestAggregateCarriesTheMCPServerOntoThePrimitiveRow(t *testing.T) {
 	navigate.Name = "mcp__claude-in-chrome__navigate"
 	navigate.MCPServer = "claude-in-chrome"
 
-	summary := Aggregate([]record.Record{computer, navigate, testRecord("skill-one", &ok)})
+	summary := Aggregate([]record.Record{computer, navigate, testRecord("skill-one", &ok)}, nil)
 
 	if len(summary.Primitives) != 3 {
 		t.Fatalf("Primitives = %+v, want three rows", summary.Primitives)

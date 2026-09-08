@@ -113,7 +113,13 @@ func New(path string) *Store { return &Store{path: path, lockPath: path + ".lock
 // whole snapshot, so one that decided what to publish from an earlier read would
 // erase a newer one. Atomicity and isolation are different properties, and this
 // needs both.
-func (s *Store) Refresh(source EventSource, discovered Discovery) error {
+//
+// rollup arrives as an argument rather than being read here, because this package
+// reads no config (ADR-0019 §1), and it is handed straight to Aggregate rather than
+// applied afterwards, because derive keys a row by repository and merging two
+// finished rows would sum two rates (ADR-0006, ADR-0011). A nil map leaves every
+// repository standing alone.
+func (s *Store) Refresh(source EventSource, discovered Discovery, rollup metrics.RepoRollup) error {
 	return lockfile.WithLock(s.lockPath, func() error {
 		entries, err := source.Entries(0)
 		if err != nil {
@@ -123,7 +129,7 @@ func (s *Store) Refresh(source EventSource, discovered Discovery) error {
 		for _, entry := range entries {
 			records = append(records, entry.Record)
 		}
-		return s.write(derive(metrics.Aggregate(records), s.available(discovered), discovered.canonical))
+		return s.write(derive(metrics.Aggregate(records, rollup), s.available(discovered), discovered.canonical))
 	})
 }
 

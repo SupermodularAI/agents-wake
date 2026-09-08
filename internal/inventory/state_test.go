@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/SupermodularAI/agents-wake/internal/lockfile"
+	"github.com/SupermodularAI/agents-wake/internal/metrics"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 	"github.com/SupermodularAI/agents-wake/internal/store"
 )
@@ -24,7 +25,7 @@ func TestRefreshPersistsDiscoveredPrimitivesAndCurrentUsage(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "primitives.json")
 	primitives := New(statePath)
 	available := []Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "used"}, {Harness: "claude-code", Kind: record.KindSkill, Name: "unused"}}
-	if err := primitives.Refresh(events, Discovery{Primitives: available, ProjectScanned: true}); err != nil {
+	if err := primitives.Refresh(events, Discovery{Primitives: available, ProjectScanned: true}, nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 
@@ -40,7 +41,7 @@ func TestRefreshPersistsDiscoveredPrimitivesAndCurrentUsage(t *testing.T) {
 	if _, appendErr := events.Append([]record.Record{second}); appendErr != nil {
 		t.Fatalf("Append() error = %v", appendErr)
 	}
-	if refreshErr := primitives.Refresh(events, Discovery{Primitives: available[:1], ProjectScanned: true}); refreshErr != nil {
+	if refreshErr := primitives.Refresh(events, Discovery{Primitives: available[:1], ProjectScanned: true}, nil); refreshErr != nil {
 		t.Fatalf("second Refresh() error = %v", refreshErr)
 	}
 	items, err = primitives.Read()
@@ -67,7 +68,7 @@ func TestRefreshCarriesFailuresAndUnknownOutcomesIntoUsage(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "primitives.json")
 	primitives := New(statePath)
 	available := []Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "flaky"}}
-	if err := primitives.Refresh(events, Discovery{Primitives: available, ProjectScanned: true}); err != nil {
+	if err := primitives.Refresh(events, Discovery{Primitives: available, ProjectScanned: true}, nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 
@@ -88,7 +89,7 @@ func TestRefreshDropsPrimitivesWithUnsafeNames(t *testing.T) {
 		{Harness: "claude-code", Kind: record.KindSkill, Name: "usr/local/bin"},
 		{Harness: "claude-code", Kind: record.KindSkill, Name: "contains space"},
 	}
-	if err := New(statePath).Refresh(events, Discovery{Primitives: available, ProjectScanned: true}); err != nil {
+	if err := New(statePath).Refresh(events, Discovery{Primitives: available, ProjectScanned: true}, nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 
@@ -120,7 +121,7 @@ func TestRefreshCarriesForwardWhatAnUnscannedPassCouldNotSee(t *testing.T) {
 		{Harness: "claude-code", Kind: record.KindSkill, Name: "project-skill"},
 		{Harness: "claude-code", Kind: record.KindSkill, Name: "global-skill"},
 	}
-	if err := primitives.Refresh(events, Discovery{Primitives: discovered, ProjectScanned: true}); err != nil {
+	if err := primitives.Refresh(events, Discovery{Primitives: discovered, ProjectScanned: true}, nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 
@@ -130,7 +131,7 @@ func TestRefreshCarriesForwardWhatAnUnscannedPassCouldNotSee(t *testing.T) {
 	}
 	// The project-local half of discovery was withheld, so the pass never saw
 	// project-skill. It must be carried rather than dropped.
-	if err := primitives.Refresh(events, Discovery{Primitives: discovered[1:]}); err != nil {
+	if err := primitives.Refresh(events, Discovery{Primitives: discovered[1:]}, nil); err != nil {
 		t.Fatalf("partial Refresh() error = %v", err)
 	}
 
@@ -224,9 +225,9 @@ func TestRefreshCannotPublishAStaleSnapshotAfterANewerOne(t *testing.T) {
 	}
 
 	stale := make(chan error, 1)
-	go func() { stale <- primitives.Refresh(source, available) }()
+	go func() { stale <- primitives.Refresh(source, available, nil) }()
 	<-source.entered
-	if err := primitives.Refresh(source, available); err != nil {
+	if err := primitives.Refresh(source, available, nil); err != nil {
 		t.Fatalf("second Refresh() error = %v", err)
 	}
 	close(source.released)
@@ -264,7 +265,7 @@ func TestRefreshWaitsForTheStateLock(t *testing.T) {
 	// t.Errorf rather than t.Fatalf inside the closure, so the lock is released
 	// however these assertions go.
 	if err := lockfile.WithLock(primitives.lockPath, func() error {
-		go func() { done <- primitives.Refresh(events, available) }()
+		go func() { done <- primitives.Refresh(events, available, nil) }()
 		select {
 		case err := <-done:
 			finished = true
@@ -336,7 +337,7 @@ func TestRefreshSplitsUsageByRepository(t *testing.T) {
 		Primitives:     []Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "used"}},
 		ProjectScanned: true,
 	}
-	if err := primitives.Refresh(events, discovered); err != nil {
+	if err := primitives.Refresh(events, discovered, nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 
@@ -372,7 +373,7 @@ func TestRefreshLeavesAnUnusedPrimitiveWithoutARepository(t *testing.T) {
 		Primitives:     []Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "unused"}},
 		ProjectScanned: true,
 	}
-	if err := primitives.Refresh(events, discovered); err != nil {
+	if err := primitives.Refresh(events, discovered, nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 
@@ -452,7 +453,7 @@ func TestRefreshFoldsBothSpellingsOntoOneRowUnderTheNamespacedName(t *testing.T)
 		t.Fatalf("Append() error = %v", err)
 	}
 	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
-	if err := primitives.Refresh(events, foldedDiscovery(true)); err != nil {
+	if err := primitives.Refresh(events, foldedDiscovery(true), nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 
@@ -486,7 +487,7 @@ func TestRefreshFoldedRowKeepsFailureAndUnknownInvariants(t *testing.T) {
 		t.Fatalf("Append() error = %v", err)
 	}
 	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
-	if err := primitives.Refresh(events, foldedDiscovery(true)); err != nil {
+	if err := primitives.Refresh(events, foldedDiscovery(true), nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 
@@ -509,7 +510,7 @@ func TestRefreshFoldsACarriedForwardBareRowOntoTheCanonicalName(t *testing.T) {
 		Primitives:     []Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "brainstorming"}},
 		ProjectScanned: true,
 	}
-	if err := primitives.Refresh(events, bare); err != nil {
+	if err := primitives.Refresh(events, bare, nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 
@@ -518,7 +519,7 @@ func TestRefreshFoldsACarriedForwardBareRowOntoTheCanonicalName(t *testing.T) {
 		ProjectScanned: false,
 		canonical:      map[identity]record.Identifier{{harness: "claude-code", kind: record.KindSkill, name: "brainstorming"}: "superpowers:brainstorming"},
 	}
-	if err := primitives.Refresh(events, partial); err != nil {
+	if err := primitives.Refresh(events, partial, nil); err != nil {
 		t.Fatalf("second Refresh() error = %v", err)
 	}
 
@@ -545,7 +546,7 @@ func TestRefreshLeavesAnUnprovenPairAsTwoRows(t *testing.T) {
 		t.Fatalf("Append() error = %v", err)
 	}
 	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
-	if err := primitives.Refresh(events, foldedDiscovery(false)); err != nil {
+	if err := primitives.Refresh(events, foldedDiscovery(false), nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 
@@ -615,6 +616,47 @@ func TestUsageErrorRateCarriesTheStoredCountsAsAPopulation(t *testing.T) {
 	}
 }
 
+// The other half of DG-93's grain change, one ticket later: rows split per
+// repository, but a linked git worktree is not a repository of its own to a reader
+// of the report. TestRefreshSplitsUsageByRepository above pins that two unrelated
+// repositories still get two rows; this pins that two spellings of one project get
+// one. The snapshot is what `wake report` and the dashboard render, so it has to
+// arrive already counted under the repository (ADR-0011).
+func TestASnapshotCountsAWorktreesRowsUnderItsRepository(t *testing.T) {
+	parent, worktree := record.Hash("0123456789abcdef0123456789abcdef"), record.Hash("fedcba9876543210fedcba9876543210")
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	events := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	if _, err := events.Append([]record.Record{
+		repoRecord("here", "used", parent, at),
+		repoRecord("there", "used", worktree, at.Add(time.Minute)),
+	}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
+	discovered := Discovery{
+		Primitives:     []Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "used"}},
+		ProjectScanned: true,
+	}
+	rollup := metrics.RepoRollup{string(worktree): string(parent)}
+	if err := primitives.Refresh(events, discovered, rollup); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	items, err := primitives.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("inventory = %+v, want one row; a worktree's rows are counted under the repository", items)
+	}
+	if items[0].Repo != parent {
+		t.Errorf("row repository = %q, want %q", items[0].Repo, parent)
+	}
+	if items[0].Invocations != 2 {
+		t.Errorf("row invocations = %d, want 2", items[0].Invocations)
+	}
+}
+
 // mcpToolRecord is one MCP tool invocation carrying its observed server segment —
 // exactly what the Claude Code reader writes for an "mcp__<server>__<tool>" call.
 func mcpToolRecord(id, toolName, server string, repo record.Hash, timestamp time.Time) record.Record {
@@ -658,7 +700,7 @@ func TestRefreshRollsMCPToolCallsOntoAnExactlyNamedServer(t *testing.T) {
 		t.Fatalf("Append() error = %v", err)
 	}
 	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
-	if err := primitives.Refresh(events, mcpServerDiscovery("claude-in-chrome")); err != nil {
+	if err := primitives.Refresh(events, mcpServerDiscovery("claude-in-chrome"), nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 
@@ -696,7 +738,7 @@ func TestRefreshRollsMCPToolCallsOntoASanitisedPluginTriple(t *testing.T) {
 		t.Fatalf("Append() error = %v", err)
 	}
 	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
-	if err := primitives.Refresh(events, mcpServerDiscovery("plugin:context7:context7")); err != nil {
+	if err := primitives.Refresh(events, mcpServerDiscovery("plugin:context7:context7"), nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 
@@ -723,7 +765,7 @@ func TestRefreshReportsAServerWithNoDiscoveredMatchAsUnmatched(t *testing.T) {
 		t.Fatalf("Append() error = %v", err)
 	}
 	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
-	if err := primitives.Refresh(events, mcpServerDiscovery("linear")); err != nil {
+	if err := primitives.Refresh(events, mcpServerDiscovery("linear"), nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 
@@ -759,7 +801,7 @@ func TestRefreshServerRowKeepsFailureAndUnknownInvariants(t *testing.T) {
 		t.Fatalf("Append() error = %v", err)
 	}
 	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
-	if err := primitives.Refresh(events, mcpServerDiscovery("claude-in-chrome")); err != nil {
+	if err := primitives.Refresh(events, mcpServerDiscovery("claude-in-chrome"), nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 
@@ -790,7 +832,7 @@ func TestRefreshSplitsAServerRowByRepository(t *testing.T) {
 		t.Fatalf("Append() error = %v", err)
 	}
 	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
-	if err := primitives.Refresh(events, mcpServerDiscovery("claude-in-chrome")); err != nil {
+	if err := primitives.Refresh(events, mcpServerDiscovery("claude-in-chrome"), nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 
@@ -837,7 +879,7 @@ func TestRefreshDoesNotFoldAServerThroughCanonical(t *testing.T) {
 	discovery := foldedDiscovery(true)
 	discovery.Primitives = append(discovery.Primitives, Primitive{Harness: "claude-code", Kind: record.KindMCPServer, Name: "brainstorming"})
 	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
-	if err := primitives.Refresh(events, discovery); err != nil {
+	if err := primitives.Refresh(events, discovery, nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 
@@ -872,13 +914,13 @@ func TestRefreshKeepsAnUnmatchedServerFlaggedAcrossAnUnscannedPass(t *testing.T)
 		t.Fatalf("Append() error = %v", err)
 	}
 	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
-	if err := primitives.Refresh(events, mcpServerDiscovery("linear")); err != nil {
+	if err := primitives.Refresh(events, mcpServerDiscovery("linear"), nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 
 	withheld := mcpServerDiscovery("linear")
 	withheld.ProjectScanned = false
-	if err := primitives.Refresh(events, withheld); err != nil {
+	if err := primitives.Refresh(events, withheld, nil); err != nil {
 		t.Fatalf("unscanned Refresh() error = %v", err)
 	}
 
@@ -910,7 +952,7 @@ func TestRefreshDoesNotMatchAServerDiscoveredUnderAnotherHarness(t *testing.T) {
 		t.Fatalf("Append() error = %v", err)
 	}
 	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
-	if err := primitives.Refresh(events, mcpServerDiscovery("linear")); err != nil {
+	if err := primitives.Refresh(events, mcpServerDiscovery("linear"), nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 

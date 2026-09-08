@@ -203,9 +203,15 @@ func flushLocked(p config.Paths, auth config.RemoteAuth, minInterval time.Durati
 
 	// Resolved once for the run, not once per batch, and after the throttle gate:
 	// a suppressed run reads nothing at all. A batch spans repositories, so what is
-	// handed down is the whole hash → label map rather than one label — a single
-	// scalar would attribute one repository's spans to another repository's name,
-	// on the exact field this exists to make readable (ADR-0019 §1).
+	// handed down is the whole hash → label map rather than one scalar — one label
+	// could only ever be right for one of them.
+	//
+	// What the map answers is the label of the repository each id's records are
+	// *attributed* to, which is not always the entry's own: a linked git worktree's
+	// id resolves to the label of the repository it belongs to, so wake.repo_label
+	// and langfuse.trace.name name the real project while wake.repo keeps the
+	// worktree's own hash (ADR-0033 §2). Only ever the name — the path stays on the
+	// machine under every condition (ADR-0033 §4, ADR-0019 §1).
 	labels := RepoLabels(config.ProjectLabels(p))
 
 	events := store.New(eventsPath(p))
