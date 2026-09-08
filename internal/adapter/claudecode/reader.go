@@ -403,6 +403,18 @@ type transcriptEntry struct {
 	// false, twice, so it cannot do that job. It adds no record.Record field and
 	// persists nothing: reading a flag is not retaining it (ADR-0007).
 	IsSidechain bool `json:"isSidechain"`
+	// IsAPIErrorMessage is Claude Code's own failure marker on a subagent's turn: a
+	// top-level boolean the harness writes, never a value embedded in a tool's output
+	// (ADR-0036 §5's admissibility line). Measured on 26 of 917 subagent transcripts,
+	// with the value true in 26 of 26 occurrences, always on an entry of type
+	// "assistant".
+	//
+	// It is the only thing read from such an entry. The free-text error string and
+	// apiErrorStatus that sit beside it are deliberately not modelled here: a bounded
+	// boolean cannot carry a secret and a message body can, and the record type is the
+	// allowlist (ADR-0007, plan §4.2). Reading a flag is not retaining it — no record
+	// field carries this value; it decides one bounded enum and is dropped.
+	IsAPIErrorMessage bool `json:"isApiErrorMessage"`
 	// ToolUseResult stays raw because real Claude Code writes whatever shape the
 	// tool returned: an object for a structured result, a bare string for Bash, an
 	// array of content blocks for Task. A typed field type-errors the whole line —
