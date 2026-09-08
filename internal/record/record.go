@@ -32,7 +32,22 @@ import (
 // yields an entry the session grain can date itself from. Version 6, unlike 4 and 5,
 // does add a dimension: a nullable parent_event_id, the event_id of a record's parent
 // invocation, derived from the child's own source event and never generated
-// (ADR-0035 §2).
+// (ADR-0035 §2). Version 7 adds no field and derives no id differently: it renames
+// the outcome value the harness's own permission rule produces, from denied_policy to
+// denied_by_harness_rule. The old name claimed more than the value could carry — it
+// reads as a governance decision, and what it records is the developer's own Claude
+// Code permission rule refusing a tool. Every one of the 159 such records on the first
+// machine Wake was installed on was a builtin Bash call; none was a skill, subagent or
+// MCP server. The outcome domain is part of the stored contract this file refuses to
+// pass an unrecognised value through (ADR-0005, ADR-0007), so narrowing it is a schema
+// change — not by 4 and 5's id-derivation rule, which a rename does not touch, but
+// because the bump is the only thing that routes the old value to the arm that can
+// repair it. Validate checks the version before it checks the outcome, so without
+// the bump a version-6 line carrying denied_policy would match SchemaVersion and then
+// fail validOutcome: Decode returns a plain "invalid outcome", never
+// ErrUnsupportedVersion. Store.Stale counts only the latter (internal/store), so those
+// records would be dropped by store.Entries, counted by no health.Scan.StaleRecords,
+// and never rebuilt — the silent shrink the next paragraph is about.
 //
 // "Refused on read" is only half of that, and the half on its own is a silent
 // shrink: every consumer reads the spool through store.Entries, so a spool nobody
@@ -45,7 +60,7 @@ import (
 // delivery watermark, which stamps this number and starts over when it changes
 // (internal/remote). What a rebuild cannot recover is a period the harness has since
 // pruned: the store was the only surviving copy of it, and ADR-0014 accepts that.
-const SchemaVersion uint = 6
+const SchemaVersion uint = 7
 
 // ErrUnsupportedVersion is the one refusal from Validate a caller is meant to
 // recognise. Every other refusal means the record was never valid; this one means
@@ -120,14 +135,14 @@ const (
 type Outcome string
 
 const (
-	OutcomeOK           Outcome = "ok"
-	OutcomeError        Outcome = "error"
-	OutcomeDeniedPolicy Outcome = "denied_policy"
-	OutcomeDeniedUser   Outcome = "denied_user"
-	OutcomeTimeout      Outcome = "timeout"
-	OutcomeInterrupted  Outcome = "interrupted"
-	OutcomeNotFound     Outcome = "not_found"
-	OutcomeBadArgs      Outcome = "bad_args"
+	OutcomeOK                Outcome = "ok"
+	OutcomeError             Outcome = "error"
+	OutcomeDeniedHarnessRule Outcome = "denied_by_harness_rule"
+	OutcomeDeniedUser        Outcome = "denied_user"
+	OutcomeTimeout           Outcome = "timeout"
+	OutcomeInterrupted       Outcome = "interrupted"
+	OutcomeNotFound          Outcome = "not_found"
+	OutcomeBadArgs           Outcome = "bad_args"
 )
 
 // Record is a safe, derived terminal event. Its fields are identifiers, enums,
@@ -286,7 +301,7 @@ func validEntrypoint(v Entrypoint) bool {
 
 func validOutcome(v Outcome) bool {
 	switch v {
-	case OutcomeOK, OutcomeError, OutcomeDeniedPolicy, OutcomeDeniedUser, OutcomeTimeout, OutcomeInterrupted, OutcomeNotFound, OutcomeBadArgs:
+	case OutcomeOK, OutcomeError, OutcomeDeniedHarnessRule, OutcomeDeniedUser, OutcomeTimeout, OutcomeInterrupted, OutcomeNotFound, OutcomeBadArgs:
 		return true
 	default:
 		return false
