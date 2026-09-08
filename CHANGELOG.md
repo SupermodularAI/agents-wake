@@ -32,6 +32,47 @@ called out under Changed.
 
 - `SECURITY.md`, `CODE_OF_CONDUCT.md`, and this changelog.
 - Secret, vulnerability, and commit-style gates in CI.
+- A tiered rollup of the local event store, keeping a bounded summary of history
+  beside the spool. Immutable blocks are sealed once and never recomputed, so
+  the cost of a scan is the new frontier rather than the whole history, and a
+  summary stays queryable: each block carries an event id per
+  `(kind, name, outcome)`, so "this primitive was never used" is answered by a
+  count and any positive count still drills down to an exact invocation.
+  Latency is stored as fixed-boundary histogram buckets rather than percentiles,
+  which is what makes a higher tier summable from the tiers below it without
+  re-reading a record. The reduce is arithmetic — no model call, no network, and
+  the same blocks for the same records on every machine.
+
+  This bounds the assembled view and the cost of reading it. It does **not**
+  bound disk: the spool is never modified or truncated, because a store position
+  is an ordinal recomputed by counting lines, and the remote delivery watermark
+  is one of those positions — trimming the spool would renumber them and leave
+  that cursor indexing a different record. Pruning the spool needs a durable
+  record identity that does not exist yet, so it is deliberately not attempted
+  here.
+
+### Changed
+
+- `store.rollup_after` now has an effect. It has existed since the first
+  release with the default `never` and enforced nothing; `never` still enforces
+  nothing, so an install that has not set it behaves exactly as before. Setting
+  it to a duration turns sealing on for events older than that.
+
+  Sealing builds forward: switching it on records a floor at the current head,
+  snapped to a fanout boundary, and summarises only what follows. History
+  already in the spool is left alone — so enabling the key is cheap and touches
+  nothing that already exists — and sealing it is an explicit opt-in. The floor
+  is persisted beside the blocks, because nothing in the spool records when the
+  key was set, and it is discarded with them.
+- Sealing writes only the blocks a bounded view would read, and removes any that
+  a view no longer needs. Keeping every tier would make the summary grow
+  linearly with history like the spool it summarises — 10.8 MB against a 15 MB
+  spool at 31,288 records, against 230 KB for the blocks a view actually uses.
+  Only derived blocks are removed; the spool is untouched, so the cost is at
+  most a reseal.
+- Discarding the event store now also discards data derived from it, so
+  `wake ingest --rebuild` cannot leave summaries describing records that no
+  longer exist.
 
 ## [0.2.0] - 2026-08-28
 

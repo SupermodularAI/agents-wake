@@ -570,3 +570,80 @@ func TestStaleIsZeroWithoutASpool(t *testing.T) {
 		t.Fatalf("Stale() = %d, want 0 on a machine that never ingested", stale)
 	}
 }
+
+// TestDiscardRemovesDerivedData asserts the spool takes its derived data with
+// it. Discard is the rebuild path, and a summary that outlived the records it
+// was computed from would keep describing them — permanently, since a sealed
+// summary is never recomputed.
+func TestDiscardRemovesDerivedData(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.ndjson")
+	s := New(path).WithDerived("rollup")
+
+	if _, err := s.Append([]record.Record{testRecord("aa")}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	derived := filepath.Join(dir, "rollup")
+	if err := os.MkdirAll(derived, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(derived, "t1-0-10.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Discard(); err != nil {
+		t.Fatalf("Discard: %v", err)
+	}
+	if _, err := os.Stat(derived); !errors.Is(err, fs.ErrNotExist) {
+		t.Error("the derived directory survived Discard")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Error("the spool survived Discard")
+	}
+}
+
+// TestDiscardWithoutDerivedIsUnchanged asserts a Store built by New keeps its
+// old behaviour exactly: it removes the spool and touches nothing beside it.
+func TestDiscardWithoutDerivedIsUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events.ndjson")
+	sibling := filepath.Join(dir, "rollup")
+	if err := os.MkdirAll(sibling, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	s := New(path)
+	if _, err := s.Append([]record.Record{testRecord("bb")}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if err := s.Discard(); err != nil {
+		t.Fatalf("Discard: %v", err)
+	}
+	if _, err := os.Stat(sibling); err != nil {
+		t.Errorf("a Store with no derived data removed a sibling directory: %v", err)
+	}
+}
+
+// TestDiscardOnAbsentDerivedData asserts removing derived data that was never
+// created is not an error — the state of every machine that has not enabled
+// rollups.
+func TestDiscardOnAbsentDerivedData(t *testing.T) {
+	dir := t.TempDir()
+	s := New(filepath.Join(dir, "events.ndjson")).WithDerived("rollup")
+	if err := s.Discard(); err != nil {
+		t.Errorf("Discard with no spool and no derived data: %v", err)
+	}
+}
+
+// TestWithDerivedDoesNotMutateTheOriginal asserts WithDerived returns a new
+// Store rather than reconfiguring the one it was called on. A shared *Store that
+// silently gained a removal behaviour would delete a directory its other holder
+// never asked it to.
+func TestWithDerivedDoesNotMutateTheOriginal(t *testing.T) {
+	dir := t.TempDir()
+	base := New(filepath.Join(dir, "events.ndjson"))
+	_ = base.WithDerived("rollup")
+	if len(base.derived) != 0 {
+		t.Errorf("WithDerived mutated the receiver: derived = %v", base.derived)
+	}
+}

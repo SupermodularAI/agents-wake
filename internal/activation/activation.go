@@ -176,7 +176,7 @@ func initEpilogue(paths config.Paths, repos *config.Repos, claudeDir, command, i
 		}
 	}
 
-	events := store.New(filepath.Join(paths.DataDir, eventsFile))
+	events := openEvents(paths)
 	// Once, before either branch. The walk is handed these names as data and the
 	// inventory snapshot below publishes the same pass, so discovery's cost — a read of
 	// every transcript under the harness directory for the consented root's listings —
@@ -209,6 +209,17 @@ func initEpilogue(paths config.Paths, repos *config.Repos, claudeDir, command, i
 	if err != nil {
 		return written, err
 	}
+	// A derived cache, so its failure is not this command's failure: the records
+	// are already durable in the spool and the next scan retries the same
+	// missing blocks. Doing it after the walk means one seal per scan rather
+	// than one per transcript.
+	//
+	// Not joined into the return: this command's job is to import records, and
+	// they are already durable. A rollup is a derived cache whose next scan
+	// retries the same blocks, so failing `wake ingest` over it — non-zero exit,
+	// and no "Imported N" line — would report a failure that did not happen.
+	// noteRollupFailure is where it surfaces instead.
+	noteRollupFailure(sealRollups(paths, events))
 	return written, refreshInventory(paths, events, discovered)
 }
 
@@ -239,7 +250,7 @@ func ingestScoped(paths config.Paths, claudeDir string, scope collectionScope) (
 	if err != nil {
 		return 0, fmt.Errorf("resolving current directory: %w", err)
 	}
-	events := store.New(filepath.Join(paths.DataDir, eventsFile))
+	events := openEvents(paths)
 	// One discovery for this command, shared by the walk and the refresh below, for the
 	// reason discoverPrimitives states.
 	discovered := discoverPrimitives(repos, claudeDir, root)
@@ -254,6 +265,9 @@ func ingestScoped(paths config.Paths, claudeDir string, scope collectionScope) (
 	if err != nil {
 		return written, err
 	}
+	// Same reasoning as Activate's: derived, so a seal failure is surfaced
+	// rather than returned, and never in place of the records.
+	noteRollupFailure(sealRollups(paths, events))
 	return written, refreshInventory(paths, events, discovered)
 }
 
@@ -303,7 +317,7 @@ func Trigger(paths config.Paths, claudeDir string) (bool, error) {
 func Rebuild(paths config.Paths, claudeDir string) (int, error) {
 	// The spool is dropped first, so a lock failure returns before the primitives
 	// snapshot is removed — never a half-dropped state.
-	if err := store.New(filepath.Join(paths.DataDir, eventsFile)).Discard(); err != nil {
+	if err := openEvents(paths).Discard(); err != nil {
 		return 0, err
 	}
 	if err := os.Remove(paths.PrimitivesFile); err != nil && !errors.Is(err, fs.ErrNotExist) {
