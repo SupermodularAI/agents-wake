@@ -52,12 +52,14 @@ type Primitive struct {
 // names keys the digest that stands in for a directory-scoped primitive's scope,
 // which a session listing states as a path prefix (ADR-0020).
 //
-// It also reports which bare plugin-skill names are the same primitive as their
-// namespaced spelling, so the inventory join can render one row for one skill
-// without the collection side losing either spelling (ADR-0020).
+// It also reports which bare plugin-primitive names are the same primitive as their
+// namespaced spelling, so the inventory join can render one row for one primitive
+// without the collection side losing either spelling (ADR-0020). Where a session
+// listing declared the kind the harness invokes that spelling under, the fold carries
+// that kind too (ADR-0041).
 func ClaudeCodeInScope(scope Scope, names record.Namer) Discovery {
 	items := map[primitiveKey]Primitive{}
-	origins := newSkillOrigins()
+	origins := newPrimitiveOrigins()
 	add := func(kind record.Kind, name string) {
 		identifier, err := names.DerivedName(name)
 		if err != nil {
@@ -71,7 +73,7 @@ func ClaudeCodeInScope(scope Scope, names record.Namer) Discovery {
 	if scanned {
 		claudeCodeProject(scope.ClaudeDir, scope.Root, add, origins)
 	}
-	return Discovery{Primitives: sortedPrimitives(items), ProjectScanned: scanned, canonical: origins.canonicalSkillNames(names, items)}
+	return Discovery{Primitives: sortedPrimitives(items), ProjectScanned: scanned, canonical: origins.canonicalNames(names, items)}
 }
 
 // ClaudeCodeAcrossRepos discovers global primitives once, then project-local
@@ -94,24 +96,24 @@ func ClaudeCodeAcrossRepos(claudeDir string, roots []string, names record.Namer)
 		}
 		items[primitiveKey{kind: kind, name: identifier}] = Primitive{Harness: claudeCode, Kind: kind, Name: identifier}
 	}
-	origins := newSkillOrigins()
+	origins := newPrimitiveOrigins()
 	claudeCodeGlobal(claudeDir, add, origins)
 	for _, root := range roots {
 		claudeCodeProject(claudeDir, root, add, origins)
 	}
-	return Discovery{Primitives: sortedPrimitives(items), ProjectScanned: true, canonical: origins.canonicalSkillNames(names, items)}
+	return Discovery{Primitives: sortedPrimitives(items), ProjectScanned: true, canonical: origins.canonicalNames(names, items)}
 }
 
 // claudeCodeGlobal scans the harness's own directory and its installed plugins.
 // It never reads a working directory, so it needs no consent answer.
-func claudeCodeGlobal(claudeDir string, add func(record.Kind, string), origins *skillOrigins) {
+func claudeCodeGlobal(claudeDir string, add func(record.Kind, string), origins *primitiveOrigins) {
 	scanPrimitives(filepath.Join(claudeDir, "skills"), "SKILL.md", record.KindSkill, origins.fromElsewhere(add))
 	scanPrimitives(filepath.Join(claudeDir, "agents"), "", record.KindSubagent, add)
-	scanPrimitives(filepath.Join(claudeDir, "commands"), "", record.KindCommand, add)
+	scanPrimitives(filepath.Join(claudeDir, "commands"), "", record.KindCommand, origins.fromElsewhere(add))
 	for _, plugin := range installedPlugins(filepath.Join(claudeDir, "plugins", "installed_plugins.json")) {
 		scanPrimitives(filepath.Join(plugin.installPath, "skills"), "SKILL.md", record.KindSkill, origins.fromPlugin(plugin.namespace, add))
 		scanPrimitives(filepath.Join(plugin.installPath, "agents"), "", record.KindSubagent, add)
-		scanPrimitives(filepath.Join(plugin.installPath, "commands"), "", record.KindCommand, add)
+		scanPrimitives(filepath.Join(plugin.installPath, "commands"), "", record.KindCommand, origins.fromPlugin(plugin.namespace, add))
 		scanMCP(filepath.Join(plugin.installPath, ".mcp.json"), add)
 	}
 	scanMCP(filepath.Join(claudeDir, "settings.json"), add)
@@ -120,11 +122,11 @@ func claudeCodeGlobal(claudeDir string, add func(record.Kind, string), origins *
 // claudeCodeProject scans one consented working directory. Every source it reads
 // belongs to that directory — including the harness's session listings, which are
 // filtered to it — so the caller must have resolved consent first.
-func claudeCodeProject(claudeDir, root string, add func(record.Kind, string), origins *skillOrigins) {
-	scanListings(filepath.Join(claudeDir, "projects"), root, origins.fromElsewhere(add))
+func claudeCodeProject(claudeDir, root string, add func(record.Kind, string), origins *primitiveOrigins) {
+	scanListings(filepath.Join(claudeDir, "projects"), root, origins.fromElsewhere(add), origins.declaredSkill)
 	scanPrimitives(filepath.Join(root, ".claude", "skills"), "SKILL.md", record.KindSkill, origins.fromElsewhere(add))
 	scanPrimitives(filepath.Join(root, ".claude", "agents"), "", record.KindSubagent, add)
-	scanPrimitives(filepath.Join(root, ".claude", "commands"), "", record.KindCommand, add)
+	scanPrimitives(filepath.Join(root, ".claude", "commands"), "", record.KindCommand, origins.fromElsewhere(add))
 	scanMCP(filepath.Join(root, ".claude", "settings.json"), add)
 	scanMCP(filepath.Join(root, ".mcp.json"), add)
 }
@@ -224,105 +226,160 @@ func installedPlugins(path string) []pluginInstall {
 	return installs
 }
 
-// skillOrigins records which source contributed each bare skill name, so the
-// inventory join can tell a plugin's own skill from a name that merely looks like
-// one. Provenance is the whole proof: ADR-0020 refuses to fold two spellings onto
-// one name unless they are provably the same primitive, because a wrong fold makes
-// one primitive's counters absorb another's.
+// originKey is one bare name under one kind. Provenance is per kind because a
+// primitive's kind is part of its identity: ~/.claude/commands/deploy.md and a
+// plugin's own skills/deploy/ are two primitives, and proving one says nothing
+// about the other.
+type originKey struct {
+	kind record.Kind
+	name string
+}
+
+// primitiveOrigins records which source contributed each bare name, so the
+// inventory join can tell a plugin's own primitive from a name that merely looks
+// like one. Provenance is the whole proof: ADR-0020 refuses to fold two spellings
+// onto one name unless they are provably the same primitive, because a wrong fold
+// makes one primitive's counters absorb another's.
 //
-// Only record.KindSkill is tracked. DG-106 is confined to one kind on purpose — a
-// fold that had to pick a kind would be guessing a record dimension (ADR-0005), and
-// that question is DG-108's.
-type skillOrigins struct {
-	plugins map[string]map[string]struct{} // bare name -> namespaces that contributed it
-	others  map[string]struct{}            // bare names some non-plugin source contributed
+// Every kind a plugin ships is tracked, not skills alone: a command shipped by a
+// plugin needs the same proof a skill does, because the fold ADR-0041 licenses
+// crosses a kind boundary and a wrong one merges two primitives' counters
+// (ADR-0020).
+type primitiveOrigins struct {
+	plugins  map[originKey]map[string]struct{} // bare name+kind -> namespaces that contributed it
+	others   map[originKey]struct{}            // bare name+kind some non-plugin source contributed
+	declared map[string]record.Kind            // name a session skill_listing carried -> the kind it declared
 }
 
-func newSkillOrigins() *skillOrigins {
-	return &skillOrigins{plugins: map[string]map[string]struct{}{}, others: map[string]struct{}{}}
+func newPrimitiveOrigins() *primitiveOrigins {
+	return &primitiveOrigins{
+		plugins:  map[originKey]map[string]struct{}{},
+		others:   map[originKey]struct{}{},
+		declared: map[string]record.Kind{},
+	}
 }
 
-// fromPlugin wraps add so every skill name passing through it is recorded as
-// contributed by namespace.
-func (o *skillOrigins) fromPlugin(namespace string, add func(record.Kind, string)) func(record.Kind, string) {
+// fromPlugin wraps add so every name passing through it is recorded as contributed
+// by namespace.
+func (o *primitiveOrigins) fromPlugin(namespace string, add func(record.Kind, string)) func(record.Kind, string) {
 	return func(kind record.Kind, name string) {
-		if kind == record.KindSkill {
-			namespaces, seen := o.plugins[name]
-			if !seen {
-				namespaces = map[string]struct{}{}
-				o.plugins[name] = namespaces
-			}
-			namespaces[namespace] = struct{}{}
+		key := originKey{kind: kind, name: name}
+		namespaces, seen := o.plugins[key]
+		if !seen {
+			namespaces = map[string]struct{}{}
+			o.plugins[key] = namespaces
 		}
+		namespaces[namespace] = struct{}{}
 		add(kind, name)
 	}
 }
 
-// fromElsewhere wraps add so every skill name passing through it is recorded as
-// contributed by something that is not a plugin's own skills directory — the user's
-// ~/.claude/skills, a project's .claude/skills, or a session listing. A bare name
-// two sources contribute is not provably one primitive, so it is never folded.
-func (o *skillOrigins) fromElsewhere(add func(record.Kind, string)) func(record.Kind, string) {
+// fromElsewhere wraps add so every name passing through it is recorded as
+// contributed by something that is not a plugin's own directory — the user's
+// ~/.claude, a project's .claude, or a session listing. A bare name two sources
+// contribute is not provably one primitive, so it is never folded.
+func (o *primitiveOrigins) fromElsewhere(add func(record.Kind, string)) func(record.Kind, string) {
 	return func(kind record.Kind, name string) {
-		if kind == record.KindSkill {
-			o.others[name] = struct{}{}
-		}
+		o.others[originKey{kind: kind, name: name}] = struct{}{}
 		add(kind, name)
 	}
 }
 
-// canonicalSkillNames returns the fold from a plugin skill's bare directory name
+// declaredSkill records that a session skill_listing carried name. A listing is a
+// source that says: it states the kind Claude Code will invoke that name under, and
+// that statement — not the directory a file happened to sit in — is what fixes the
+// kind the inventory records (ADR-0041, ADR-0005). The kind is record.KindSkill by
+// construction: it is the only kind this attachment declares.
+//
+// The name is trimmed because a listing line may carry a trailing \r, while the
+// composed candidate canonicalNames looks up is built from validated tokens and
+// never does.
+func (o *primitiveOrigins) declaredSkill(name string) {
+	o.declared[strings.TrimSpace(name)] = record.KindSkill
+}
+
+// canonicalNames returns the fold from a plugin primitive's bare directory name
 // onto the namespaced spelling every invocation of it carries.
 //
 // A name folds only where discovery proved it: exactly one plugin contributed it and
 // no other source did, the namespace is a plain token, the composed name is one
 // record.Namer will persist — which refuses the scope-<digest>: shape ADR-0020
-// reserves for a directory scope — and no primitive of another kind already holds
-// that name. Every other case is refused rather than resolved. Refusing leaves one
-// pre-existing phantom row; folding wrongly merges two primitives' counters, which
-// is the metric corruption ADR-0020 exists to prevent.
+// reserves for a directory scope — and no primitive of the wrong kind already holds
+// that name. It folds only where the kind is one the harness declared or one it never
+// changed (foldKind). Every other case is refused rather than resolved. Refusing
+// leaves one pre-existing phantom row; folding wrongly merges two primitives'
+// counters, which is the metric corruption ADR-0020 exists to prevent.
 //
 // The result is a function of the discovered set, never of the order it was walked
 // in (ADR-0004).
-func (o *skillOrigins) canonicalSkillNames(names record.Namer, discovered map[primitiveKey]Primitive) map[identity]record.Identifier {
-	canonical := map[identity]record.Identifier{}
-	for bare, contributors := range o.plugins {
-		if _, elsewhere := o.others[bare]; elsewhere {
+func (o *primitiveOrigins) canonicalNames(names record.Namer, discovered map[primitiveKey]Primitive) map[identity]identity {
+	canonical := map[identity]identity{}
+	for key, contributors := range o.plugins {
+		if _, elsewhere := o.others[key]; elsewhere {
 			continue
 		}
 		namespaces := slices.Sorted(maps.Keys(contributors))
-		if len(namespaces) != 1 || strings.ContainsAny(bare, ":/") {
+		if len(namespaces) != 1 || strings.ContainsAny(key.name, ":/") {
 			continue
 		}
 		if _, err := record.BoundedToken(namespaces[0]); err != nil {
 			continue
 		}
-		from, err := names.DerivedName(bare)
+		composed := namespaces[0] + ":" + key.name
+		kind, licensed := o.foldKind(key.kind, composed)
+		if !licensed {
+			continue
+		}
+		from, err := names.DerivedName(key.name)
 		if err != nil {
 			continue
 		}
-		to, err := names.DerivedName(namespaces[0] + ":" + bare)
+		to, err := names.DerivedName(composed)
 		if err != nil {
 			continue
 		}
-		if _, found := discovered[primitiveKey{kind: record.KindSkill, name: from}]; !found {
+		if _, found := discovered[primitiveKey{kind: key.kind, name: from}]; !found {
 			continue
 		}
-		if heldByAnotherKind(discovered, to) {
+		if heldByAnotherKind(discovered, to, kind) {
 			continue
 		}
-		canonical[identity{harness: claudeCode, kind: record.KindSkill, name: from}] = to
+		canonical[identity{harness: claudeCode, kind: key.kind, name: from}] = identity{harness: claudeCode, kind: kind, name: to}
 	}
 	return canonical
 }
 
+// foldKind reports the kind a folded row carries, and whether the fold is licensed
+// at all.
+//
+// Two cases, and the second is ADR-0041. Where a session skill_listing names the
+// composed spelling, the harness has stated the kind it will invoke that primitive
+// under; reading that statement is mapping the harness's own vocabulary, which
+// ADR-0005 distinguishes from decoding a silence. Where no listing names it, only
+// DG-106's same-kind fold is licensed: choosing a kind from the directory a file
+// happened to sit in would be a record dimension decided by walk order, which
+// ADR-0005 forbids and ADR-0004 rules out.
+//
+// The licence is a positive, closed set with the refusal as the default outside it,
+// so a primitive nothing declares is exactly as it was before this rule existed.
+func (o *primitiveOrigins) foldKind(discovered record.Kind, composed string) (record.Kind, bool) {
+	if kind, stated := o.declared[composed]; stated {
+		return kind, true
+	}
+	if discovered == record.KindSkill {
+		return record.KindSkill, true
+	}
+	return "", false
+}
+
 // heldByAnotherKind reports whether the discovered set already holds name under a
-// kind that is not a skill. Landing a skill's canonical name on it would change a
-// primitive's kind, which this ticket refuses rather than resolves (ADR-0005);
-// deciding that case is DG-108's.
-func heldByAnotherKind(discovered map[primitiveKey]Primitive, name record.Identifier) bool {
+// kind other than the one this fold would land it on. Landing on it would make one
+// primitive's counters absorb another's, which is the merge ADR-0020 exists to
+// prevent — and unlike the kind question ADR-0041 settles, nothing states which of
+// the two the harness means, so it is refused rather than resolved.
+func heldByAnotherKind(discovered map[primitiveKey]Primitive, name record.Identifier, kind record.Kind) bool {
 	for key := range discovered {
-		if key.name == name && key.kind != record.KindSkill {
+		if key.name == name && key.kind != kind {
 			return true
 		}
 	}
@@ -345,7 +402,7 @@ func scanMCP(path string, add func(record.Kind, string)) {
 	}
 }
 
-func scanListings(path, root string, add func(record.Kind, string)) {
+func scanListings(path, root string, add func(record.Kind, string), declare func(string)) {
 	if err := filepath.WalkDir(path, func(current string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil || entry.IsDir() || filepath.Ext(current) != ".jsonl" {
 			return nil
@@ -355,14 +412,14 @@ func scanListings(path, root string, add func(record.Kind, string)) {
 			return nil
 		}
 		defer file.Close()
-		readListings(file, root, add)
+		readListings(file, root, add, declare)
 		return nil
 	}); err != nil {
 		return
 	}
 }
 
-func readListings(reader io.Reader, root string, add func(record.Kind, string)) {
+func readListings(reader io.Reader, root string, add func(record.Kind, string), declare func(string)) {
 	visit := func(_ int64, line []byte) {
 		var entry struct {
 			CWD        string `json:"cwd"`
@@ -386,6 +443,13 @@ func readListings(reader io.Reader, root string, add func(record.Kind, string)) 
 				name, _, found = strings.Cut(name, ": ")
 				if found {
 					add(record.KindSkill, name)
+					// The declaration, recorded only for a line that is a listing
+					// entry: the harness has stated the kind it will invoke this
+					// name under, and that statement is what fixes the kind of a
+					// folded row (ADR-0041). agent_listing_delta and
+					// mcp_instructions_delta declare nothing — the rule is scoped to
+					// this attachment.
+					declare(name)
 				}
 			}
 		case "agent_listing_delta":

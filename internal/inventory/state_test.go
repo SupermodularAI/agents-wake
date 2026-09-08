@@ -306,6 +306,15 @@ func inventoryRecord(id, name string, timestamp time.Time) record.Record {
 	}
 }
 
+// commandRecord is a typed invocation of a command, as typedInvocation records
+// one: the kind comes from the installed set, so a person who types the bare
+// spelling of a plugin command is collected under record.KindCommand.
+func commandRecord(id, name string, timestamp time.Time) record.Record {
+	r := inventoryRecord(id, name, timestamp)
+	r.Kind = record.KindCommand
+	return r
+}
+
 func outcomeRecord(id, name string, outcome *record.Outcome, timestamp time.Time) record.Record {
 	r := inventoryRecord(id, name, timestamp)
 	r.Outcome = outcome
@@ -517,7 +526,7 @@ func TestRefreshFoldsACarriedForwardBareRowOntoTheCanonicalName(t *testing.T) {
 	partial := Discovery{
 		Primitives:     []Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "superpowers:brainstorming"}},
 		ProjectScanned: false,
-		canonical:      map[identity]record.Identifier{{harness: "claude-code", kind: record.KindSkill, name: "brainstorming"}: "superpowers:brainstorming"},
+		canonical:      map[identity]identity{{harness: "claude-code", kind: record.KindSkill, name: "brainstorming"}: {harness: "claude-code", kind: record.KindSkill, name: "superpowers:brainstorming"}},
 	}
 	if err := primitives.Refresh(events, partial, nil); err != nil {
 		t.Fatalf("second Refresh() error = %v", err)
@@ -575,8 +584,8 @@ func foldedDiscovery(proved bool) Discovery {
 		ProjectScanned: true,
 	}
 	if proved {
-		discovery.canonical = map[identity]record.Identifier{
-			{harness: "claude-code", kind: record.KindSkill, name: "brainstorming"}: "superpowers:brainstorming",
+		discovery.canonical = map[identity]identity{
+			{harness: "claude-code", kind: record.KindSkill, name: "brainstorming"}: {harness: "claude-code", kind: record.KindSkill, name: "superpowers:brainstorming"},
 		}
 	}
 	return discovery
@@ -864,9 +873,9 @@ func TestReadRefusesAnUnmatchedFlagOnANonServerRow(t *testing.T) {
 	}
 }
 
-// The server roll-up is its own cross-kind path, built beside DG-106's fold and
-// never through it: canonicalIdentity never touches kind, and this must not make it
-// start.
+// The server roll-up is its own cross-kind path, built beside DG-106's fold and never
+// through it. The canonical fold only ever carries a fold discovery proved, so the
+// roll-up must not be re-expressed through it however cross-kind the two look alike.
 func TestRefreshDoesNotFoldAServerThroughCanonical(t *testing.T) {
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
 	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
