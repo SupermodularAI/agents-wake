@@ -84,6 +84,38 @@ func TestRenderShowsPerPrimitiveErrorsWithTheRatedPopulation(t *testing.T) {
 	}
 }
 
+// AC 3 at `wake report`: a kind Wake has never rated must not print a bare 0 in
+// the ERRORS column beside a CALLS column reading 3. Every subagent record
+// written before this ticket carries outcome: nil, so this row is the real shape
+// of the table rather than a contrived one.
+func TestRenderMarksASubagentRowWithNoRatedPopulationAsUnrated(t *testing.T) {
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	available := []inventory.Usage{
+		{Harness: "claude-code", Kind: record.KindSubagent, Name: "explorer", Repo: "0123456789abcdef0123456789abcdef", Invocations: 3, Unknown: 3, LastUsed: at},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "solid", Repo: "0123456789abcdef0123456789abcdef", Invocations: 2, LastUsed: at},
+	}
+
+	var output bytes.Buffer
+	if err := Render(&output, metrics.Aggregate(nil, nil), available, Options{}); err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	text := output.String()
+
+	explorer := lineStartingWith(text, "explorer")
+	if !strings.Contains(explorer, "unrated (0 of 3 rated)") {
+		t.Fatalf("a wholly unrated subagent row = %q, want its unrated population:\n%s", explorer, text)
+	}
+	// ADR-0006: no population-free figure leaves the cell, so no percentage either.
+	if strings.Contains(explorer, "%") {
+		t.Fatalf("unrated subagent row = %q, want no rate at all: nothing was rated", explorer)
+	}
+	// The control. A rated, failure-free row still reads exactly "0" — the cell
+	// DG-103 settled is unchanged, and the two facts stay distinguishable.
+	if solid := strings.TrimRight(lineStartingWith(text, "solid"), " \t"); !strings.HasSuffix(solid, "0") || strings.Contains(solid, "unrated") {
+		t.Fatalf("rated failure-free row = %q, want a bare 0 in the ERRORS column:\n%s", solid, text)
+	}
+}
+
 func TestRenderRespectsPrimitiveSectionFilters(t *testing.T) {
 	available := []inventory.Usage{{Harness: "claude-code", Kind: record.KindSkill, Name: "used", Repo: "0123456789abcdef0123456789abcdef", Invocations: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)}, {Harness: "claude-code", Kind: record.KindSkill, Name: "unused"}}
 	for _, test := range []struct {
