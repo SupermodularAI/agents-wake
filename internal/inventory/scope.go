@@ -1,7 +1,5 @@
 package inventory
 
-import "github.com/SupermodularAI/agents-wake/internal/record"
-
 // ProjectScope is the consent answer for the working directory a discovery pass
 // was asked about. It is an answer, never a path: the working directory itself
 // never reaches this type (plan §3.4).
@@ -56,9 +54,16 @@ type Discovery struct {
 	// partialness only keeps a name around one refresh longer.
 	ProjectScanned bool
 	// canonical is the fold from a spelling discovery found onto the one the harness
-	// actually invokes the primitive under — today, a plugin skill's bare directory
-	// name onto "<plugin>:<name>". Its keys are inventory identities; derive applies
-	// it to both sides of its join.
+	// actually invokes the primitive under — a plugin skill's bare directory name onto
+	// "<plugin>:<name>", or a plugin command's bare name onto the namespaced spelling a
+	// session listing declared it a skill under. Its keys and its values are inventory
+	// identities; derive applies it to both sides of its join.
+	//
+	// The value carries a kind as well as a name, because a plugin primitive Claude
+	// Code lists as a skill is discovered from a commands/ directory under a different
+	// kind. Where a session listing declared the kind, that declaration is the kind the
+	// folded row records; where nothing declared it, the fold leaves the kind exactly as
+	// discovery found it (ADR-0041).
 	//
 	// It is private, and the two constructors above are the only way to fill it, for
 	// the same reason claudecode.NewInstalled keeps its map private: the fold is only
@@ -69,5 +74,5 @@ type Discovery struct {
 	// claudecode.NewInstalled, and folding it would stop wake collecting a person who
 	// types the bare form — a wrong report turned into lost collection. One row out,
 	// both spellings still admitted in.
-	canonical map[identity]record.Identifier
+	canonical map[identity]identity
 }

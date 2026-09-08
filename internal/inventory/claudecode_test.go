@@ -243,9 +243,9 @@ func TestClaudeCodeInScopeCanonicalisesAPluginSkillOntoItsNamespace(t *testing.T
 
 	got := ClaudeCodeInScope(Scope{ClaudeDir: claudeDir, Root: root, Project: ProjectConsented}, names)
 
-	want := map[identity]record.Identifier{
-		{harness: claudeCode, kind: record.KindSkill, name: "brainstorming"}: "superpowers:brainstorming",
-		{harness: claudeCode, kind: record.KindSkill, name: "deploy"}:        "vercel:deploy",
+	want := map[identity]identity{
+		{harness: claudeCode, kind: record.KindSkill, name: "brainstorming"}: {harness: claudeCode, kind: record.KindSkill, name: "superpowers:brainstorming"},
+		{harness: claudeCode, kind: record.KindSkill, name: "deploy"}:        {harness: claudeCode, kind: record.KindSkill, name: "vercel:deploy"},
 	}
 	if !maps.Equal(got.canonical, want) {
 		t.Fatalf("canonical = %+v, want %+v", got.canonical, want)

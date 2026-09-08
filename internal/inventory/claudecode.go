@@ -284,8 +284,8 @@ func (o *skillOrigins) fromElsewhere(add func(record.Kind, string)) func(record.
 //
 // The result is a function of the discovered set, never of the order it was walked
 // in (ADR-0004).
-func (o *skillOrigins) canonicalSkillNames(names record.Namer, discovered map[primitiveKey]Primitive) map[identity]record.Identifier {
-	canonical := map[identity]record.Identifier{}
+func (o *skillOrigins) canonicalSkillNames(names record.Namer, discovered map[primitiveKey]Primitive) map[identity]identity {
+	canonical := map[identity]identity{}
 	for bare, contributors := range o.plugins {
 		if _, elsewhere := o.others[bare]; elsewhere {
 			continue
@@ -311,7 +311,7 @@ func (o *skillOrigins) canonicalSkillNames(names record.Namer, discovered map[pr
 		if heldByAnotherKind(discovered, to) {
 			continue
 		}
-		canonical[identity{harness: claudeCode, kind: record.KindSkill, name: from}] = to
+		canonical[identity{harness: claudeCode, kind: record.KindSkill, name: from}] = identity{harness: claudeCode, kind: record.KindSkill, name: to}
 	}
 	return canonical
 }

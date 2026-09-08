@@ -47,7 +47,7 @@ type serverKey struct {
 // A spelling two distinct config keys of one harness produce is dropped from the
 // index rather than resolved to one of them: an ambiguous match is no match, so
 // neither key absorbs the other's counters (fail closed, plan §3.4) — the same
-// refusal canonicalSkillNames makes when two sources contribute one bare skill
+// refusal canonicalNames makes when two sources contribute one bare skill
 // name. A key that is already its own spelling is unaffected: nothing about it is
 // ambiguous, and a segment equal to it names it and no one else.
 func serverIndex(available []Primitive) (map[serverKey]record.Identifier, map[identity]struct{}) {

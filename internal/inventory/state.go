@@ -222,7 +222,7 @@ type primitiveFile struct {
 // fold discovery proved between two spellings of one primitive; it is applied to
 // both sides of the join, so the folded row exists and the events recorded under
 // either spelling land on it.
-func derive(summary metrics.Summary, available []Primitive, canonical map[identity]record.Identifier) []Usage {
+func derive(summary metrics.Summary, available []Primitive, canonical map[identity]identity) []Usage {
 	observed := make(map[usageKey]Usage)
 	// repos is which repositories observed each identity, in first-seen order. The
 	// join below is on the identity — discovery has no repository to join on
@@ -264,11 +264,11 @@ func derive(summary metrics.Summary, available []Primitive, canonical map[identi
 		if primitive.Kind != record.KindMCPTool || primitive.MCPServer == "" {
 			continue
 		}
-		// Deliberately not through canonicalIdentity: that fold never touches kind,
-		// because a fold whose target belongs to another kind was refused at
-		// discovery (DG-106). This roll-up is cross-kind by construction — mcp_tool
-		// events onto an mcp_server row — so it is its own path and leaves DG-106's
-		// guarantee exactly as it was.
+		// Deliberately not through canonicalIdentity. This roll-up is cross-kind by
+		// construction — mcp_tool events onto an mcp_server row — but no harness
+		// declaration licenses it: it is the arithmetic ADR-0039 defines, not a
+		// spelling the harness stated, so it stays its own path rather than being
+		// expressed as a canonical fold.
 		server := identity{harness: primitive.Harness, kind: record.KindMCPServer, name: serverName(index, primitive.Harness, primitive.MCPServer)}
 		accumulate(server, primitive)
 		if _, found := discovered[server]; !found {
@@ -347,12 +347,13 @@ type identity struct {
 //
 // Both sides of the join go through it. Folding discovery alone would leave an event
 // recorded under the bare spelling with no row to land on and drop it from the
-// snapshot — the opposite of what the fold is for. The kind is never touched: a fold
-// whose target belongs to another kind was refused at discovery, so nothing here has
-// to pick one (ADR-0005).
-func canonicalIdentity(canonical map[identity]record.Identifier, id identity) identity {
-	if name, folded := canonical[id]; folded {
-		id.name = name
+// snapshot — the opposite of what the fold is for. The fold carries the kind discovery
+// proved: where a session listing declared the kind the harness invokes the primitive
+// under, that declaration is the kind, and where nothing declared it the kind is the
+// one discovery already had — nothing here picks one (ADR-0041, ADR-0005).
+func canonicalIdentity(canonical map[identity]identity, id identity) identity {
+	if to, folded := canonical[id]; folded {
+		return to
 	}
 	return id
 }
