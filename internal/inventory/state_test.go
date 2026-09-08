@@ -306,6 +306,15 @@ func inventoryRecord(id, name string, timestamp time.Time) record.Record {
 	}
 }
 
+// commandRecord is a typed invocation of a command, as typedInvocation records
+// one: the kind comes from the installed set, so a person who types the bare
+// spelling of a plugin command is collected under record.KindCommand.
+func commandRecord(id, name string, timestamp time.Time) record.Record {
+	r := inventoryRecord(id, name, timestamp)
+	r.Kind = record.KindCommand
+	return r
+}
+
 func outcomeRecord(id, name string, outcome *record.Outcome, timestamp time.Time) record.Record {
 	r := inventoryRecord(id, name, timestamp)
 	r.Outcome = outcome

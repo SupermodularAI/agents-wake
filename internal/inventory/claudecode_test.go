@@ -654,3 +654,54 @@ func TestClaudeCodeDiscoveryYieldsOneInventoryRowPerPluginSkill(t *testing.T) {
 		}
 	}
 }
+
+// DG-108's criterion, asserted through the whole path below the renderer:
+// discovery over a real installed_plugins.json holding a plugin command plus the
+// real skill_listing that names it, then the join that produces the rows report
+// and serve draw.
+//
+// The bare command row is what read invocations: 0 on a real machine while the
+// primitive was used daily. After the fold it does not exist as a row at all, and
+// the invocations recorded under both spellings — and both kinds — accumulate onto
+// the one row the harness says it invokes.
+func TestClaudeCodeDiscoveryYieldsOneRowForAPluginCommandTheListingCallsASkill(t *testing.T) {
+	claudeDir, root := pluginCommandFixture(t)
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	events := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	if _, err := events.Append([]record.Record{
+		inventoryRecord("one", "code-review:code-review", at),
+		inventoryRecord("two", "code-review:code-review", at.Add(time.Minute)),
+		commandRecord("three", "code-review", at.Add(2*time.Minute)),
+	}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
+
+	discovery := ClaudeCodeInScope(Scope{ClaudeDir: claudeDir, Root: root, Project: ProjectConsented}, names)
+	if err := primitives.Refresh(events, discovery, nil); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	items, err := primitives.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+
+	rows := map[usageKey]Usage{}
+	for _, usage := range items {
+		if usage.Name == "code-review" {
+			t.Fatalf("the bare spelling survived as its own row: %+v", items)
+		}
+		if usage.Kind == record.KindCommand {
+			t.Fatalf("a command row survived the fold: %+v", items)
+		}
+		key := usageKey{identity: identity{kind: usage.Kind, name: usage.Name}, repo: usage.Repo}
+		if _, duplicate := rows[key]; duplicate {
+			t.Fatalf("%s %q is listed twice: %+v", usage.Kind, usage.Name, items)
+		}
+		rows[key] = usage
+	}
+	used := rows[usageKey{identity: identity{kind: record.KindSkill, name: "code-review:code-review"}, repo: "0123456789abcdef0123456789abcdef"}]
+	if used.Invocations != 3 {
+		t.Fatalf("code-review:code-review = %+v, want 3 invocations accumulated from both spellings", used)
+	}
+}
