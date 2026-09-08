@@ -984,7 +984,7 @@ func packageFromAttribution(value string) (record.Identifier, bool) {
 func outcomeFor(entry transcriptEntry, block contentBlock) *record.Outcome {
 	switch entry.ToolDenialKind {
 	case "permission-rule":
-		outcome := record.OutcomeDeniedPolicy
+		outcome := record.OutcomeDeniedHarnessRule
 		return &outcome
 	case "user-rejected":
 		outcome := record.OutcomeDeniedUser
