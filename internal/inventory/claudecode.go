@@ -107,11 +107,11 @@ func ClaudeCodeAcrossRepos(claudeDir string, roots []string, names record.Namer)
 func claudeCodeGlobal(claudeDir string, add func(record.Kind, string), origins *primitiveOrigins) {
 	scanPrimitives(filepath.Join(claudeDir, "skills"), "SKILL.md", record.KindSkill, origins.fromElsewhere(add))
 	scanPrimitives(filepath.Join(claudeDir, "agents"), "", record.KindSubagent, add)
-	scanPrimitives(filepath.Join(claudeDir, "commands"), "", record.KindCommand, add)
+	scanPrimitives(filepath.Join(claudeDir, "commands"), "", record.KindCommand, origins.fromElsewhere(add))
 	for _, plugin := range installedPlugins(filepath.Join(claudeDir, "plugins", "installed_plugins.json")) {
 		scanPrimitives(filepath.Join(plugin.installPath, "skills"), "SKILL.md", record.KindSkill, origins.fromPlugin(plugin.namespace, add))
 		scanPrimitives(filepath.Join(plugin.installPath, "agents"), "", record.KindSubagent, add)
-		scanPrimitives(filepath.Join(plugin.installPath, "commands"), "", record.KindCommand, add)
+		scanPrimitives(filepath.Join(plugin.installPath, "commands"), "", record.KindCommand, origins.fromPlugin(plugin.namespace, add))
 		scanMCP(filepath.Join(plugin.installPath, ".mcp.json"), add)
 	}
 	scanMCP(filepath.Join(claudeDir, "settings.json"), add)
@@ -121,10 +121,10 @@ func claudeCodeGlobal(claudeDir string, add func(record.Kind, string), origins *
 // belongs to that directory — including the harness's session listings, which are
 // filtered to it — so the caller must have resolved consent first.
 func claudeCodeProject(claudeDir, root string, add func(record.Kind, string), origins *primitiveOrigins) {
-	scanListings(filepath.Join(claudeDir, "projects"), root, origins.fromElsewhere(add))
+	scanListings(filepath.Join(claudeDir, "projects"), root, origins.fromElsewhere(add), origins.declaredSkill)
 	scanPrimitives(filepath.Join(root, ".claude", "skills"), "SKILL.md", record.KindSkill, origins.fromElsewhere(add))
 	scanPrimitives(filepath.Join(root, ".claude", "agents"), "", record.KindSubagent, add)
-	scanPrimitives(filepath.Join(root, ".claude", "commands"), "", record.KindCommand, add)
+	scanPrimitives(filepath.Join(root, ".claude", "commands"), "", record.KindCommand, origins.fromElsewhere(add))
 	scanMCP(filepath.Join(root, ".claude", "settings.json"), add)
 	scanMCP(filepath.Join(root, ".mcp.json"), add)
 }
@@ -373,7 +373,7 @@ func scanMCP(path string, add func(record.Kind, string)) {
 	}
 }
 
-func scanListings(path, root string, add func(record.Kind, string)) {
+func scanListings(path, root string, add func(record.Kind, string), declare func(string)) {
 	if err := filepath.WalkDir(path, func(current string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil || entry.IsDir() || filepath.Ext(current) != ".jsonl" {
 			return nil
@@ -383,14 +383,14 @@ func scanListings(path, root string, add func(record.Kind, string)) {
 			return nil
 		}
 		defer file.Close()
-		readListings(file, root, add)
+		readListings(file, root, add, declare)
 		return nil
 	}); err != nil {
 		return
 	}
 }
 
-func readListings(reader io.Reader, root string, add func(record.Kind, string)) {
+func readListings(reader io.Reader, root string, add func(record.Kind, string), declare func(string)) {
 	visit := func(_ int64, line []byte) {
 		var entry struct {
 			CWD        string `json:"cwd"`
@@ -414,6 +414,13 @@ func readListings(reader io.Reader, root string, add func(record.Kind, string)) 
 				name, _, found = strings.Cut(name, ": ")
 				if found {
 					add(record.KindSkill, name)
+					// The declaration, recorded only for a line that is a listing
+					// entry: the harness has stated the kind it will invoke this
+					// name under, and that statement is what fixes the kind of a
+					// folded row (ADR-0041). agent_listing_delta and
+					// mcp_instructions_delta declare nothing — the rule is scoped to
+					// this attachment.
+					declare(name)
 				}
 			}
 		case "agent_listing_delta":
