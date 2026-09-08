@@ -394,6 +394,23 @@ const (
 	wholeHistory
 )
 
+// health maps this scan's scope onto the enum internal/health persists.
+//
+// The two enums are separate rather than shared because this package imports
+// internal/health and the reverse import would be a cycle. The default is the
+// narrower of the two: a scope this function has not been taught reads as the
+// boundary-honouring scan rather than as an import of the whole history.
+func (s collectionScope) health() health.Scope {
+	switch s {
+	case consentedWindow:
+		return health.ScopeConsentedWindow
+	case wholeHistory:
+		return health.ScopeWholeHistory
+	default:
+		return health.ScopeConsentedWindow
+	}
+}
+
 // resolverFor builds the consent answer one scan resolves every event against
 // (ADR-0010, ADR-0024): which repository the event's working directory belongs to,
 // and whether an event at that instant is one the repository consented to collect.

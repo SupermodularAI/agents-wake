@@ -116,17 +116,22 @@ func registerDiscovered(repos *config.Repos, dirs []string, from time.Time) (reg
 // reason the paragraph above gives: a walk's counters describe the source it read, and
 // these describe the store it wrote into. Setting them at the one return point is also
 // what keeps them from being dropped when the second walk's counters replace the
-// first's.
+// first's. The scope is set at the same point and for a related reason: it describes
+// the scan rather than the source a walk read, and there is exactly one place that
+// still knows it once the walks have returned.
 func scanWithBoundary(paths config.Paths, repos *config.Repos, claudeDir string, events *store.Store, installed claudecode.Installed, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope) (int, health.Scan, error) {
 	found, rebuilt, err := rebuildStaleSpool(events, scope)
 	if err != nil {
 		// A spool this build cannot read and could not replace. At is stamped so the
 		// failed scan is reported as a scan that read nothing rather than as one that
-		// never ran; the error itself is what the caller surfaces.
-		return 0, health.Scan{At: time.Now().UTC()}, err
+		// never ran; the error itself is what the caller surfaces. The scope is stamped
+		// here too: this scan ran under one, it is recorded whether it succeeded or
+		// not, and a failed scan reported under the other scope would be read as a
+		// number about a question it never asked.
+		return 0, health.Scan{At: time.Now().UTC(), Scope: scope.health()}, err
 	}
 	written, scan, err := scanBoundaryWalks(paths, repos, claudeDir, events, installed, stale, idle, scope)
-	scan.StaleRecords, scan.StaleRebuilt = found, rebuilt
+	scan.StaleRecords, scan.StaleRebuilt, scan.Scope = found, rebuilt, scope.health()
 	return written, scan, err
 }
 

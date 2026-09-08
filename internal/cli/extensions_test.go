@@ -35,6 +35,10 @@ func TestEachSeamIsRegisteredExactlyOnce(t *testing.T) {
 // this snapshot: a build that ordered them differently fails here rather than shipping
 // a doctor whose sections moved.
 //
+// The collection-scope line sits between `skipped transcripts` and `events written`
+// rather than at the end: it is what says which question the skipped count answers, and
+// a fresh install has no scan to describe, so it reads "not recorded" here (DG-110).
+//
 // isolateRemote rather than isolate, because isolate does not clear
 // WAKE_REMOTE_AUTHORIZATION: a developer who exports it would otherwise see
 // `remote credential: set` and a failure that says nothing about the code.
@@ -57,6 +61,7 @@ func TestDoctorOutputOnAFreshInstall(t *testing.T) {
 		"unreadable sources: 0\n" +
 		"parse errors: 0\n" +
 		"skipped transcripts: 0\n" +
+		"collection scope: not recorded\n" +
 		"events written: 0\n" +
 		"records from an earlier schema version: 0\n" +
 		"refused project entries: 0\n" +
