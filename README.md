@@ -58,18 +58,19 @@ attributed to — the readable label from your local project map, never the
 path. An invocation is attributed to the project its own working directory
 resolved to, and a linked worktree is attributed to the repository it belongs
 to. So an agent driving work from one project into another checkout has that
-work counted under the driver: measured on a real Claude Code corpus on
-2026-09-08, 1 of 69 sessions (1.4 %) landed wholly in another project and 11 of
-69 (15.9 %) touched more than one. The column is a partial answer, not a wrong
-one. The unused list has no such column: a repository is a property of an
-invocation, and an unused primitive has none. Add `--unused` to see
-primitives that are available but never invoked, or both flags together for
-the full picture. A bare `--unused` swaps the OVERVIEW too — invocation
-counts and outcomes describe activity, so the overview above an unused list
-is instead a count of unused primitives by kind. In a terminal the tables
-are lime-bordered and colored; piped or redirected — a script, another
-program, an agent reading the output — it's plain ASCII text instead, so
-nothing downstream ever has to parse around a color code.
+work counted under the driver. That is rare, and the rate is measured rather
+than asserted: on a real Claude Code corpus on 2026-09-08, of the 69 sessions
+that did resolvable file-changing work, 1 (1.4 %) did all of it in another
+project and 11 (15.9 %) touched more than one. The column is a partial answer,
+not a wrong one. The unused list has no such column: a repository is a
+property of an invocation, and an unused primitive has none. Add `--unused`
+to see primitives that are available but never invoked, or both flags
+together for the full picture. A bare `--unused` swaps the OVERVIEW too —
+invocation counts and outcomes describe activity, so the overview above an
+unused list is instead a count of unused primitives by kind. In a terminal
+the tables are lime-bordered and colored; piped or redirected — a script,
+another program, an agent reading the output — it's plain ASCII text instead,
+so nothing downstream ever has to parse around a color code.
 
 `wake init` explains what it will change before doing so. It consents the
 current project and installs Wake-owned Claude Code session hooks, and
@@ -166,8 +167,7 @@ review. Its default design keeps the sensitive path local:
 - Repository identity is a salted, per-machine HMAC. The readable project map
   stays local with restrictive permissions; its labels are what `wake report`
   and the dashboard show in their PROJECT column. When you turn remote delivery
-  on,
-  a payload carries that hash and the repository's readable label; the
+  on, a payload carries that hash and the repository's readable label; the
   repository path never leaves the machine.
 - Every binary ships the remote-delivery capability and it is off until you run
   `wake remote set [url]` and `wake remote on`. Until you do, no endpoint is
