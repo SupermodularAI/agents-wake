@@ -748,7 +748,7 @@ func TestReadEmitsNothingForAResultWhoseCallNeverArrives(t *testing.T) {
 
 func TestReadDerivesTheRealOutcomeWhenTheResultArrivesFirst(t *testing.T) {
 	ok, failed := record.OutcomeOK, record.OutcomeError
-	deniedPolicy, deniedUser := record.OutcomeDeniedPolicy, record.OutcomeDeniedUser
+	deniedHarnessRule, deniedUser := record.OutcomeDeniedHarnessRule, record.OutcomeDeniedUser
 	interrupted := record.OutcomeInterrupted
 
 	for _, testCase := range []struct {
@@ -761,7 +761,7 @@ func TestReadDerivesTheRealOutcomeWhenTheResultArrivesFirst(t *testing.T) {
 		{name: "error", blockFields: `,"is_error":true`, want: &failed},
 		// ADR-0005: absent is first-class null, never coerced to ok.
 		{name: "unknown"},
-		{name: "denied by policy", entryFields: `"toolDenialKind":"permission-rule",`, blockFields: `,"is_error":true`, want: &deniedPolicy},
+		{name: "denied by a harness permission rule", entryFields: `"toolDenialKind":"permission-rule",`, blockFields: `,"is_error":true`, want: &deniedHarnessRule},
 		{name: "denied by user", entryFields: `"toolDenialKind":"user-rejected",`, blockFields: `,"is_error":true`, want: &deniedUser},
 		// The control: interrupted may only ever come from the source saying so. The
 		// five rows above prove arrival order alone never produces it.
@@ -2549,7 +2549,7 @@ func TestReadKeepsFailureSignalPrecedenceForAFamilyThatOmitsOnSuccess(t *testing
 		want        record.Outcome
 	}{
 		{label: "explicit failure", blockFields: `,"is_error":true`, want: record.OutcomeError},
-		{label: "denied by policy", entryFields: `"toolDenialKind":"permission-rule",`, want: record.OutcomeDeniedPolicy},
+		{label: "denied by policy", entryFields: `"toolDenialKind":"permission-rule",`, want: record.OutcomeDeniedHarnessRule},
 		{label: "denied by user", entryFields: `"toolDenialKind":"user-rejected",`, want: record.OutcomeDeniedUser},
 		{label: "interrupted", entryFields: `"toolUseResult":{"interrupted":true},`, want: record.OutcomeInterrupted},
 		// A denial kind this reader cannot name is asserted by the companion test

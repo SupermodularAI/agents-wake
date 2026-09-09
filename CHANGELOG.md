@@ -13,8 +13,39 @@ called out under Changed.
 
 - `SECURITY.md`, `CODE_OF_CONDUCT.md`, and this changelog.
 - Secret, vulnerability, and commit-style gates in CI.
+- An MCP tool's invocation now records which server provided it. A server's tools
+  are named `mcp__<server>__<tool>` by the harness, and the server segment is
+  stored as the harness spells it, validated as a bounded token. Before this,
+  every configured MCP server reported `invocations: 0` forever and read as
+  unused however heavily it was used. A server that is configured but whose key
+  does not match any observed prefix is reported as unmatched rather than
+  rendered as a zero row.
 
 ### Changed
+
+- **Breaking (stored records and wire).** Two changes bump the record schema, which
+  moves from 6 to 8.
+
+  **Version 7** — the outcome `denied_policy` is now `denied_by_harness_rule`. The
+  value records the harness's own permission rule refusing a tool, never a governance
+  decision about an approved set — of the 159 such records on the first machine
+  Wake was installed on, every one was a builtin Bash call. The old name invited
+  a reader to take it for the latter. Anything grouping on the old string — a saved
+  query or a dashboard panel — needs updating.
+
+  **Version 8** — records carry the nullable `mcp_server` dimension described under
+  Added.
+
+  A store holding an earlier version is refused on
+  read and re-derived from the harness's own history by the next scan you ask
+  for (`wake ingest`) — a hook-fired scan reports the count and leaves the spool
+  alone, since it collects inside each repository's boundary and could not put
+  the records back (`wake doctor` shows the pending count under "records from an
+  earlier schema version"). If you collect only through the hooks `wake init`
+  installs, run `wake ingest` once after upgrading, or the older records
+  stay unreadable and `wake report` shows only what was written since. The
+  delivery watermark stamps the schema version and starts over on a bump, so
+  nothing needs migrating by hand.
 
 - `wake report` and the dashboard name the repository column **PROJECT** (`Project` in the
   dashboard; was `REPO`), and the docs now say what that value is: the project each invocation's
