@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -136,5 +137,63 @@ func TestTheQuestionIsAskedWithEcho(t *testing.T) {
 	}
 	if len(fake.masked) != 0 {
 		t.Errorf("masked = %q, want none: a confirmation is not a secret", fake.masked)
+	}
+}
+
+// streamPrompter wires echoPrompter the way osPrompter wires the real terminal:
+// the question goes to promptStream(cmd), not to a buffer the test picked. It is
+// what lets a test with stdout and stderr kept apart assert which of the two the
+// disclosure and the question actually landed on — every other helper in this
+// package points both at one buffer, which is exactly what hid the split.
+func streamPrompter(answer string) promptFactory {
+	return func(cmd *cobra.Command) prompter {
+		return &echoPrompter{out: promptStream(cmd), answer: answer}
+	}
+}
+
+// The disclosure has to go where the question goes, or a redirection separates
+// the paths from the question they authorise (ADR-0043 §1). With --yes there is
+// no question and the disclosure is a record of what happened, which belongs on
+// the answer stream.
+func TestDiscloseToFollowsTheQuestion(t *testing.T) {
+	var out, errOut bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+
+	asking, err := newConfirmer(cmd, (&fakeTerminal{answers: []string{"y"}}).factory(), false)
+	if err != nil {
+		t.Fatalf("newConfirmer() error = %v", err)
+	}
+	if got := asking.discloseTo(cmd); got != promptStream(cmd) {
+		t.Errorf("discloseTo() = %p, want the stream the question is put on (%p)", got, promptStream(cmd))
+	}
+	if asking.discloseTo(cmd) == cmd.OutOrStdout() {
+		t.Error("discloseTo() is stdout while the question is not; `wake uninstall > log` would ask about paths the user cannot see")
+	}
+
+	answered, err := newConfirmer(cmd, func(*cobra.Command) prompter { return nil }, true)
+	if err != nil {
+		t.Fatalf("newConfirmer(--yes) error = %v", err)
+	}
+	if got := answered.discloseTo(cmd); got != cmd.OutOrStdout() {
+		t.Errorf("discloseTo() with --yes = %p, want stdout (%p)", got, cmd.OutOrStdout())
+	}
+}
+
+// A gate nobody constructed has no authority to proceed on. ADR-0043
+// § Consequences hands this decision to whatever destructive command comes
+// third, and a safety gate whose zero value means yes is one a later author
+// disarms by forgetting a line — which compiles, lints, and deletes.
+func TestTheUnconstructedGateDeclines(t *testing.T) {
+	var gate confirmer
+
+	proceed, err := gate.ask("Permanently delete all of this? [y/N]: ")
+
+	if err != nil {
+		t.Fatalf("ask() error = %v", err)
+	}
+	if proceed {
+		t.Error("ask() = true on a confirmer nobody constructed; the zero value must refuse, not delete")
 	}
 }

@@ -53,6 +53,13 @@ func newRemoveCmdWith(newPrompter promptFactory) *cobra.Command {
 			if gateErr != nil {
 				return gateErr
 			}
+			// The disclosure goes wherever the question is going to be put, which is
+			// stderr when there is one and stdout when --yes already answered it: the
+			// paths are read in order to answer, so `wake remove --purge > log` must
+			// not send them somewhere the person answering cannot see
+			// (confirmer.discloseTo, ADR-0043 §1). Styling follows that stream too.
+			disclosure := gate.discloseTo(cmd)
+			disclosurePretty := ttyWriter(disclosure)
 			// The disclosure `--purge` never had. Same shape as uninstall's: a
 			// heading, then one dimmed path per line with what happens to it, every
 			// path resolved through the same helper the removal uses rather than
@@ -60,15 +67,15 @@ func newRemoveCmdWith(newPrompter promptFactory) *cobra.Command {
 			// sits under the config root, which --purge keeps, and claiming otherwise
 			// would tell the user their repositories are about to be re-identified
 			// when they are not (ADR-0010, ADR-0019 §3).
-			if _, discloseErr := fmt.Fprintf(cmd.OutOrStdout(),
+			if _, discloseErr := fmt.Fprintf(disclosure,
 				"%s\n"+
 					"%s  Wake's own hook entry only; your other hooks are left as they are\n"+
 					"%s  all collected activity and the local project map\n"+
 					"Configuration and the local identity salt at %s are kept; `wake uninstall` removes those too.\n",
-				style.Heading(pretty, "Wake will permanently delete:"),
-				style.Paint(pretty, style.Dim, activation.SettingsFilePath(claudeDir)),
-				style.Paint(pretty, style.Dim, paths.DataDir),
-				style.Paint(pretty, style.Dim, paths.ConfigDir),
+				style.Heading(disclosurePretty, "Wake will permanently delete:"),
+				style.Paint(disclosurePretty, style.Dim, activation.SettingsFilePath(claudeDir)),
+				style.Paint(disclosurePretty, style.Dim, paths.DataDir),
+				style.Paint(disclosurePretty, style.Dim, paths.ConfigDir),
 			); discloseErr != nil {
 				return discloseErr
 			}
@@ -76,8 +83,13 @@ func newRemoveCmdWith(newPrompter promptFactory) *cobra.Command {
 			if askErr != nil {
 				return askErr
 			}
+			// A decline is exit 0 and says so on the stream that carried the question:
+			// declining a deletion is not a failure, and ADR-0043 §2 scopes the
+			// non-zero exit to the refusal there is nobody to ask on. A wrapper that
+			// needs to tell "purged" from "the user said no" reads the output, not the
+			// status.
 			if !proceed {
-				_, abortErr := fmt.Fprintln(cmd.OutOrStdout(), nothingDeleted)
+				_, abortErr := fmt.Fprintln(disclosure, nothingDeleted)
 				return abortErr
 			}
 		}

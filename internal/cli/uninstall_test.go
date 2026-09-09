@@ -516,6 +516,10 @@ func TestUninstallDisclosesBeforeItAsks(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
 	cmd.SetIn(strings.NewReader(""))
+	// Explicit, empty: with c.args nil cobra falls back to os.Args[1:], which under
+	// `go test` is the test binary's own -test.* flags and survives only on pflag's
+	// gotest escape hatch. Every sibling helper here sets args; so does this.
+	cmd.SetArgs([]string{})
 	cmd.SilenceUsage = true
 
 	if err := cmd.Execute(); err != nil {
@@ -615,4 +619,74 @@ func TestUninstallHelpStatesIrreversibilityAndTheAlternatives(t *testing.T) {
 		return
 	}
 	t.Fatal("no uninstall command is registered")
+}
+
+// runUninstallSplit drives `uninstall` with stdout and stderr kept apart, which is
+// what runUninstall merges. A merged buffer cannot tell a disclosure the user saw
+// from one that went into the file they redirected stdout to.
+func runUninstallSplit(t *testing.T, newPrompter promptFactory, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	cmd := newUninstallCmdWith(newPrompter)
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetIn(strings.NewReader(""))
+	cmd.SetArgs(args)
+	cmd.SilenceUsage = true
+	err = cmd.Execute()
+	return out.String(), errOut.String(), err
+}
+
+// The disclosure goes on the stream the question is put on (ADR-0043 §1). Split
+// across two, `wake uninstall > log` asks a person to authorise a deletion whose
+// paths landed in the file, and `> log 2>&1` blocks on stdin with a blank
+// terminal — the defect the ADR exists to close, one file descriptor over.
+func TestUninstallDisclosureGoesWhereTheQuestionGoes(t *testing.T) {
+	paths, _ := isolateUnderOneHome(t)
+	binary := pointSelfPathAtAThrowawayBinary(t)
+	settings := filepath.Join(claudeHome(t), "settings.json")
+	writeFixture(t, settings, settingsWith(userHookGroup, wakeHookGroup))
+	writeFixture(t, filepath.Join(paths.DataDir, "events.ndjson"), "seeded")
+
+	stdout, stderr, err := runUninstallSplit(t, streamPrompter("n"))
+
+	if err != nil {
+		t.Fatalf("uninstall returned an error: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if !strings.Contains(stderr, "Permanently delete") {
+		t.Fatalf("the question was never put on the prompt stream:\n%s", stderr)
+	}
+	for _, disclosed := range []string{settings, paths.DataDir, paths.ConfigDir, binary, "wake remove --purge", nothingDeleted} {
+		if !strings.Contains(stderr, disclosed) {
+			t.Errorf("%q is not on the stream the question was put on; stderr:\n%s", disclosed, stderr)
+		}
+		if strings.Contains(stdout, disclosed) {
+			t.Errorf("%q went to stdout while the question went to stderr; redirecting stdout would hide it:\n%s", disclosed, stdout)
+		}
+	}
+}
+
+// With --yes nobody is going to read anything at a prompt, so the disclosure is a
+// record of what the command did and stays on the answer stream — which is also
+// what keeps the pinned `--purge --yes` transcript exactly what it was.
+func TestUninstallWithYesKeepsTheDisclosureOnStdout(t *testing.T) {
+	paths, _ := isolateUnderOneHome(t)
+	binary := pointSelfPathAtAThrowawayBinary(t)
+	settings := filepath.Join(claudeHome(t), "settings.json")
+	writeFixture(t, settings, settingsWith(userHookGroup, wakeHookGroup))
+	writeFixture(t, filepath.Join(paths.DataDir, "events.ndjson"), "seeded")
+
+	stdout, stderr, err := runUninstallSplit(t, (&fakeTerminal{}).factory(), "--yes")
+
+	if err != nil {
+		t.Fatalf("uninstall --yes returned an error: %v\n%s", err, stdout)
+	}
+	for _, disclosed := range []string{settings, paths.DataDir, paths.ConfigDir, binary} {
+		if !strings.Contains(stdout, disclosed) {
+			t.Errorf("--yes moved %q off stdout; stdout:\n%s", disclosed, stdout)
+		}
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want nothing: there was no question to put", stderr)
+	}
 }

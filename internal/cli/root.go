@@ -130,8 +130,15 @@ func isTerminal(file *os.File) bool {
 // this returns false, which is what keeps every plain-text assertion in this
 // package's tests exactly what it was before any renderer here learned to be
 // pretty (ADR-0011, plan §7.3, §8).
-func ttyOutput(cmd *cobra.Command) bool {
-	file, ok := cmd.OutOrStdout().(*os.File)
+func ttyOutput(cmd *cobra.Command) bool { return ttyWriter(cmd.OutOrStdout()) }
+
+// ttyWriter asks the same question of a stream chosen at runtime, for the one
+// caller that does not know which stream it is writing to until the confirmation
+// gate has been built: a disclosure that follows the question onto stderr must
+// be styled on the strength of *that* fd, or `wake uninstall 2> log` writes
+// colour codes into a file.
+func ttyWriter(w io.Writer) bool {
+	file, ok := w.(*os.File)
 	return ok && isTerminal(file)
 }
 

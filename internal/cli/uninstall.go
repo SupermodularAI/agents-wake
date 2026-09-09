@@ -82,6 +82,16 @@ func newUninstallCmdWith(newPrompter promptFactory) *cobra.Command {
 			if gateErr != nil {
 				return gateErr
 			}
+			// The disclosure goes wherever the question is going to be put, which is
+			// stderr when there is one to put and stdout when --yes already answered it
+			// (confirmer.discloseTo). Printing it to stdout unconditionally would let
+			// `wake uninstall > log` ask a person to authorise a deletion whose paths
+			// went to the file, and `wake uninstall > log 2>&1` block on stdin with a
+			// blank terminal — the same defect ADR-0043 exists to close, one fd over.
+			// Styling follows the stream it lands on rather than stdout, or a redirected
+			// stderr collects colour codes.
+			disclosure := gate.discloseTo(cmd)
+			disclosurePretty := ttyWriter(disclosure)
 			// Printed before the first removal, and its error returned rather than
 			// discarded: ADR-0010 rests on the command showing the exact paths it will
 			// modify, so a disclosure that did not reach the user is a consent step that
@@ -93,15 +103,15 @@ func newUninstallCmdWith(newPrompter promptFactory) *cobra.Command {
 			// dimmed rather than plain (style.Paint no-ops when pretty is false, so a
 			// test asserting an exact path never sees this) for the same reason init
 			// dims its own list: the sentence around a path is what deserves the eye.
-			if _, discloseErr := fmt.Fprintf(cmd.OutOrStdout(),
+			if _, discloseErr := fmt.Fprintf(disclosure,
 				"%s\n"+
 					"%s  Wake's own hook entry only; your other hooks are left as they are\n"+
 					"%s  all collected activity and the local project map\n"+
 					"%s  configuration and the local identity salt\n"+
 					"%s  this binary\n",
-				style.Heading(pretty, "Wake will permanently delete, and this cannot be undone:"),
-				style.Paint(pretty, style.Dim, plan.SettingsFile), style.Paint(pretty, style.Dim, plan.DataDir),
-				style.Paint(pretty, style.Dim, plan.ConfigDir), style.Paint(pretty, style.Dim, plan.Executable),
+				style.Heading(disclosurePretty, "Wake will permanently delete, and this cannot be undone:"),
+				style.Paint(disclosurePretty, style.Dim, plan.SettingsFile), style.Paint(disclosurePretty, style.Dim, plan.DataDir),
+				style.Paint(disclosurePretty, style.Dim, plan.ConfigDir), style.Paint(disclosurePretty, style.Dim, plan.Executable),
 			); discloseErr != nil {
 				return discloseErr
 			}
@@ -111,11 +121,11 @@ func newUninstallCmdWith(newPrompter promptFactory) *cobra.Command {
 			// Its own line rather than folded into the one above, so the four paths
 			// every run prints stay the same four.
 			if plan.Launcher != "" {
-				if _, discloseErr := fmt.Fprintf(cmd.OutOrStdout(), "%s  the link this command was invoked through\n", style.Paint(pretty, style.Dim, plan.Launcher)); discloseErr != nil {
+				if _, discloseErr := fmt.Fprintf(disclosure, "%s  the link this command was invoked through\n", style.Paint(disclosurePretty, style.Dim, plan.Launcher)); discloseErr != nil {
 					return discloseErr
 				}
 			}
-			if _, discloseErr := fmt.Fprintln(cmd.OutOrStdout(), "To keep your configuration, use `wake remove --purge` instead."); discloseErr != nil {
+			if _, discloseErr := fmt.Fprintln(disclosure, "To keep your configuration, use `wake remove --purge` instead."); discloseErr != nil {
 				return discloseErr
 			}
 			// The question, after every path has been named and before anything has
@@ -127,7 +137,11 @@ func newUninstallCmdWith(newPrompter promptFactory) *cobra.Command {
 				return askErr
 			}
 			if !proceed {
-				_, abortErr := fmt.Fprintln(cmd.OutOrStdout(), nothingDeleted)
+				// Onto the stream that carried the question, for the reason the
+				// disclosure went there: a person who answered no at a terminal with
+				// stdout redirected still has to be told plainly that nothing was
+				// deleted (ADR-0043 §1).
+				_, abortErr := fmt.Fprintln(disclosure, nothingDeleted)
 				return abortErr
 			}
 			var removed bool

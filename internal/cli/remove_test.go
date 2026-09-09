@@ -301,3 +301,98 @@ func TestRemoveHelpNamesBothFormsAndTheIrreversibleOne(t *testing.T) {
 	}
 	t.Fatal("no remove command is registered")
 }
+
+// runRemoveSplit drives `remove` with stdout and stderr kept apart, which is what
+// runRemove merges. A merged buffer cannot tell a disclosure the user saw from one
+// that went into the file they redirected stdout to.
+func runRemoveSplit(t *testing.T, newPrompter promptFactory, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	cmd := newRemoveCmdWith(newPrompter)
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetIn(strings.NewReader(""))
+	cmd.SetArgs(args)
+	cmd.SilenceUsage = true
+	err = cmd.Execute()
+	return out.String(), errOut.String(), err
+}
+
+// The disclosure goes on the stream the question is put on (ADR-0043 §1), or
+// `wake remove --purge > log` asks a person to authorise deleting every record on
+// the machine while the paths it names sit in the file.
+func TestRemovePurgeDisclosureGoesWhereTheQuestionGoes(t *testing.T) {
+	paths, _ := isolateUnderOneHome(t)
+	claudeDir := claudeHome(t)
+	writeFixture(t, filepath.Join(claudeDir, "settings.json"), settingsWith(userHookGroup, wakeHookGroup))
+	writeFixture(t, filepath.Join(paths.DataDir, "events.ndjson"), "seeded")
+
+	stdout, stderr, err := runRemoveSplit(t, streamPrompter("n"), "--purge")
+
+	if err != nil {
+		t.Fatalf("remove --purge returned an error: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if !strings.Contains(stderr, "Permanently delete this data?") {
+		t.Fatalf("the question was never put on the prompt stream:\n%s", stderr)
+	}
+	for _, disclosed := range []string{activation.SettingsFilePath(claudeDir), paths.DataDir, paths.ConfigDir, nothingDeleted} {
+		if !strings.Contains(stderr, disclosed) {
+			t.Errorf("%q is not on the stream the question was put on; stderr:\n%s", disclosed, stderr)
+		}
+		if strings.Contains(stdout, disclosed) {
+			t.Errorf("%q went to stdout while the question went to stderr; redirecting stdout would hide it:\n%s", disclosed, stdout)
+		}
+	}
+}
+
+// The gap the --yes tests leave: a person at a terminal answering yes. This is the
+// only path from gate.ask() == true into activation.Uninstall(purge=true), and
+// nothing else exercises the wiring between them.
+func TestRemovePurgeConfirmedAtThePromptDeletesTheData(t *testing.T) {
+	paths, _ := isolateUnderOneHome(t)
+	settings := filepath.Join(claudeHome(t), "settings.json")
+	writeFixture(t, settings, settingsWith(userHookGroup, wakeHookGroup))
+	writeFixture(t, filepath.Join(paths.DataDir, "events.ndjson"), "seeded")
+	writeFixture(t, paths.ConfigFile, "ui.default_window = \"7d\"\n")
+	fake := &fakeTerminal{answers: []string{"y"}}
+
+	out, err := runRemove(t, fake.factory(), "--purge")
+
+	if err != nil {
+		t.Fatalf("remove --purge returned an error: %v\n%s", err, out)
+	}
+	if !strings.Contains(fake.transcript(), "Permanently delete this data?") {
+		t.Errorf("the terminal was never asked to confirm; it saw %q", fake.transcript())
+	}
+	absent(t, paths.DataDir)
+	if _, statErr := os.Stat(paths.ConfigFile); statErr != nil {
+		t.Errorf("Stat(config.toml) error = %v; --purge keeps the config root however it was confirmed", statErr)
+	}
+}
+
+// --yes without --purge is accepted and does nothing, deliberately: erroring would
+// break a script that passes it defensively, and plain `remove` is not gated in the
+// first place (ADR-0043 §1). Pinned so a later MarkFlagsRequiredTogether cannot
+// break that promise quietly.
+func TestRemoveYesWithoutPurgeIsAcceptedAndChangesNothingElse(t *testing.T) {
+	paths, _ := isolateUnderOneHome(t)
+	settings := filepath.Join(claudeHome(t), "settings.json")
+	writeFixture(t, settings, settingsWith(userHookGroup, wakeHookGroup))
+	writeFixture(t, filepath.Join(paths.DataDir, "events.ndjson"), "seeded")
+	fake := &fakeTerminal{answers: []string{"n"}}
+
+	out, err := runRemove(t, fake.factory(), "--yes")
+
+	if err != nil {
+		t.Fatalf("remove --yes returned an error: %v\n%s", err, out)
+	}
+	if len(fake.shown) != 0 {
+		t.Errorf("plain `remove --yes` asked for confirmation: %q", fake.shown)
+	}
+	if strings.Contains(out, "Wake will permanently delete") {
+		t.Errorf("plain `remove --yes` printed a deletion disclosure:\n%s", out)
+	}
+	if _, statErr := os.Stat(filepath.Join(paths.DataDir, "events.ndjson")); statErr != nil {
+		t.Errorf("Stat(events.ndjson) error = %v; --yes without --purge deletes no data", statErr)
+	}
+}

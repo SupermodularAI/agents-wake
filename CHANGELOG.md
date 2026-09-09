@@ -39,8 +39,13 @@ called out under Changed.
   refuse with a non-zero exit and change nothing unless `--yes` is given, so a
   script, cron job or CI step running either command today keeps working only once
   `--yes` is added. `--yes` skips the question, never the disclosure: the paths are
-  still printed. `wake remove` without `--purge` is unchanged and deliberately not
-  gated — it removes only Wake's hook entry, which `wake init` puts back.
+  still printed. When there is a question to answer, the paths are printed on the
+  same stream the question is put on — standard error, where every prompt in Wake
+  already goes — so redirecting standard output cannot leave you confirming a
+  deletion whose paths you never saw; with `--yes` there is nothing to answer and
+  they stay on standard output. `wake remove` without `--purge` is unchanged and
+  deliberately not gated — it removes only Wake's hook entry, which `wake init`
+  puts back.
 
 - **Breaking (stored records and wire).** Two changes bump the record schema, which
   moves from 6 to 8.

@@ -37,8 +37,18 @@ var errNoTerminalToConfirmOn = errors.New(
 const nothingDeleted = "Nothing was deleted. Wake is unchanged."
 
 // confirmer carries the decision made before the disclosure: a terminal to ask
-// on, or an answer already settled by --yes. A zero confirmer is the --yes one.
-type confirmer struct{ prompt prompter }
+// on, or an answer already settled by --yes.
+//
+// authorized is what makes the zero value refuse rather than proceed. Nothing
+// but newConfirmer sets it, so a third destructive command that declares a
+// `var gate confirmer` and forgets to construct it deletes nothing instead of
+// deleting silently — ADR-0043 § Consequences says a third command inherits
+// this decision, and a safety gate whose zero value is "yes" is one a later
+// author can disarm by omission and still compile, lint and pass review.
+type confirmer struct {
+	prompt     prompter
+	authorized bool
+}
 
 // newConfirmer decides whether this run can be authorised at all, before
 // anything has been disclosed.
@@ -48,7 +58,7 @@ type confirmer struct{ prompt prompter }
 // to ask on is refused here — nothing has been printed, and nothing is deleted.
 func newConfirmer(cmd *cobra.Command, newPrompter promptFactory, assumeYes bool) (confirmer, error) {
 	if assumeYes {
-		return confirmer{}, nil
+		return confirmer{authorized: true}, nil
 	}
 	prompt := newPrompter(cmd)
 	if prompt == nil {
@@ -57,11 +67,27 @@ func newConfirmer(cmd *cobra.Command, newPrompter promptFactory, assumeYes bool)
 	return confirmer{prompt: prompt}, nil
 }
 
+// discloseTo is the stream this run's disclosure has to be written to.
+//
+// When there is going to be a question, it is the stream the question is put on:
+// the paths are read in order to answer, so a redirection that separates them
+// from the question leaves the user authorising a deletion they cannot see
+// (ADR-0043 §1). When --yes settled it, nobody is going to read anything at a
+// prompt and the disclosure is a record of what the command did, which belongs
+// in the answer stream every other command keeps on stdout.
+func (c confirmer) discloseTo(cmd *cobra.Command) io.Writer {
+	if c.prompt == nil {
+		return cmd.OutOrStdout()
+	}
+	return promptStream(cmd)
+}
+
 // ask puts the question and reports whether to proceed. A --yes gate has nothing
-// to ask and proceeds.
+// to ask and proceeds; an unconstructed one has no authority to proceed on and
+// declines.
 func (c confirmer) ask(question string) (bool, error) {
 	if c.prompt == nil {
-		return true, nil
+		return c.authorized, nil
 	}
 	answer, err := c.prompt.Line(question)
 	if errors.Is(err, io.EOF) {
