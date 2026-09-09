@@ -19,14 +19,44 @@ var selfPath = os.Executable
 
 func init() { commands = append(commands, newUninstallCmd) }
 
-func newUninstallCmd() *cobra.Command {
+// newUninstallCmd is what the registry attaches: the command wired to the real
+// terminal.
+func newUninstallCmd() *cobra.Command { return newUninstallCmdWith(osPrompter) }
+
+// newUninstallCmdWith takes the prompt factory as a parameter, exactly as
+// newRemoteSetCmd does, so a test drives the confirmation against a fake terminal
+// instead of needing a real one.
+func newUninstallCmdWith(newPrompter promptFactory) *cobra.Command {
+	var assumeYes bool
 	// Short is one row of `wake --help`, so it stays inside the table every other row
-	// fits rather than wrapping the whole listing; the detail is in the disclosure the
-	// command prints, which the user reads at the moment it matters.
-	return &cobra.Command{
+	// fits rather than wrapping the whole listing. Long carries what the disclosure
+	// cannot: ADR-0043 §3 puts the irreversibility, what goes, what stays and the
+	// less-destructive alternatives somewhere the user can still act on them, because
+	// a line printed above a running removal is not such a place.
+	cmd := &cobra.Command{
 		Use:   "uninstall",
 		Short: "Remove Wake entirely, including this binary",
-		Args:  cobra.NoArgs,
+		Long: "Remove Wake entirely from this machine. This cannot be undone.\n" +
+			"\n" +
+			"Deleted:\n" +
+			"  Wake's own Claude Code hook entry, and nothing else in settings.json\n" +
+			"  all collected activity and the local project map (~/.local/state/wake, or\n" +
+			"    $WAKE_DIR when it is set)\n" +
+			"  configuration and the local identity salt (~/.config/wake)\n" +
+			"  this binary, plus the link it was invoked through if there is one\n" +
+			"\n" +
+			"Kept: nothing of Wake's. A later `wake init` is a fresh install with a new\n" +
+			"identity salt, so every repository is re-identified and earlier records no\n" +
+			"longer line up with it.\n" +
+			"\n" +
+			"Less destructive alternatives:\n" +
+			"  wake remove          remove the hook entry only; data and configuration stay\n" +
+			"  wake remove --purge  ...and delete collected data; configuration stays\n" +
+			"\n" +
+			"The exact paths are printed and confirmed before anything is deleted. With no\n" +
+			"terminal on standard input this command refuses and deletes nothing unless\n" +
+			"--yes is given.",
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			pretty := ttyOutput(cmd)
 			paths, err := config.ResolvePaths()
@@ -44,6 +74,13 @@ func newUninstallCmd() *cobra.Command {
 			plan, err := activation.PlanUninstall(paths, claudeDir, executable)
 			if err != nil {
 				return err
+			}
+			// Decided before the disclosure, so a run that is going to refuse never
+			// promises a deletion it cannot make — the same ordering PlanUninstall uses
+			// for the refusals it can pre-check (ADR-0043 §2).
+			gate, gateErr := newConfirmer(cmd, newPrompter, assumeYes)
+			if gateErr != nil {
+				return gateErr
 			}
 			// Printed before the first removal, and its error returned rather than
 			// discarded: ADR-0010 rests on the command showing the exact paths it will
@@ -80,6 +117,18 @@ func newUninstallCmd() *cobra.Command {
 			}
 			if _, discloseErr := fmt.Fprintln(cmd.OutOrStdout(), "To keep your configuration, use `wake remove --purge` instead."); discloseErr != nil {
 				return discloseErr
+			}
+			// The question, after every path has been named and before anything has
+			// been deleted (ADR-0043 §1). A --yes gate has nothing to ask and proceeds;
+			// any answer that is not a yes deletes nothing and says so, at exit 0,
+			// because declining a deletion is not a failure.
+			proceed, askErr := gate.ask("Permanently delete all of this? [y/N]: ")
+			if askErr != nil {
+				return askErr
+			}
+			if !proceed {
+				_, abortErr := fmt.Fprintln(cmd.OutOrStdout(), nothingDeleted)
+				return abortErr
 			}
 			var removed bool
 			spinErr := style.WithSpinner(cmd.OutOrStdout(), pretty, "Removing Wake", func() error {
@@ -127,4 +176,9 @@ func newUninstallCmd() *cobra.Command {
 			return err
 		},
 	}
+	// No -y shorthand. This is the first flag in the CLI whose purpose is to skip a
+	// safety gate (ADR-0043 § Consequences), and a one-letter form is the one a hand
+	// slips onto.
+	cmd.Flags().BoolVar(&assumeYes, "yes", false, "delete without asking for confirmation")
+	return cmd
 }

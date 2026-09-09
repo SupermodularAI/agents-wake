@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	"github.com/SupermodularAI/agents-wake/internal/config"
 )
 
@@ -127,7 +129,7 @@ func TestUninstallDisclosesEveryPathBeforeRemovingAnything(t *testing.T) {
 	writeFixture(t, filepath.Join(paths.DataDir, "events.ndjson"), "seeded")
 	writeFixture(t, paths.ConfigFile, "ui.default_window = \"7d\"\n")
 
-	out, err := run(t, "uninstall")
+	out, err := run(t, "uninstall", "--yes")
 
 	if err != nil {
 		t.Fatalf("uninstall returned an error: %v\n%s", err, out)
@@ -157,7 +159,7 @@ func TestUninstallRemovesTheIntegrationBothRootsAndTheBinary(t *testing.T) {
 	writeFixture(t, filepath.Join(paths.DataDir, "events.ndjson"), "seeded")
 	writeFixture(t, paths.ConfigFile, "ui.default_window = \"7d\"\n")
 
-	out, err := run(t, "uninstall")
+	out, err := run(t, "uninstall", "--yes")
 
 	if err != nil {
 		t.Fatalf("uninstall returned an error: %v\n%s", err, out)
@@ -188,7 +190,7 @@ func TestUninstallKeepsAUsersOwnHookEntriesByteIdentical(t *testing.T) {
 	writeFixture(t, settings, original)
 	writeFixture(t, paths.ConfigFile, "ui.default_window = \"7d\"\n")
 
-	if out, err := run(t, "uninstall"); err != nil {
+	if out, err := run(t, "uninstall", "--yes"); err != nil {
 		t.Fatalf("uninstall returned an error: %v\n%s", err, out)
 	}
 
@@ -208,7 +210,7 @@ func TestUninstallOnASystemThatWasNeverInitedStillRemovesConfigAndTheBinary(t *t
 	binary := pointSelfPathAtAThrowawayBinary(t)
 	writeFixture(t, paths.ConfigFile, "ui.default_window = \"7d\"\n")
 
-	out, err := run(t, "uninstall")
+	out, err := run(t, "uninstall", "--yes")
 
 	if err != nil {
 		t.Fatalf("uninstall returned an error: %v\n%s", err, out)
@@ -242,7 +244,7 @@ func TestUninstallChangesNothingOutsideTheDisclosedPaths(t *testing.T) {
 		}
 	}
 
-	if out, err := run(t, "uninstall"); err != nil {
+	if out, err := run(t, "uninstall", "--yes"); err != nil {
 		t.Fatalf("uninstall returned an error: %v\n%s", err, out)
 	}
 
@@ -298,7 +300,7 @@ func TestUninstallRefusesASettingsFileItWillNotEditWithoutPromisingADeletion(t *
 	writeFixture(t, paths.ConfigFile, "ui.default_window = \"7d\"\n")
 	writeFixture(t, filepath.Join(paths.DataDir, "events.ndjson"), "seeded")
 
-	out, err := run(t, "uninstall")
+	out, err := run(t, "uninstall", "--yes")
 
 	if err == nil {
 		t.Fatalf("uninstall returned nil, want the failure surfaced; output:\n%s", out)
@@ -341,7 +343,7 @@ func TestUninstallReportsWhatItManagedBeforeAFailure(t *testing.T) {
 		}
 	})
 
-	out, err := run(t, "uninstall")
+	out, err := run(t, "uninstall", "--yes")
 
 	if err == nil {
 		t.Fatalf("uninstall returned nil, want the failure surfaced; output:\n%s", out)
@@ -367,7 +369,7 @@ func TestUninstallSuccessLineClaimsNoRemovalThatDidNotHappen(t *testing.T) {
 	paths, _ := isolateUnderOneHome(t)
 	pointSelfPathAtAThrowawayBinary(t)
 
-	out, err := run(t, "uninstall")
+	out, err := run(t, "uninstall", "--yes")
 
 	if err != nil {
 		t.Fatalf("uninstall returned an error: %v\n%s", err, out)
@@ -411,7 +413,7 @@ func TestUninstallDisclosesAndRemovesALinkOnPath(t *testing.T) {
 	}
 	selfPath = func() (string, error) { return link, nil }
 
-	out, err := run(t, "uninstall")
+	out, err := run(t, "uninstall", "--yes")
 
 	if err != nil {
 		t.Fatalf("uninstall returned an error: %v\n%s", err, out)
@@ -423,4 +425,194 @@ func TestUninstallDisclosesAndRemovesALinkOnPath(t *testing.T) {
 	if _, lstatErr := os.Lstat(link); !errors.Is(lstatErr, fs.ErrNotExist) {
 		t.Errorf("Lstat(%s) error = %v; the link is still on PATH pointing at nothing", link, lstatErr)
 	}
+}
+
+// runUninstall drives `uninstall` with a fake terminal in its place, through the same
+// RunE the command tree builds.
+//
+// Standard input is a strings.Reader so the real osPrompter is never consulted and the
+// test cannot depend on what the test binary's own stdin happens to be.
+func runUninstall(t *testing.T, newPrompter promptFactory, args ...string) (string, error) {
+	t.Helper()
+	var out bytes.Buffer
+	cmd := newUninstallCmdWith(newPrompter)
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetIn(strings.NewReader(""))
+	cmd.SetArgs(args)
+	cmd.SilenceUsage = true
+	err := cmd.Execute()
+	return out.String(), err
+}
+
+// Acceptance (ADR-0043 §1): nothing is deleted until somebody says yes.
+func TestUninstallAsksBeforeDeletingAnything(t *testing.T) {
+	paths, _ := isolateUnderOneHome(t)
+	binary := pointSelfPathAtAThrowawayBinary(t)
+	writeFixture(t, filepath.Join(claudeHome(t), "settings.json"), settingsWith(userHookGroup, wakeHookGroup))
+	writeFixture(t, filepath.Join(paths.DataDir, "events.ndjson"), "seeded")
+	writeFixture(t, paths.ConfigFile, "ui.default_window = \"7d\"\n")
+	fake := &fakeTerminal{answers: []string{"y"}}
+
+	out, err := runUninstall(t, fake.factory())
+
+	if err != nil {
+		t.Fatalf("uninstall returned an error: %v\n%s", err, out)
+	}
+	if !strings.Contains(fake.transcript(), "Permanently delete") {
+		t.Errorf("the terminal was never asked to confirm; it saw %q", fake.transcript())
+	}
+	absent(t, paths.DataDir)
+	absent(t, paths.ConfigDir)
+	absent(t, binary)
+}
+
+// Acceptance: answering no deletes nothing and says so. The filesystem diff is the
+// assertion that matters — a command that printed the abort line and deleted anyway
+// would pass a text-only check.
+func TestUninstallAbortedAtThePromptDeletesNothing(t *testing.T) {
+	paths, home := isolateUnderOneHome(t)
+	binary := pointSelfPathAtAThrowawayBinary(t)
+	settings := filepath.Join(claudeHome(t), "settings.json")
+	writeFixture(t, settings, settingsWith(userHookGroup, wakeHookGroup))
+	writeFixture(t, filepath.Join(paths.DataDir, "events.ndjson"), "seeded")
+	writeFixture(t, paths.ConfigFile, "ui.default_window = \"7d\"\n")
+	before := snapshot(t, home)
+	if _, ok := before[settings]; !ok {
+		t.Fatal("the snapshot never saw the settings file; the diff would be vacuous")
+	}
+	fake := &fakeTerminal{answers: []string{"n"}}
+
+	out, err := runUninstall(t, fake.factory())
+
+	if err != nil {
+		t.Fatalf("a declined uninstall returned an error: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, nothingDeleted) {
+		t.Errorf("output does not say plainly that nothing was deleted:\n%s", out)
+	}
+	after := snapshot(t, home)
+	for path, was := range before {
+		if now, still := after[path]; !still || now != was {
+			t.Errorf("%s changed after the deletion was declined: was %q, now %q (present=%t)", path, was, now, still)
+		}
+	}
+	if _, statErr := os.Stat(binary); statErr != nil {
+		t.Errorf("Stat(the binary) error = %v; a declined uninstall removes nothing", statErr)
+	}
+}
+
+// The paths come before the question, or the answer is not informed by them
+// (ADR-0043 §1). The question is written into the command's own stream by
+// echoPrompter so the order is one index comparison.
+func TestUninstallDisclosesBeforeItAsks(t *testing.T) {
+	paths, _ := isolateUnderOneHome(t)
+	binary := pointSelfPathAtAThrowawayBinary(t)
+	settings := filepath.Join(claudeHome(t), "settings.json")
+	writeFixture(t, settings, settingsWith(userHookGroup, wakeHookGroup))
+	writeFixture(t, filepath.Join(paths.DataDir, "events.ndjson"), "seeded")
+	var out bytes.Buffer
+	cmd := newUninstallCmdWith(func(*cobra.Command) prompter { return &echoPrompter{out: &out, answer: "n"} })
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetIn(strings.NewReader(""))
+	cmd.SilenceUsage = true
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("uninstall returned an error: %v\n%s", err, out.String())
+	}
+
+	printed := out.String()
+	question := strings.Index(printed, "Permanently delete")
+	if question < 0 {
+		t.Fatalf("the question was never put:\n%s", printed)
+	}
+	for _, disclosed := range []string{settings, paths.DataDir, paths.ConfigDir, binary, "wake remove --purge"} {
+		at := strings.Index(printed, disclosed)
+		if at < 0 {
+			t.Errorf("the disclosure never names %q; got:\n%s", disclosed, printed)
+			continue
+		}
+		if at > question {
+			t.Errorf("%q is disclosed after the question was put; got:\n%s", disclosed, printed)
+		}
+	}
+}
+
+// Acceptance (ADR-0043 §2): unattended and without --yes, the command refuses,
+// deletes nothing and names the way through. `< /dev/null` is the shape this is
+// about, and it must not be read as a person at a keyboard.
+func TestUninstallWithoutATerminalRefusesAndNamesYes(t *testing.T) {
+	paths, _ := isolateUnderOneHome(t)
+	binary := pointSelfPathAtAThrowawayBinary(t)
+	writeFixture(t, filepath.Join(claudeHome(t), "settings.json"), settingsWith(userHookGroup, wakeHookGroup))
+	writeFixture(t, filepath.Join(paths.DataDir, "events.ndjson"), "seeded")
+	writeFixture(t, paths.ConfigFile, "ui.default_window = \"7d\"\n")
+
+	out, err := runUninstall(t, osPrompter)
+
+	if err == nil {
+		t.Fatalf("uninstall returned nil, want the refusal; output:\n%s", out)
+	}
+	if !strings.Contains(err.Error(), "--yes") {
+		t.Errorf("refusal = %q, want it to name --yes", err.Error())
+	}
+	if strings.Contains(out, "Wake will permanently delete") {
+		t.Errorf("the refusal promised a deletion it never made:\n%s", out)
+	}
+	for _, path := range []string{paths.DataDir, paths.ConfigDir, binary} {
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Errorf("Stat(%s) error = %v; the refusal must leave everything in place", path, statErr)
+		}
+	}
+}
+
+// --yes is a bypass of the prompt, never of the disclosure (ADR-0043 §2): the paths
+// are still printed, and standard input is never consulted.
+func TestUninstallWithYesProceedsWithoutPrompting(t *testing.T) {
+	paths, _ := isolateUnderOneHome(t)
+	binary := pointSelfPathAtAThrowawayBinary(t)
+	settings := filepath.Join(claudeHome(t), "settings.json")
+	writeFixture(t, settings, settingsWith(userHookGroup, wakeHookGroup))
+	writeFixture(t, filepath.Join(paths.DataDir, "events.ndjson"), "seeded")
+	writeFixture(t, paths.ConfigFile, "ui.default_window = \"7d\"\n")
+	fake := &fakeTerminal{}
+
+	out, err := runUninstall(t, fake.factory(), "--yes")
+
+	if err != nil {
+		t.Fatalf("uninstall --yes returned an error: %v\n%s", err, out)
+	}
+	if len(fake.shown) != 0 {
+		t.Errorf("--yes asked anyway: %q", fake.shown)
+	}
+	for _, disclosed := range []string{settings, paths.DataDir, paths.ConfigDir, binary} {
+		if !strings.Contains(out, disclosed) {
+			t.Errorf("--yes skipped the disclosure of %q; got:\n%s", disclosed, out)
+		}
+	}
+	absent(t, paths.DataDir)
+	absent(t, paths.ConfigDir)
+	absent(t, binary)
+}
+
+// ADR-0043 §3: the alternative has to be somewhere the user can still choose it, and
+// help is such a place. A line above a running spinner is not.
+func TestUninstallHelpStatesIrreversibilityAndTheAlternatives(t *testing.T) {
+	for _, command := range commands {
+		cmd := command()
+		if cmd.Name() != "uninstall" {
+			continue
+		}
+		for _, want := range []string{
+			"cannot be undone", "wake remove --purge", "wake remove",
+			"~/.config/wake", "~/.local/state/wake", "WAKE_DIR", "--yes",
+		} {
+			if !strings.Contains(cmd.Long, want) {
+				t.Errorf("`wake uninstall --help` never says %q:\n%s", want, cmd.Long)
+			}
+		}
+		return
+	}
+	t.Fatal("no uninstall command is registered")
 }
