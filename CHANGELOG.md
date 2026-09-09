@@ -13,6 +13,15 @@ called out under Changed.
 
 - `SECURITY.md`, `CODE_OF_CONDUCT.md`, and this changelog.
 - Secret, vulnerability, and commit-style gates in CI.
+- Invocations carry `duration_ms`. The field was declared on the record type and
+  populated by nothing, so every exported span was zero-length. It is the
+  request-to-result interval — from the `tool_use` instant to the `tool_result`
+  instant — which includes scheduling and any wait for a human to approve a
+  permission prompt, so a permission-gated call reads as slow. It is **not** tool
+  execution time, and the harness's own `toolUseResult.durationMs` is deliberately
+  not consulted or blended: one provenance, always. A call with no terminal result,
+  and a pair whose result instant precedes its call, stay `nil` and are counted —
+  never clamped to `0`, because `0` on the wire means a genuinely instant call.
 - An MCP tool's invocation now records which server provided it. A server's tools
   are named `mcp__<server>__<tool>` by the harness, and the server segment is
   stored as the harness spells it, validated as a bounded token. Before this,
@@ -47,6 +56,22 @@ called out under Changed.
   delivery watermark stamps the schema version and starts over on a bump, so
   nothing needs migrating by hand.
 
+- **Breaking (`primitives.json`).** One primitive is now one row. The repository had
+  entered both the aggregate's key and the snapshot's key, so a primitive used in
+  several projects became several rows — on a real machine one skill showed as four
+  rows of 2 / 2 / 1 / 1 where the answer to *how much do I use this* is 6. The
+  repository now rides the row as a set instead of identifying it: counters are
+  summed across projects and the error rate is recomputed over the merged
+  population, never averaged from two rendered rates. `--unused` accordingly means
+  **never used anywhere** — a primitive used in one project and not another has been
+  used. The `PROJECT` cell still names a project where there is exactly one and
+  shows a count where there are several; naming one would report it as the only
+  project the primitive was used in. `primitiveFileVersion` goes 2 to 3 and an
+  older snapshot is refused rather than migrated, so one refresh republishes it from
+  the event spool. Nothing below the snapshot changes: the record contract, its
+  `SchemaVersion` and the OTLP attribute set are untouched, and `wake.repo` still
+  travels per invocation.
+
 - `wake report` and the dashboard name the repository column **PROJECT** (`Project` in the
   dashboard; was `REPO`), and the docs now say what that value is: the project each invocation's
   own working directory resolved to, and for a linked worktree the repository it belongs to. Nothing about the value changes —
@@ -60,6 +85,55 @@ called out under Changed.
 
 ### Fixed
 
+- The `ERRORS` cell says what its percentage was computed over. It printed a bare
+  `1 (100.0%)` beside a `CALLS` column reading 2, inviting a reader to bind the rate
+  to the calls next to it; the real denominator is the calls that were rated at all.
+  It now reads `1 of 1 rated (100.0%)`, from one renderer shared by the terminal
+  report and the dashboard — the two had each kept a copy and the copies had
+  diverged.
+
+- A primitive none of whose calls carried an outcome renders as unrated rather than
+  as `0`. Two correct facts — no failures seen, the calls happened — were forming a
+  false sentence.
+
+- A tool result that omits `is_error` is read as success for the families measured
+  never to spell it. Before, an absent field meant *the source does not say* for
+  every tool alike, so 61 % of Claude Code tool results carried no outcome and the
+  null rate swamped every error rate the product renders. Across sixty transcripts,
+  `is_error: false` is written by Bash alone — 929 occurrences; every other family
+  omits on success and writes `true` on failure. The rule is a closed allowlist of
+  the measured families, never an exception for Bash: a family nobody has measured
+  keeps its absences unknown. No failure signal moves — denials, the interrupted
+  flag and an explicit `true` keep their precedence.
+
+- A subagent run whose own transcript ends in a failure is rated as a failure
+  instead of carrying no outcome. Claude Code writes a structured
+  `isApiErrorMessage` marker on 26 of 917 subagent transcripts, true in 26 of 26.
+  Only the run's terminal entry counts. Success is still never derived — no side
+  observes it — so absence stays unknown.
+
+- A plugin skill no longer appears twice, once bare and once namespaced, with the
+  bare row unreachable by any event — roughly 50 phantom rows in `--unused` on a
+  real machine. A name folds only where it is provably one plugin's and nothing
+  else's; every other case is refused rather than guessed, because folding wrongly
+  merges two primitives' counters.
+
+- A plugin-provided primitive takes its kind from the harness's own declaration,
+  never from the directory it was discovered in. A plugin command that Claude Code
+  lists and invokes as a skill was being counted as a command.
+
+- `wake doctor` says which collection scope produced its `skipped transcripts`
+  count. The same machine, the same transcripts and no consent change reported 1041
+  skipped under the hook-fired scan and 143 under `wake ingest`; both numbers were
+  right and nothing on screen said which question either answered. The counter
+  file's own version goes 7 to 8 — a diagnostics file, unrelated to the record
+  schema — so one scan's diagnostics are refused rather than explained wrongly.
+
+- `wake init --help` no longer advertises a positional it refuses. The usage line
+  read `wake init [path]`, but plain `init` takes no path — only `--global` does.
+  The help now lists the four forms the unchanged validator accepts. Help surface
+  only; no behaviour changed.
+
 - A git worktree no longer splits one project across several rows in `wake report`,
   the dashboard and `primitives.json`. A worktree is still its own consented
   repository with its own identity and still needs its own `wake init`; what is new
@@ -71,6 +145,9 @@ called out under Changed.
   inside it again — nothing is rewritten on read. Spans already delivered keep the
   labels they were sent with; the correction is not retroactive, and no re-ingest or
   `--rebuild` is needed for local reports, because no repository hash changed.
+  **Register the parent repository first:** a worktree discovered before its parent
+  is consented registers with no relation and never gains one, so its invocations
+  keep counting under the worktree.
 
 ## [0.2.0] - 2026-08-28
 
