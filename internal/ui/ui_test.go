@@ -161,16 +161,25 @@ func TestHandlerShowsAvailablePrimitivesWithoutUsage(t *testing.T) {
 	}
 }
 
-// TestHandlerShowsARepositoryColumnPerRepository is DG-93 on the dashboard: the
-// same grain the terminal report renders, checked in the same change.
-func TestHandlerShowsARepositoryColumnPerRepository(t *testing.T) {
+// TestHandlerNamesOneProjectAndCountsSeveral is the restored grain on the
+// dashboard: the same cell the terminal report renders, checked in the same change.
+// A row used in one project names it; a row spanning several says how many rather
+// than naming one as though it were the only one (ADR-0042).
+func TestHandlerNamesOneProjectAndCountsSeveral(t *testing.T) {
 	const labelled, unlabelled = "0123456789abcdef0123456789abcdef", "fedcba9876543210fedcba9876543210"
 	source := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
-	if _, err := source.Append([]record.Record{repoEvent("here", labelled), repoEvent("there", unlabelled)}); err != nil {
+	spread := repoEvent("spread", unlabelled)
+	spread.Name = "deploy"
+	here := repoEvent("here", labelled)
+	here.Name = "deploy"
+	if _, err := source.Append([]record.Record{repoEvent("only", labelled), here, spread}); err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
 	primitives := inventory.New(filepath.Join(t.TempDir(), "primitives.json"))
-	discovered := inventory.Discovery{Primitives: []inventory.Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "review"}}, ProjectScanned: true}
+	discovered := inventory.Discovery{Primitives: []inventory.Primitive{
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "review"},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "deploy"},
+	}, ProjectScanned: true}
 	if err := primitives.Refresh(source, discovered, nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
@@ -178,10 +187,13 @@ func TestHandlerShowsARepositoryColumnPerRepository(t *testing.T) {
 	response := httptest.NewRecorder()
 	Handler(source, primitives, repolabel.Labels{labelled: "agents-wake"}, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
 	body := response.Body.String()
-	for _, want := range []string{">Project<", ">agents-wake<", ">repo-fedcba987654<"} {
+	for _, want := range []string{">Project<", ">agents-wake<", ">2-projects<"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("dashboard is missing %q: %s", want, body)
 		}
+	}
+	if strings.Count(body, ">deploy<") != 1 {
+		t.Fatalf("dashboard shows `deploy` more than once; one primitive is one row: %s", body)
 	}
 }
 
@@ -336,7 +348,7 @@ func TestPartialRequestDoesNotHoldTheConnection(t *testing.T) {
 func TestViewLabelsAnUnmatchedServer(t *testing.T) {
 	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
 	result := view(metrics.Aggregate(nil, nil), []inventory.Usage{
-		{Harness: "claude-code", Kind: record.KindMCPServer, Name: "linear-server", Repo: "0123456789abcdef0123456789abcdef", Invocations: 3, Unmatched: true, LastUsed: at},
+		{Harness: "claude-code", Kind: record.KindMCPServer, Name: "linear-server", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 3, Unmatched: true, LastUsed: at},
 	}, repolabel.Labels{})
 
 	if len(result.Usage) != 1 || len(result.Unused) != 0 {
@@ -355,7 +367,7 @@ func TestViewLabelsAnUnmatchedServer(t *testing.T) {
 func TestViewMarksASubagentRowWithNoRatedPopulationAsUnrated(t *testing.T) {
 	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
 	result := view(metrics.Aggregate(nil, nil), []inventory.Usage{
-		{Harness: "claude-code", Kind: record.KindSubagent, Name: "explorer", Repo: "0123456789abcdef0123456789abcdef", Invocations: 3, Unknown: 3, LastUsed: at},
+		{Harness: "claude-code", Kind: record.KindSubagent, Name: "explorer", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 3, Unknown: 3, LastUsed: at},
 	}, repolabel.Labels{})
 
 	if len(result.Usage) != 1 {
