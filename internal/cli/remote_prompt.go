@@ -76,15 +76,31 @@ func osPrompter(cmd *cobra.Command) prompter {
 	if !ok || !term.IsTerminal(int(file.Fd())) {
 		return nil
 	}
-	return &termPrompter{in: file, out: cmd.ErrOrStderr(), lines: bufio.NewReader(file)}
+	return &termPrompter{in: file, out: promptStream(cmd), lines: bufio.NewReader(file)}
 }
+
+// promptStream is the stream a question is put on — and therefore the stream
+// anything the person has to read in order to answer it goes on too.
+//
+// stdout is the answer stream every command in this package keeps
+// redirect-safe, and a prompt written into `wake remote set > file` is a prompt
+// the person staring at the terminal never sees. That argument does not stop at
+// the question: a destructive command's disclosure of exact paths is read *in
+// order to answer*, so splitting the two across two file descriptors leaves
+// `wake uninstall > log` asking a person to authorise a deletion whose paths
+// landed in the file, and `wake uninstall > log 2>&1` blocking on stdin with a
+// blank terminal. A confirmation the user cannot read the paths for is not one
+// (ADR-0043 §1), so the disclosure follows the question here rather than the
+// redirection deciding whether the two ever meet.
+//
+// It is one function rather than the same expression written twice so the two
+// cannot drift apart: the prompter and the gate that discloses before it ask
+// the same question of the same command.
+func promptStream(cmd *cobra.Command) io.Writer { return cmd.ErrOrStderr() }
 
 // termPrompter is the real terminal.
 //
-// Prompts go to stderr, not stdout. stdout is the answer stream every command in
-// this package keeps redirect-safe, and a prompt written into
-// `wake remote set > file` is a prompt the person staring at the terminal never
-// sees.
+// Prompts go to promptStream's fd, not stdout, for the reason recorded there.
 //
 // The buffered reader is safe beside term.ReadPassword's direct read of the same
 // fd only because this type is constructed for a terminal and nothing else: a

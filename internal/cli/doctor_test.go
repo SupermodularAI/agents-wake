@@ -527,3 +527,21 @@ func lineValue(t *testing.T, out, key string) string {
 	t.Fatalf("output has no %q line:\n%s", key, out)
 	return ""
 }
+
+// The `Short` string is read by someone who has never run the command, so it says
+// what the command shows rather than which of Wake's internals last ran. Its length
+// is not asserted here: that is a rule about the whole help table, and it is held
+// over every registered command in root_test.go rather than invented for this one.
+func TestDoctorShortSaysWhatTheCommandShows(t *testing.T) {
+	for _, command := range commands {
+		cmd := command()
+		if cmd.Name() != "doctor" {
+			continue
+		}
+		if strings.Contains(cmd.Short, "hook change") {
+			t.Errorf("Short = %q; it describes Wake's internals to a reader who has not run it yet", cmd.Short)
+		}
+		return
+	}
+	t.Fatal("no doctor command is registered")
+}
