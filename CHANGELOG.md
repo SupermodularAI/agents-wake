@@ -32,6 +32,16 @@ called out under Changed.
 
 ### Changed
 
+- **Breaking (CLI).** `wake uninstall` and `wake remove --purge` now ask before
+  deleting anything. Both print the exact paths they will remove — `remove --purge`
+  never printed them at all — and then wait for a yes on standard input; any other
+  answer deletes nothing and says so. Where standard input is not a terminal, both
+  refuse with a non-zero exit and change nothing unless `--yes` is given, so a
+  script, cron job or CI step running either command today keeps working only once
+  `--yes` is added. `--yes` skips the question, never the disclosure: the paths are
+  still printed. `wake remove` without `--purge` is unchanged and deliberately not
+  gated — it removes only Wake's hook entry, which `wake init` puts back.
+
 - **Breaking (stored records and wire).** Two changes bump the record schema, which
   moves from 6 to 8.
 

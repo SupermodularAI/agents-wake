@@ -126,3 +126,62 @@ func TestRootHelpIsEnoughToStart(t *testing.T) {
 		}
 	}
 }
+
+// The README's command table and the commands' own help are two descriptions of the
+// same two destructive commands, and they have drifted before: the README told the
+// user `wake uninstall` prints every path before deleting, which was true and useless,
+// while the help said nothing at all. Now that both surfaces have to mention the
+// confirmation and the way past it, this fails the build if either side drops a token
+// the other keeps.
+//
+// Reading ../../README.md from a package test follows internal/platform's precedent.
+func TestREADMEAndHelpAgreeOnTheDestructiveCommands(t *testing.T) {
+	readme, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
+	if err != nil {
+		t.Fatalf("reading README.md: %v", err)
+	}
+	doc := string(readme)
+	// Shared: each token has to appear in the command's help and in the README.
+	shared := map[string][]string{
+		"uninstall": {"--yes", "wake remove --purge", "~/.config/wake"},
+		"remove":    {"--yes", "--purge", "~/.config/wake"},
+	}
+	// One-sided, because the two surfaces word the same claim differently: the help
+	// says a deletion cannot be undone, the README's table calls the command
+	// irreversible. Each is asserted only where it belongs.
+	helpOnly := map[string][]string{"uninstall": {"cannot be undone"}}
+	readmeOnly := []string{"Irreversible"}
+
+	found := map[string]bool{}
+	for _, command := range commands {
+		cmd := command()
+		name := cmd.Name()
+		if _, wanted := shared[name]; !wanted {
+			continue
+		}
+		found[name] = true
+		for _, token := range shared[name] {
+			if !strings.Contains(cmd.Long, token) {
+				t.Errorf("`wake %s --help` is missing %q, which README.md carries", name, token)
+			}
+			if !strings.Contains(doc, token) {
+				t.Errorf("README.md is missing %q, which `wake %s --help` carries", token, name)
+			}
+		}
+		for _, token := range helpOnly[name] {
+			if !strings.Contains(cmd.Long, token) {
+				t.Errorf("`wake %s --help` is missing %q", name, token)
+			}
+		}
+	}
+	for name := range shared {
+		if !found[name] {
+			t.Errorf("no %s command is registered; the drift check covered nothing", name)
+		}
+	}
+	for _, token := range readmeOnly {
+		if !strings.Contains(doc, token) {
+			t.Errorf("README.md is missing %q", token)
+		}
+	}
+}

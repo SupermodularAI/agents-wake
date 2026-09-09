@@ -127,8 +127,8 @@ wake doctor              # Inspect collection and hook health
 wake update              # Install the newest release, verifying its checksum
 wake update --check      # Report whether a newer release exists; download nothing
 wake remove              # Remove the Claude Code integration; keep local data
-wake remove --purge      # ...and delete collected data; ~/.config/wake is kept
-wake uninstall           # Remove everything, including ~/.config/wake and the binary
+wake remove --purge      # ...and delete collected data; asks first; ~/.config/wake is kept
+wake uninstall           # Remove everything, including ~/.config/wake and the binary; asks first
 ```
 
 | Command | Purpose |
@@ -143,8 +143,8 @@ wake uninstall           # Remove everything, including ~/.config/wake and the b
 | `wake init --global --full` | ...and import the existing Claude Code history under that boundary in the same call. |
 | `wake ingest` | Import activity for consented projects. |
 | `wake doctor` | Show collection and hook health. |
-| `wake remove` | Remove Wake-owned Claude Code hooks. `--purge` also deletes collected data; `~/.config/wake` is kept either way, so a later `wake init` keeps the same repository identity. |
-| `wake uninstall` | Irreversible. Removes the integration, all collected data, `~/.config/wake` (configuration and the identity salt) and the binary itself — plus the symlink you invoked it through, if the `wake` on your PATH is a link. It prints every path before deleting anything, and removes nothing at all if it cannot take its hook entry out of `settings.json` first. |
+| `wake remove` | Remove Wake-owned Claude Code hooks. `--purge` also deletes collected data; `~/.config/wake` is kept either way, so a later `wake init` keeps the same repository identity. `--purge` prints the paths it will delete and asks before deleting; run unattended it refuses and deletes nothing unless `--yes` is passed. Plain `wake remove` is not gated. |
+| `wake uninstall` | Irreversible. Removes the integration, all collected data, `~/.config/wake` (configuration and the identity salt) and the binary itself — plus the symlink you invoked it through, if the `wake` on your PATH is a link. It prints every path before deleting anything, and removes nothing at all if it cannot take its hook entry out of `settings.json` first. It asks for confirmation after printing them, and when standard input is not a terminal it refuses with a non-zero exit rather than deleting, unless `--yes` was given. |
 | `wake update` | Download the newest release, verify its SHA-256 against the published `checksums.txt`, and replace this binary in place. Refuses and changes nothing if the checksum does not match. |
 | `wake update --check` | Report whether a newer release exists and stop there — it downloads nothing. On a build with no release tag it says so rather than guessing. |
 | `wake remote` | Configure and control delivery to a remote endpoint — see [Remote Delivery](#remote-delivery) below. |
