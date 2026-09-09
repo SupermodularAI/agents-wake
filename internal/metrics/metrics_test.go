@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -196,10 +197,12 @@ func sessionEndRecord(sessionID record.Identifier, at time.Time) record.Record {
 	}
 }
 
-// TestAggregateSplitsOnePrimitivePerRepository is DG-93's grain change. Repo is a
-// property of the invocation (ADR-0002), so one primitive used in two repositories
-// is two rows, and each row's rate is over its own population (ADR-0006).
-func TestAggregateSplitsOnePrimitivePerRepository(t *testing.T) {
+// TestAggregateMergesOnePrimitiveUsedInSeveralRepositoriesOntoOneRow inverts
+// DG-93's split. The repository is a dimension of an invocation (ADR-0002), not the
+// identity of a primitive, so one primitive used in two repositories is one row that
+// names both — and its rate is recomputed over the merged population rather than
+// averaged from two rendered ratios (ADR-0006, ADR-0042).
+func TestAggregateMergesOnePrimitiveUsedInSeveralRepositoriesOntoOneRow(t *testing.T) {
 	failed, ok := record.OutcomeError, record.OutcomeOK
 	first, second := record.Hash("0123456789abcdef0123456789abcdef"), record.Hash("fedcba9876543210fedcba9876543210")
 	failing, passing := testRecord("one", &failed), testRecord("two", &ok)
@@ -207,30 +210,21 @@ func TestAggregateSplitsOnePrimitivePerRepository(t *testing.T) {
 
 	summary := Aggregate([]record.Record{failing, passing}, nil)
 
-	if len(summary.Primitives) != 2 {
-		t.Fatalf("primitive rows = %d, want 2 (one per repository)", len(summary.Primitives))
+	if len(summary.Primitives) != 1 {
+		t.Fatalf("primitive rows = %d, want 1; the repository is a dimension of the row, not its grain", len(summary.Primitives))
 	}
-	byRepo := map[record.Hash]PrimitiveUsage{}
-	for _, primitive := range summary.Primitives {
-		byRepo[primitive.Repo] = primitive
+	row := summary.Primitives[0]
+	if !slices.Equal(row.Repos, []record.Hash{first, second}) {
+		t.Fatalf("Primitives[0].Repos = %v, want both repositories in ascending order %v", row.Repos, []record.Hash{first, second})
 	}
-	for _, repo := range []record.Hash{first, second} {
-		primitive, present := byRepo[repo]
-		if !present {
-			t.Fatalf("no row for repository %q", repo)
-		}
-		if primitive.Invocations != 1 {
-			t.Fatalf("row %q invocations = %d, want 1", repo, primitive.Invocations)
-		}
+	if row.Invocations != 2 {
+		t.Fatalf("Primitives[0].Invocations = %d, want 2 summed across both repositories", row.Invocations)
 	}
-	// Each row's rate is over its own repository's population, not the whole one.
-	if percent, rated := byRepo[first].ErrorRate.Percent(); !rated || percent != 100 {
-		t.Fatalf("failing row rate = %v (rated %t), want 100", percent, rated)
+	// Recomputed over the merged population, never averaged from two rendered rates.
+	if row.ErrorRate.Numerator() != 1 || row.ErrorRate.Denominator() != 2 || row.ErrorRate.Excluded() != 0 {
+		t.Fatalf("Primitives[0].ErrorRate = %+v, want 1 failure over 2 measured with none excluded", row.ErrorRate)
 	}
-	if percent, rated := byRepo[second].ErrorRate.Percent(); !rated || percent != 0 {
-		t.Fatalf("passing row rate = %v (rated %t), want 0", percent, rated)
-	}
-	// The summary-level figures span every repository and are unchanged by the split.
+	// The summary-level figures span every repository and are unchanged by the merge.
 	if summary.Invocations != 2 || summary.ErrorRate.Denominator() != 2 {
 		t.Fatalf("summary = %d invocations, denominator %d; want 2 and 2", summary.Invocations, summary.ErrorRate.Denominator())
 	}
@@ -267,8 +261,8 @@ func TestAWorktreesInvocationsAreCountedUnderTheRepositoryItBelongsTo(t *testing
 		t.Fatalf("Primitives = %+v, want one row; a worktree's rows are counted under the repository", summary.Primitives)
 	}
 	row := summary.Primitives[0]
-	if row.Repo != parentHash {
-		t.Errorf("Primitives[0].Repo = %q, want the repository's id %q", row.Repo, parentHash)
+	if len(row.Repos) != 1 || row.Repos[0] != parentHash {
+		t.Errorf("Primitives[0].Repos = %v, want only the repository's id %q; the worktree's own id must not stand beside it", row.Repos, parentHash)
 	}
 	if row.Invocations != 4 {
 		t.Errorf("Primitives[0].Invocations = %d, want 4", row.Invocations)
@@ -312,7 +306,9 @@ func TestARolledUpRowRecomputesItsDenominator(t *testing.T) {
 }
 
 // A nil rollup is the ordinary case — no worktree registered on this machine — and
-// means every repository stands alone.
+// means every repository stands alone. Under the restored grain that shows up inside
+// one row: the two repositories stay two entries in its set rather than being folded
+// onto one. This is the negative control for the roll-up test above.
 func TestANilRollupLeavesEveryRepositoryStandingAlone(t *testing.T) {
 	ok := record.OutcomeOK
 	summary := Aggregate([]record.Record{
@@ -320,15 +316,11 @@ func TestANilRollupLeavesEveryRepositoryStandingAlone(t *testing.T) {
 		worktreeRecord("two", &ok),
 	}, nil)
 
-	if len(summary.Primitives) != 2 {
-		t.Fatalf("Primitives = %+v, want two rows", summary.Primitives)
+	if len(summary.Primitives) != 1 {
+		t.Fatalf("Primitives = %+v, want one row", summary.Primitives)
 	}
-	seen := map[record.Hash]bool{}
-	for _, row := range summary.Primitives {
-		seen[row.Repo] = true
-	}
-	if !seen[parentHash] || !seen[worktreeHash] {
-		t.Errorf("Primitives carry repositories %v, want both %q and %q", seen, parentHash, worktreeHash)
+	if !slices.Equal(summary.Primitives[0].Repos, []record.Hash{parentHash, worktreeHash}) {
+		t.Errorf("Primitives[0].Repos = %v, want both %q and %q standing alone", summary.Primitives[0].Repos, parentHash, worktreeHash)
 	}
 }
 

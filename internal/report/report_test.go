@@ -22,7 +22,7 @@ func TestRenderShowsPrimitiveActivityAndLastObserved(t *testing.T) {
 
 	var output bytes.Buffer
 	available := []inventory.Usage{
-		{Harness: "claude-code", Kind: record.KindSkill, Name: "review", Repo: "0123456789abcdef0123456789abcdef", Invocations: 3, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "review", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 3, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)},
 		{Harness: "claude-code", Kind: record.KindSkill, Name: "unused-skill"},
 	}
 	if err := Render(&output, summary, available, Options{}); err != nil {
@@ -53,9 +53,9 @@ func TestRenderShowsPrimitiveActivityAndLastObserved(t *testing.T) {
 func TestRenderShowsPerPrimitiveErrorsWithTheRatedPopulation(t *testing.T) {
 	summary := metrics.Aggregate(nil, nil)
 	available := []inventory.Usage{
-		{Harness: "claude-code", Kind: record.KindSkill, Name: "flaky", Repo: "0123456789abcdef0123456789abcdef", Invocations: 4, Failures: 1, Unknown: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)},
-		{Harness: "claude-code", Kind: record.KindSkill, Name: "partly-rated", Repo: "0123456789abcdef0123456789abcdef", Invocations: 2, Failures: 1, Unknown: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)},
-		{Harness: "claude-code", Kind: record.KindSkill, Name: "solid", Repo: "0123456789abcdef0123456789abcdef", Invocations: 2, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "flaky", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 4, Failures: 1, Unknown: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "partly-rated", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 2, Failures: 1, Unknown: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "solid", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 2, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)},
 	}
 
 	var output bytes.Buffer
@@ -91,8 +91,8 @@ func TestRenderShowsPerPrimitiveErrorsWithTheRatedPopulation(t *testing.T) {
 func TestRenderMarksASubagentRowWithNoRatedPopulationAsUnrated(t *testing.T) {
 	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
 	available := []inventory.Usage{
-		{Harness: "claude-code", Kind: record.KindSubagent, Name: "explorer", Repo: "0123456789abcdef0123456789abcdef", Invocations: 3, Unknown: 3, LastUsed: at},
-		{Harness: "claude-code", Kind: record.KindSkill, Name: "solid", Repo: "0123456789abcdef0123456789abcdef", Invocations: 2, LastUsed: at},
+		{Harness: "claude-code", Kind: record.KindSubagent, Name: "explorer", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 3, Unknown: 3, LastUsed: at},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "solid", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 2, LastUsed: at},
 	}
 
 	var output bytes.Buffer
@@ -117,7 +117,7 @@ func TestRenderMarksASubagentRowWithNoRatedPopulationAsUnrated(t *testing.T) {
 }
 
 func TestRenderRespectsPrimitiveSectionFilters(t *testing.T) {
-	available := []inventory.Usage{{Harness: "claude-code", Kind: record.KindSkill, Name: "used", Repo: "0123456789abcdef0123456789abcdef", Invocations: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)}, {Harness: "claude-code", Kind: record.KindSkill, Name: "unused"}}
+	available := []inventory.Usage{{Harness: "claude-code", Kind: record.KindSkill, Name: "used", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)}, {Harness: "claude-code", Kind: record.KindSkill, Name: "unused"}}
 	for _, test := range []struct {
 		name    string
 		options Options
@@ -187,7 +187,7 @@ func TestRenderUnusedOnlyReplacesInvocationOverviewWithUnusedCountsByKind(t *tes
 	ok := record.OutcomeOK
 	summary := metrics.Aggregate([]record.Record{reportRecord("used", &ok)}, nil)
 	available := []inventory.Usage{
-		{Harness: "claude-code", Kind: record.KindSkill, Name: "used", Repo: "0123456789abcdef0123456789abcdef", Invocations: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "used", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)},
 		{Harness: "claude-code", Kind: record.KindSkill, Name: "unused-skill-1"},
 		{Harness: "claude-code", Kind: record.KindSkill, Name: "unused-skill-2"},
 		{Harness: "claude-code", Kind: record.KindMCPTool, Name: "unused-tool"},
@@ -223,7 +223,7 @@ func TestRenderUnusedOnlyReplacesInvocationOverviewWithUnusedCountsByKind(t *tes
 func TestRenderUnusedOnlyOmitsOverviewWhenNothingIsUnused(t *testing.T) {
 	ok := record.OutcomeOK
 	summary := metrics.Aggregate([]record.Record{reportRecord("used", &ok)}, nil)
-	available := []inventory.Usage{{Harness: "claude-code", Kind: record.KindSkill, Name: "used", Repo: "0123456789abcdef0123456789abcdef", Invocations: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)}}
+	available := []inventory.Usage{{Harness: "claude-code", Kind: record.KindSkill, Name: "used", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)}}
 
 	var output bytes.Buffer
 	if err := Render(&output, summary, available, Options{Unused: true}); err != nil {
@@ -257,16 +257,18 @@ func linesStartingWith(text, prefix string) []string {
 	return found
 }
 
-// TestRenderShowsOneRowPerRepositoryWithItsLabel is DG-93 at the terminal: the
-// snapshot's grain is per repository, so one primitive used in two of them is two
-// rows, and each row names which repository it is — by label where one is recorded,
-// by a readable form of the id otherwise. Never a blank cell (plan §4.5).
-func TestRenderShowsOneRowPerRepositoryWithItsLabel(t *testing.T) {
+// TestRenderShowsOneRowNamingItsProjectOrCountingSeveral is the restored grain at
+// the terminal: one primitive is one row however many projects it was invoked in.
+// A row used in exactly one names it — by label where one is recorded, by a readable
+// form of the id otherwise — and a row spanning several says how many rather than
+// naming one of them as though it were the only one (ADR-0042). Never a blank cell
+// (plan §4.5).
+func TestRenderShowsOneRowNamingItsProjectOrCountingSeveral(t *testing.T) {
 	const labelled, unlabelled = "0123456789abcdef0123456789abcdef", "fedcba9876543210fedcba9876543210"
 	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
 	available := []inventory.Usage{
-		{Harness: "claude-code", Kind: record.KindSkill, Name: "review", Repo: labelled, Invocations: 2, LastUsed: at},
-		{Harness: "claude-code", Kind: record.KindSkill, Name: "review", Repo: unlabelled, Invocations: 1, LastUsed: at},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "review", Repos: []record.Hash{labelled}, Invocations: 2, LastUsed: at},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "deploy", Repos: []record.Hash{labelled, unlabelled}, Invocations: 3, LastUsed: at},
 	}
 
 	var output bytes.Buffer
@@ -275,21 +277,53 @@ func TestRenderShowsOneRowPerRepositoryWithItsLabel(t *testing.T) {
 		t.Fatalf("Render() error = %v", err)
 	}
 	text := output.String()
-	for _, want := range []string{"PROJECT", "agents-wake", "repo-fedcba987654"} {
-		if !strings.Contains(text, want) {
-			t.Errorf("report missing %q:\n%s", want, text)
-		}
+	if !strings.Contains(text, "PROJECT") {
+		t.Errorf("report has no PROJECT column:\n%s", text)
 	}
 	rows := linesStartingWith(text, "review")
-	if len(rows) != 2 {
-		t.Fatalf("rows for `review` = %d, want one per repository:\n%s", len(rows), text)
+	if len(rows) != 1 {
+		t.Fatalf("rows for `review` = %d, want one row for one primitive:\n%s", len(rows), text)
 	}
 	// By field position on the plain rendering: PRIMITIVE, TYPE, HARNESS, PROJECT.
-	for _, row := range rows {
-		fields := strings.Fields(row)
-		if len(fields) < 4 || fields[3] == "" {
-			t.Fatalf("row %q has no repository cell", row)
+	// The cell is a single token by construction, which is what makes this readable.
+	for _, testCase := range []struct {
+		primitive string
+		want      string
+	}{
+		{primitive: "review", want: "agents-wake"},
+		{primitive: "deploy", want: "2-projects"},
+	} {
+		matched := linesStartingWith(text, testCase.primitive)
+		if len(matched) != 1 {
+			t.Fatalf("rows for %q = %d, want one:\n%s", testCase.primitive, len(matched), text)
 		}
+		fields := strings.Fields(matched[0])
+		if len(fields) < 4 || fields[3] != testCase.want {
+			t.Errorf("row %q project cell = %q, want %q", matched[0], fields, testCase.want)
+		}
+	}
+}
+
+// --unused is the intersection of inventory and invocations (ADR-0002): never used
+// anywhere. A primitive invoked in one project and not another is used, full stop,
+// and must never appear in the table that tells a reader what to remove.
+func TestRenderDoesNotListAPrimitiveUsedInOneProjectAsUnused(t *testing.T) {
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	available := []inventory.Usage{
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "used-somewhere", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 6, LastUsed: at},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "never-used"},
+	}
+
+	var output bytes.Buffer
+	if err := Render(&output, metrics.Aggregate(nil, nil), available, Options{Unused: true}); err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	text := output.String()
+	if len(linesStartingWith(text, "never-used")) != 1 {
+		t.Fatalf("unused table does not list `never-used`:\n%s", text)
+	}
+	if len(linesStartingWith(text, "used-somewhere")) != 0 {
+		t.Fatalf("unused table lists a primitive that was used in a project:\n%s", text)
 	}
 }
 
@@ -344,7 +378,7 @@ func TestRenderMakesNoClaimThatRepositoryLabelsAreNeverShown(t *testing.T) {
 func TestRenderPrettyDrawsColorAndBoxedTablesOnlyWhenAsked(t *testing.T) {
 	ok := record.OutcomeOK
 	summary := metrics.Aggregate([]record.Record{reportRecord("review", &ok)}, nil)
-	available := []inventory.Usage{{Harness: "claude-code", Kind: record.KindSkill, Name: "review", Repo: "0123456789abcdef0123456789abcdef", Invocations: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)}}
+	available := []inventory.Usage{{Harness: "claude-code", Kind: record.KindSkill, Name: "review", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)}}
 
 	var plain bytes.Buffer
 	if err := Render(&plain, summary, available, Options{}); err != nil {
@@ -432,8 +466,8 @@ const unmatchedNote = "A server marked (unmatched) was invoked but matches no MC
 func TestRenderMarksAnUnmatchedServerAndExplainsIt(t *testing.T) {
 	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
 	available := []inventory.Usage{
-		{Harness: "claude-code", Kind: record.KindMCPServer, Name: "linear-server", Repo: "0123456789abcdef0123456789abcdef", Invocations: 3, Unmatched: true, LastUsed: at},
-		{Harness: "claude-code", Kind: record.KindSkill, Name: "review", Repo: "0123456789abcdef0123456789abcdef", Invocations: 1, LastUsed: at},
+		{Harness: "claude-code", Kind: record.KindMCPServer, Name: "linear-server", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 3, Unmatched: true, LastUsed: at},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "review", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 1, LastUsed: at},
 	}
 	var output bytes.Buffer
 	if err := Render(&output, metrics.Aggregate(nil, nil), available, Options{}); err != nil {
@@ -450,7 +484,7 @@ func TestRenderMarksAnUnmatchedServerAndExplainsIt(t *testing.T) {
 func TestRenderOmitsTheUnmatchedNoteWhenNoRowIsUnmatched(t *testing.T) {
 	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
 	available := []inventory.Usage{
-		{Harness: "claude-code", Kind: record.KindMCPServer, Name: "claude-in-chrome", Repo: "0123456789abcdef0123456789abcdef", Invocations: 3, LastUsed: at},
+		{Harness: "claude-code", Kind: record.KindMCPServer, Name: "claude-in-chrome", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 3, LastUsed: at},
 	}
 	var output bytes.Buffer
 	if err := Render(&output, metrics.Aggregate(nil, nil), available, Options{}); err != nil {
@@ -470,7 +504,7 @@ func TestRenderOmitsTheUnmatchedNoteWhenNoRowIsUnmatched(t *testing.T) {
 func TestRenderKeepsAUsedServerOutOfUnusedPrimitives(t *testing.T) {
 	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
 	available := []inventory.Usage{
-		{Harness: "claude-code", Kind: record.KindMCPServer, Name: "claude-in-chrome", Repo: "0123456789abcdef0123456789abcdef", Invocations: 4, LastUsed: at},
+		{Harness: "claude-code", Kind: record.KindMCPServer, Name: "claude-in-chrome", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 4, LastUsed: at},
 		{Harness: "claude-code", Kind: record.KindSkill, Name: "unused-skill"},
 	}
 	var output bytes.Buffer
@@ -495,7 +529,7 @@ func TestRenderKeepsAUsedServerOutOfUnusedPrimitives(t *testing.T) {
 // here (ADR-0034 §1), not a loose word for "the run".
 func TestRenderNamesTheProjectColumnAndNeverTheSessionGrain(t *testing.T) {
 	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
-	available := []inventory.Usage{{Harness: "claude-code", Kind: record.KindSkill, Name: "review", Repo: "0123456789abcdef0123456789abcdef", Invocations: 2, LastUsed: at}}
+	available := []inventory.Usage{{Harness: "claude-code", Kind: record.KindSkill, Name: "review", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 2, LastUsed: at}}
 
 	var output bytes.Buffer
 	if err := Render(&output, metrics.Aggregate(nil, nil), available, Options{Usage: true}); err != nil {

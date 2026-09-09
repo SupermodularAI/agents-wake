@@ -628,9 +628,9 @@ func TestClaudeCodeDiscoveryYieldsOneInventoryRowPerPluginSkill(t *testing.T) {
 		t.Fatalf("Read() error = %v", err)
 	}
 
-	rows := map[usageKey]Usage{}
+	rows := map[identity]Usage{}
 	for _, usage := range items {
-		key := usageKey{identity: identity{kind: usage.Kind, name: usage.Name}, repo: usage.Repo}
+		key := identity{kind: usage.Kind, name: usage.Name}
 		if _, duplicate := rows[key]; duplicate {
 			t.Fatalf("%s %q is listed twice: %+v", usage.Kind, usage.Name, items)
 		}
@@ -643,12 +643,12 @@ func TestClaudeCodeDiscoveryYieldsOneInventoryRowPerPluginSkill(t *testing.T) {
 			}
 		}
 	}
-	used := rows[usageKey{identity: identity{kind: record.KindSkill, name: "superpowers:brainstorming"}, repo: "0123456789abcdef0123456789abcdef"}]
+	used := rows[identity{kind: record.KindSkill, name: "superpowers:brainstorming"}]
 	if used.Invocations != 3 {
 		t.Fatalf("superpowers:brainstorming = %+v, want 3 invocations accumulated from both spellings", used)
 	}
 	for _, unused := range []record.Identifier{"vercel:deploy", "gather-context"} {
-		row, found := rows[usageKey{identity: identity{kind: record.KindSkill, name: unused}}]
+		row, found := rows[identity{kind: record.KindSkill, name: unused}]
 		if !found || row.Invocations != 0 {
 			t.Fatalf("%q = %+v, %t; want exactly one row with no invocations", unused, row, found)
 		}
@@ -686,7 +686,7 @@ func TestClaudeCodeDiscoveryYieldsOneRowForAPluginCommandTheListingCallsASkill(t
 		t.Fatalf("Read() error = %v", err)
 	}
 
-	rows := map[usageKey]Usage{}
+	rows := map[identity]Usage{}
 	for _, usage := range items {
 		if usage.Name == "code-review" {
 			t.Fatalf("the bare spelling survived as its own row: %+v", items)
@@ -694,13 +694,13 @@ func TestClaudeCodeDiscoveryYieldsOneRowForAPluginCommandTheListingCallsASkill(t
 		if usage.Kind == record.KindCommand {
 			t.Fatalf("a command row survived the fold: %+v", items)
 		}
-		key := usageKey{identity: identity{kind: usage.Kind, name: usage.Name}, repo: usage.Repo}
+		key := identity{kind: usage.Kind, name: usage.Name}
 		if _, duplicate := rows[key]; duplicate {
 			t.Fatalf("%s %q is listed twice: %+v", usage.Kind, usage.Name, items)
 		}
 		rows[key] = usage
 	}
-	used := rows[usageKey{identity: identity{kind: record.KindSkill, name: "code-review:code-review"}, repo: "0123456789abcdef0123456789abcdef"}]
+	used := rows[identity{kind: record.KindSkill, name: "code-review:code-review"}]
 	if used.Invocations != 3 {
 		t.Fatalf("code-review:code-review = %+v, want 3 invocations accumulated from both spellings", used)
 	}

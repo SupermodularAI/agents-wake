@@ -173,7 +173,7 @@ func primitiveUsage(writer io.Writer, available []inventory.Usage, labels repola
 			continue
 		}
 		unmatched = unmatched || usage.Unmatched
-		rows.add(string(usage.Name), usage.KindLabel(), string(usage.Harness), labels.Display(usage.Repo), usage.LastUsed.UTC().Format(time.RFC3339), fmt.Sprintf("%d", usage.Invocations), errorcell.Render(usage.ErrorRate()))
+		rows.add(string(usage.Name), usage.KindLabel(), string(usage.Harness), labels.DisplayAll(usage.Repos), usage.LastUsed.UTC().Format(time.RFC3339), fmt.Sprintf("%d", usage.Invocations), errorcell.Render(usage.ErrorRate()))
 	}
 	if len(rows.rows) == 0 {
 		_, err := fmt.Fprintln(writer, "No primitive activity observed.")
@@ -185,7 +185,7 @@ func primitiveUsage(writer io.Writer, available []inventory.Usage, labels repola
 	if _, err := fmt.Fprintln(writer, "Only currently discovered, non-built-in primitives are listed."); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintln(writer, "PROJECT is the project each invocation's own working directory resolved to; a linked worktree counts under the repository it belongs to."); err != nil {
+	if _, err := fmt.Fprintln(writer, "PROJECT is the project each invocation's own working directory resolved to; a linked worktree counts under the repository it belongs to. A primitive invoked in more than one project shows how many, and its CALLS are the total across them."); err != nil {
 		return err
 	}
 	if !unmatched {
