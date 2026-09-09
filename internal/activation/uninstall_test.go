@@ -502,3 +502,24 @@ func TestRemoveRestatesALostRaceOnTheSettingsFileAsItsOwnRefusal(t *testing.T) {
 		stillThere(t, path)
 	}
 }
+
+// The disclosure `remove --purge` prints and the file `uninstall` plans to edit must
+// be the same path. Both resolve it through SettingsFilePath, so a rename of the
+// harness file cannot move one without the other (ADR-0010).
+func TestSettingsFilePathIsWhatPlanUninstallDiscloses(t *testing.T) {
+	paths := testPaths(t)
+	claudeDir, _ := seedSettings(t)
+	executable := testExecutable(t)
+
+	plan, err := PlanUninstall(paths, claudeDir, executable)
+
+	if err != nil {
+		t.Fatalf("PlanUninstall() error = %v", err)
+	}
+	if got := SettingsFilePath(claudeDir); got != plan.SettingsFile {
+		t.Errorf("SettingsFilePath() = %q, want the plan's %q", got, plan.SettingsFile)
+	}
+	if plan.SettingsFile == "" {
+		t.Error("plan.SettingsFile is empty; a disclosure built from it would name no file")
+	}
+}

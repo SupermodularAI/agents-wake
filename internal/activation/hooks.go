@@ -32,6 +32,15 @@ const (
 // settingsFileName is the file inside the Claude Code directory that holds hooks.
 const settingsFileName = "settings.json"
 
+// SettingsFilePath is the harness settings file Wake's hook entry lives in.
+//
+// Exported so a command can disclose the file it is about to edit without
+// re-joining the name itself: the disclosure and the edit resolve the path
+// through the same constant and cannot disagree (ADR-0010).
+func SettingsFilePath(claudeDir string) string {
+	return filepath.Join(claudeDir, settingsFileName)
+}
+
 // settingsFileMode is what a settings file Wake creates starts at. An existing one
 // keeps its own mode: it is a file the harness owns, and re-permissioning it would
 // be a side effect ADR-0010 does not license.
@@ -178,7 +187,7 @@ type settingsDoc struct {
 // the harness's, not Wake's. A missing path is not a fault — `init` on a fresh
 // machine has no settings file, and creating it is what installing a hook does.
 func settingsFileFor(claudeDir string) (string, error) {
-	path := filepath.Join(claudeDir, settingsFileName)
+	path := SettingsFilePath(claudeDir)
 	info, err := os.Lstat(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
