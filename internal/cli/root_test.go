@@ -108,3 +108,21 @@ func TestExecuteRefusesBeforeTouchingAnyFile(t *testing.T) {
 		t.Errorf("refusing created %d entries under HOME, want none", len(entries))
 	}
 }
+
+// `wake --help` is the first thing a new user reads and, for the consent model, often
+// the only thing. It has to answer what is collected and when, where --global's path
+// defaults to, where state lives, and how the three ways of undoing an install differ
+// — the last of which is what ADR-0043 §3 puts in help rather than in output printed
+// while a deletion runs.
+func TestRootHelpIsEnoughToStart(t *testing.T) {
+	long := newRootCmd().Long
+	for _, want := range []string{
+		"wake init", "--global", "home directory", "wake report", "wake serve",
+		"WAKE_DIR", "~/.local/state/wake", "~/.config/wake",
+		"wake remove", "wake remove --purge", "wake uninstall", "consent",
+	} {
+		if !strings.Contains(long, want) {
+			t.Errorf("`wake --help` never says %q:\n%s", want, long)
+		}
+	}
+}

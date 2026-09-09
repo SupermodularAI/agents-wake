@@ -527,3 +527,23 @@ func lineValue(t *testing.T, out, key string) string {
 	t.Fatalf("output has no %q line:\n%s", key, out)
 	return ""
 }
+
+// The `Short` string is one row of `wake --help`, so it has to fit the table every
+// other row fits — and it is read by someone who has never run the command, so it
+// says what the command shows rather than which of Wake's internals last ran.
+func TestDoctorShortFitsTheHelpTable(t *testing.T) {
+	for _, command := range commands {
+		cmd := command()
+		if cmd.Name() != "doctor" {
+			continue
+		}
+		if limit := 60; len(cmd.Short) > limit {
+			t.Errorf("Short is %d characters, want at most %d so the help table stays aligned: %q", len(cmd.Short), limit, cmd.Short)
+		}
+		if strings.Contains(cmd.Short, "hook change") {
+			t.Errorf("Short = %q; it describes Wake's internals to a reader who has not run it yet", cmd.Short)
+		}
+		return
+	}
+	t.Fatal("no doctor command is registered")
+}

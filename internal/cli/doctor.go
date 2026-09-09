@@ -27,7 +27,7 @@ func init() { commands = append(commands, newDoctorCmd) }
 func newDoctorCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
-		Short: "Report what Wake's last scan and last hook change managed to do",
+		Short: "Show what Wake is collecting, and what it cannot read",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			paths, err := config.ResolvePaths()

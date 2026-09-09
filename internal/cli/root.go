@@ -32,9 +32,37 @@ func newRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "wake",
 		Short: "Measure which agent primitives you actually use, across every harness",
+		// Long is the one screen a new user reads before deciding whether to run
+		// anything, so it carries the consent model, where state lives, and how the
+		// three ways of undoing an install differ. The last of those is here rather
+		// than only in the destructive commands' own output because an alternative is
+		// only an alternative somewhere the user can still choose it (ADR-0043 §3).
 		Long: "wake reads the storage your agent harnesses already write and answers which\n" +
 			"primitives you use, which you pay for and never use, and which are quietly\n" +
-			"broken. Everything stays on this machine.",
+			"broken. Everything stays on this machine.\n" +
+			"\n" +
+			"Nothing is collected until you consent a project. A fresh install reads\n" +
+			"nothing, and consent is forward-only: history that already exists is imported\n" +
+			"only when you ask for it.\n" +
+			"\n" +
+			"Getting started:\n" +
+			"  wake init                  consent this project; collection starts now\n" +
+			"  wake init --full           ...and import this project's existing history\n" +
+			"  wake init --global [path]  consent every project under a directory instead\n" +
+			"                             (your home directory when no path is given)\n" +
+			"  wake report                print what has been collected\n" +
+			"  wake serve                 open the same numbers as a local dashboard\n" +
+			"  wake doctor                show what collection managed, and what it could not read\n" +
+			"\n" +
+			"Where state lives:\n" +
+			"  ~/.local/state/wake  collected activity and the local project map; set\n" +
+			"                       WAKE_DIR to an absolute path to move it\n" +
+			"  ~/.config/wake       configuration and the local identity salt\n" +
+			"\n" +
+			"Undoing it:\n" +
+			"  wake remove          remove Wake's hook entry; keep everything else\n" +
+			"  wake remove --purge  ...and delete collected data; configuration is kept\n" +
+			"  wake uninstall       remove all of the above and this binary; cannot be undone",
 		Version: version.String(),
 		// Reject stray positional arguments. Without this, a root command with
 		// no subcommands accepts anything and exits 0 — `wake bogus` would look
