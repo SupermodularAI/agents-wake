@@ -127,6 +127,23 @@ func TestRootHelpIsEnoughToStart(t *testing.T) {
 	}
 }
 
+// Every `Short` is one row of `wake --help`, and the table is only readable while
+// they all fit it. A ceiling asserted for one command is a rule that command's
+// author invented; asserted here it is the rule it claims to be, and a new command
+// that wraps the listing fails the build rather than the eye.
+func TestEveryCommandShortFitsTheHelpTable(t *testing.T) {
+	const limit = 60
+	for _, command := range commands {
+		cmd := command()
+		if len(cmd.Short) > limit {
+			t.Errorf("`wake %s`'s Short is %d characters, want at most %d so the help table stays aligned: %q", cmd.Name(), len(cmd.Short), limit, cmd.Short)
+		}
+		if cmd.Short == "" {
+			t.Errorf("`wake %s` has no Short, so its row of `wake --help` is blank", cmd.Name())
+		}
+	}
+}
+
 // The README's command table and the commands' own help are two descriptions of the
 // same two destructive commands, and they have drifted before: the README told the
 // user `wake uninstall` prints every path before deleting, which was true and useless,
@@ -150,7 +167,7 @@ func TestREADMEAndHelpAgreeOnTheDestructiveCommands(t *testing.T) {
 	// says a deletion cannot be undone, the README's table calls the command
 	// irreversible. Each is asserted only where it belongs.
 	helpOnly := map[string][]string{"uninstall": {"cannot be undone"}}
-	readmeOnly := []string{"Irreversible"}
+	readmeOnly := map[string][]string{"uninstall": {"Irreversible"}}
 
 	found := map[string]bool{}
 	for _, command := range commands {
@@ -160,17 +177,26 @@ func TestREADMEAndHelpAgreeOnTheDestructiveCommands(t *testing.T) {
 			continue
 		}
 		found[name] = true
+		// Scoped to this command's own row, not to the whole file: over the whole
+		// README a single `--yes` anywhere satisfies both commands at once, which
+		// makes the check read like a pin and behave like a word count.
+		row := readmeRow(t, doc, name)
 		for _, token := range shared[name] {
 			if !strings.Contains(cmd.Long, token) {
 				t.Errorf("`wake %s --help` is missing %q, which README.md carries", name, token)
 			}
-			if !strings.Contains(doc, token) {
-				t.Errorf("README.md is missing %q, which `wake %s --help` carries", token, name)
+			if !strings.Contains(row, token) {
+				t.Errorf("README.md's `wake %s` row is missing %q, which `wake %s --help` carries", name, token, name)
 			}
 		}
 		for _, token := range helpOnly[name] {
 			if !strings.Contains(cmd.Long, token) {
 				t.Errorf("`wake %s --help` is missing %q", name, token)
+			}
+		}
+		for _, token := range readmeOnly[name] {
+			if !strings.Contains(row, token) {
+				t.Errorf("README.md's `wake %s` row is missing %q", name, token)
 			}
 		}
 	}
@@ -179,9 +205,20 @@ func TestREADMEAndHelpAgreeOnTheDestructiveCommands(t *testing.T) {
 			t.Errorf("no %s command is registered; the drift check covered nothing", name)
 		}
 	}
-	for _, token := range readmeOnly {
-		if !strings.Contains(doc, token) {
-			t.Errorf("README.md is missing %q", token)
+}
+
+// readmeRow returns the command table row README.md describes one command in, so
+// an assertion about that command cannot be satisfied by a word belonging to a
+// different one. A missing row is fatal rather than an empty string: every
+// assertion made against it would otherwise fail with the wrong reason.
+func readmeRow(t *testing.T, doc, command string) string {
+	t.Helper()
+	prefix := fmt.Sprintf("| `wake %s` |", command)
+	for line := range strings.SplitSeq(doc, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return line
 		}
 	}
+	t.Fatalf("README.md has no command table row starting %q", prefix)
+	return ""
 }
