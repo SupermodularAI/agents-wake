@@ -442,3 +442,47 @@ func TestInitGlobalRegistersNoRootOfItsOwn(t *testing.T) {
 		t.Errorf("Identify(the boundary) matched %s; the boundary is not a repository", identity.ID)
 	}
 }
+
+// The candidate set ADR-0044 §1 widens is not a refusal counter.
+//
+// Where a linked worktree lives cannot be decided from its path, so every unmatched
+// working directory is now offered to registration and the many that are not worktrees
+// are turned away. health.Scan.BoundaryRefused reports collection that was lost;
+// counting these there would report a loss about a directory nobody consented, and
+// would pin a non-zero counter on every machine that has ever run a session outside
+// its boundary. Counting these populations honestly is DG-114's question.
+func TestAScanDoesNotCountADirectoryOutsideTheBoundaryAsARefusal(t *testing.T) {
+	paths := testPaths(t)
+	claudeDir, base := boundaryFixture(t)
+	inside := filepath.Join(base, "project")
+	if err := os.MkdirAll(inside, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	outside := filepath.Join(realTempDir(t), "elsewhere")
+	if err := os.MkdirAll(outside, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if _, err := InitGlobal(paths, base, claudeDir, testExecutable(t), false); err != nil {
+		t.Fatalf("InitGlobal() error = %v", err)
+	}
+	// A consented directory too, so the machine is collecting rather than merely not
+	// broken and the zeroes below are about the outside directory.
+	transcriptAt(t, claudeDir, "session-in", inside, time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC))
+	transcriptAt(t, claudeDir, "session-out", outside, time.Date(2026, 8, 13, 12, 5, 0, 0, time.UTC))
+
+	if _, err := Ingest(paths, claudeDir); err != nil {
+		t.Fatalf("Ingest() error = %v; a directory outside the boundary must be counted, not fatal", err)
+	}
+	counters := scanCounters(t, paths)
+	if counters.BoundaryRefused != 0 {
+		t.Errorf("BoundaryRefused = %d, want 0; a directory outside the boundary is the boundary working", counters.BoundaryRefused)
+	}
+	if counters.BoundarySkipped != 0 {
+		t.Errorf("BoundarySkipped = %d, want 0; the directory is there and was never going to be collected", counters.BoundarySkipped)
+	}
+	for _, root := range recordedRoots(t, paths) {
+		if root == outside {
+			t.Errorf("an entry was recorded for %q, a plain directory outside the boundary", outside)
+		}
+	}
+}
