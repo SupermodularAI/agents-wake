@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // requireGit skips a case that needs the real tool ADR-0019 §1 names.
@@ -603,5 +604,39 @@ func TestScrubbedGitEnvDropsEveryGitVariableItDoesNotNameSafe(t *testing.T) {
 	}
 	if got["WAKE_TEST_UNRELATED"] != "kept" {
 		t.Errorf("scrubbedGitEnv() dropped an unrelated variable; only git's own are in scope")
+	}
+}
+
+// A git call that never returns is the failure plan §4.3 says must not happen: "could
+// not read" means "collects nothing", never an error that breaks a command. Since
+// ADR-0044 §1 the probe is pointed at every unmatched working directory a scan sees —
+// values read out of harness transcripts, one of which may be a mount that no longer
+// answers — so a call that hangs would hang the scan rather than skip one directory.
+//
+// The deadline is asserted by being made unmeetable rather than by making git slow: a
+// fake git on PATH would test the fake, and a real hang is not reproducible. What has
+// to hold is that the deadline is wired into every call and that every one of them
+// fails closed when it expires — the probe and the parent lookup answer nothing, and
+// discovery falls back to the directory itself, exactly as they do for a directory
+// that is not a repository at all.
+func TestTheRegistrationPathsGitCallsFailClosedWhenTheDeadlineExpires(t *testing.T) {
+	requireGit(t)
+	main, worktree := initWorktree(t)
+	restore := gitCallTimeout
+	gitCallTimeout = time.Nanosecond
+	t.Cleanup(func() { gitCallTimeout = restore })
+
+	if topLevel, parent := discoverLinkedWorktreeForRegistration(worktree); topLevel != "" || parent != nil {
+		t.Errorf("discoverLinkedWorktreeForRegistration(%q) = (%q, %q), want nothing; the call outlived its deadline", worktree, topLevel, parent)
+	}
+	if got := discoverParentRepositoryForRegistration(worktree); got != nil {
+		t.Errorf("discoverParentRepositoryForRegistration(%q) = %q, want nil; the call outlived its deadline", worktree, got)
+	}
+	got, err := DiscoverRootForRegistration(worktree, main)
+	if err != nil {
+		t.Fatalf("DiscoverRootForRegistration() error = %v, want the directory itself", err)
+	}
+	if got != worktree {
+		t.Errorf("DiscoverRootForRegistration(%q) = %q, want the fallback to the directory itself", worktree, got)
 	}
 }

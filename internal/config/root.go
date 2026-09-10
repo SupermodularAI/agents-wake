@@ -1,11 +1,40 @@
 package config
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
+
+// gitCallTimeout bounds every git call this package makes.
+//
+// `git rev-parse` reads a few files and prints two lines, so no honest answer is
+// anywhere near this; what the deadline is for is the call that never returns. Since
+// ADR-0044 §1 widened the candidate set, the probe is pointed at every unmatched
+// working directory a scan sees — absolute paths read out of harness transcripts,
+// which on the machine ADR-0044 measured included directories the user had long since
+// forgotten. One of them living on a mount that no longer answers would otherwise hang
+// the scan indefinitely, and "could not read" must mean "collects nothing", never an
+// error that breaks a command (plan §4.3).
+//
+// Every call fails closed when it expires, because a deadline is indistinguishable
+// from any other git failure here: the probe and the parent lookup answer nothing, and
+// discovery falls back to the directory itself.
+//
+// A var rather than a const so a test can make the deadline unmeetable; nothing
+// outside this package can reach it.
+var gitCallTimeout = 10 * time.Second
+
+// gitCommand builds a git invocation bounded by gitCallTimeout. The caller keeps the
+// cancel func alive until the command has been run and its output read, which is what
+// exec.CommandContext requires.
+func gitCommand(args ...string) (*exec.Cmd, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.Background(), gitCallTimeout)
+	return exec.CommandContext(ctx, "git", args...), cancel
+}
 
 // DiscoverRootForRegistration returns the repository root to record consent for,
 // discovered from dir — or from the directory the command was invoked in when dir is
@@ -70,7 +99,8 @@ func DiscoverRootForRegistration(dir, ceiling string) (string, error) {
 		return "", errRootNotADirectory
 	}
 
-	cmd := exec.Command("git", "-C", cleaned, "rev-parse", "--show-toplevel")
+	cmd, cancel := gitCommand("-C", cleaned, "rev-parse", "--show-toplevel")
+	defer cancel()
 	if ceiling != "" {
 		cmd.Env = boundedDiscoveryEnv(ceiling)
 	}
@@ -112,7 +142,8 @@ func DiscoverRootForRegistration(dir, ceiling string) (string, error) {
 // It returns no error and therefore names no path in one, and git's own stderr is
 // captured and discarded, as DiscoverRootForRegistration's is (plan §4.2).
 func discoverParentRepositoryForRegistration(root string) []string {
-	cmd := exec.Command("git", "-C", root, "rev-parse", "--git-common-dir")
+	cmd, cancel := gitCommand("-C", root, "rev-parse", "--git-common-dir")
+	defer cancel()
 	cmd.Env = scrubbedGitEnv()
 	output, err := cmd.Output()
 	if err != nil {
@@ -189,7 +220,8 @@ func parentSpellingsFromCommonDir(from, topLevel, common string) []string {
 // (ADR-0044 §2). It returns no error and therefore names no path in one, and git's
 // own stderr is captured and discarded (plan §4.2).
 func discoverLinkedWorktreeForRegistration(dir string) (topLevel string, parent []string) {
-	cmd := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel", "--git-common-dir")
+	cmd, cancel := gitCommand("-C", dir, "rev-parse", "--show-toplevel", "--git-common-dir")
+	defer cancel()
 	cmd.Env = scrubbedGitEnv()
 	output, err := cmd.Output()
 	if err != nil {
