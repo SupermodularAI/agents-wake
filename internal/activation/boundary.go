@@ -10,8 +10,8 @@ import (
 	"github.com/SupermodularAI/agents-wake/internal/store"
 )
 
-// boundaryDiscovery collects the working directories one walk saw that the recorded
-// global root encloses and no recorded entry matched.
+// boundaryDiscovery collects the working directories one walk saw that no recorded
+// entry matched, on a machine with a collection boundary recorded.
 //
 // Observing is not registering (ADR-0032 §5): the set is collected on the derivation
 // path and acted on only after the walk has finished. Registering inside the resolver
@@ -31,17 +31,23 @@ func newBoundaryDiscovery(repos *config.Repos) *boundaryDiscovery {
 	return &boundaryDiscovery{repos: repos, seen: map[string]bool{}}
 }
 
-// observe records cwd when the recorded boundary strictly encloses it.
+// observe records cwd when it is a candidate for registration after the walk.
 //
-// With no boundary recorded WithinGlobalRoot is always false, so the set stays empty
-// and there is exactly one walk in the common case. The check is a pure string
-// operation over the snapshot — no stat, no git — so adding it to the derivation path
-// costs the resolver nothing it was not already allowed to spend (ADR-0019 §1).
+// The gate is the candidate test and not the admission test (ADR-0044 §1): a linked
+// worktree of a consented repository is admitted wherever on disk it lives, and where
+// one lives is a property of whichever tool manages them rather than of its path — so
+// no path test here could tell one from any other unmatched directory. Admission is
+// decided once, after the walk, by RegisterUnderGlobalRoot (ADR-0032 §5).
+//
+// With no boundary recorded OfferableUnderGlobalRoot is always false, so the set stays
+// empty and there is exactly one walk in the common case. The check is a pure string
+// operation over the snapshot — no stat, no git — so it costs the resolver nothing it
+// was not already allowed to spend (ADR-0019 §1, ADR-0044 §4).
 func (d *boundaryDiscovery) observe(cwd string) {
 	if d == nil || d.seen[cwd] {
 		return
 	}
-	if !d.repos.WithinGlobalRoot(cwd) {
+	if !d.repos.OfferableUnderGlobalRoot(cwd) {
 		return
 	}
 	d.seen[cwd] = true
@@ -64,11 +70,16 @@ func (d *boundaryDiscovery) pending() []string {
 // repositories discovered by the same walk must not disagree about when they were
 // consented.
 //
-// Every failure is soft and counted. "Could not read means collects nothing, never an
-// error that breaks a command" (plan §4.3) — a scan that stopped because one
-// discovered directory could not be registered would lose the rest of the batch and
-// the events it had already read. Counted rather than swallowed, because a silent
-// refusal is indistinguishable from a machine with nothing to discover.
+// Every failure is soft. "Could not read means collects nothing, never an error that
+// breaks a command" (plan §4.3) — a scan that stopped because one discovered directory
+// could not be registered would lose the rest of the batch and the events it had
+// already read.
+//
+// Each failure that describes collection this machine lost is also counted, because a
+// silent refusal is indistinguishable from a machine with nothing to discover. The one
+// that describes no loss is not: a directory the second arm does not admit — not a
+// linked worktree, or a worktree of a repository nobody consented — was never going to
+// be collected (see the case below).
 func registerDiscovered(repos *config.Repos, dirs []string, from time.Time) (registered, gone, refused int) {
 	for _, dir := range dirs {
 		_, err := repos.RegisterUnderGlobalRoot(dir, from)
@@ -79,11 +90,27 @@ func registerDiscovered(repos *config.Repos, dirs []string, from time.Time) (reg
 			// An honest zero: there is nothing left there to read, so nothing was lost
 			// by not registering it.
 			gone++
+		case errors.Is(err, config.ErrNotAnAdmittedWorktree):
+			// The boundary working, not a failure. ADR-0044 §1 widened the candidate set
+			// to every unmatched directory, because where a linked worktree lives cannot
+			// be decided from its path — so this is now the ordinary answer for the many
+			// directories that are not one. Counting it as refused would report
+			// "collection that was lost" about a directory nobody consented, and would
+			// pin a non-zero counter on every machine that has ever run a session
+			// outside its boundary. Counting these populations honestly is DG-114's
+			// question, which this issue blocks.
+			//
+			// It is this sentinel and never ErrOutsideGlobalRoot, which is the narrower
+			// fact that a discovered root left the bound its own consent rests on — a
+			// directory the user did consent, carried by no number. Skipping that one
+			// too would hide the case ADR-0044 was written to end.
+			continue
 		default:
-			// A NestedRootError, a boundary that moved out from under the directory, an
-			// entry this build could not read back. The sessions were readable and no
-			// number carries them, which is why the counter joins doctor's "collects
-			// nothing" arm.
+			// A NestedRootError, a discovered root that escaped the boundary or the
+			// worktree the probe named, a boundary that moved out from under the
+			// directory, an entry this build could not read back. The sessions were
+			// readable and no number carries them, which is why the counter joins
+			// doctor's "collects nothing" arm.
 			refused++
 		}
 	}

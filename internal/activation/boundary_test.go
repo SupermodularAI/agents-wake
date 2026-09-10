@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -12,6 +13,8 @@ import (
 	"github.com/SupermodularAI/agents-wake/internal/adapter/claudecode"
 	"github.com/SupermodularAI/agents-wake/internal/config"
 	"github.com/SupermodularAI/agents-wake/internal/health"
+	"github.com/SupermodularAI/agents-wake/internal/metrics"
+	"github.com/SupermodularAI/agents-wake/internal/record"
 	"github.com/SupermodularAI/agents-wake/internal/store"
 )
 
@@ -41,12 +44,20 @@ func boundaryFixture(t *testing.T) (claudeDir, base string) {
 	return claudeDir, realTempDir(t)
 }
 
-// transcriptAt writes one session holding exactly one terminal tool call, attributed
+// transcriptAt writes one session holding exactly one terminal Bash call, attributed
 // to cwd and timestamped at.
 func transcriptAt(t *testing.T, claudeDir, name, cwd string, at time.Time) {
 	t.Helper()
+	transcriptOfToolAt(t, claudeDir, name, cwd, "Bash", at)
+}
+
+// transcriptOfToolAt is transcriptAt with the tool named, for the one case that needs
+// a primitive rather than a builtin: metrics.Aggregate excludes builtin tool calls
+// before anything is counted, so a Bash call produces no row to assert a roll-up on.
+func transcriptOfToolAt(t *testing.T, claudeDir, name, cwd, tool string, at time.Time) {
+	t.Helper()
 	stamp := at.UTC().Format(time.RFC3339)
-	transcript := `{"uuid":"` + name + `-1","sessionId":"` + name + `","cwd":"` + cwd + `","timestamp":"` + stamp + `","message":{"content":[{"type":"tool_use","id":"` + name + `-call","name":"Bash"}]}}
+	transcript := `{"uuid":"` + name + `-1","sessionId":"` + name + `","cwd":"` + cwd + `","timestamp":"` + stamp + `","message":{"content":[{"type":"tool_use","id":"` + name + `-call","name":"` + tool + `"}]}}
 {"uuid":"` + name + `-2","sessionId":"` + name + `","cwd":"` + cwd + `","timestamp":"` + stamp + `","message":{"content":[{"type":"tool_result","tool_use_id":"` + name + `-call","is_error":false}]}}`
 	writeFixture(t, filepath.Join(claudeDir, "projects", name, "session.jsonl"), transcript)
 }
@@ -440,5 +451,218 @@ func TestInitGlobalRegistersNoRootOfItsOwn(t *testing.T) {
 	}
 	if identity := mustIdentify(t, repos, base); identity.Matched {
 		t.Errorf("Identify(the boundary) matched %s; the boundary is not a repository", identity.ID)
+	}
+}
+
+// The candidate set ADR-0044 §1 widens is not a refusal counter.
+//
+// Where a linked worktree lives cannot be decided from its path, so every unmatched
+// working directory is now offered to registration and the many that are not worktrees
+// are turned away. health.Scan.BoundaryRefused reports collection that was lost;
+// counting these there would report a loss about a directory nobody consented, and
+// would pin a non-zero counter on every machine that has ever run a session outside
+// its boundary. Counting these populations honestly is DG-114's question.
+func TestAScanDoesNotCountADirectoryOutsideTheBoundaryAsARefusal(t *testing.T) {
+	paths := testPaths(t)
+	claudeDir, base := boundaryFixture(t)
+	inside := filepath.Join(base, "project")
+	if err := os.MkdirAll(inside, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	outside := filepath.Join(realTempDir(t), "elsewhere")
+	if err := os.MkdirAll(outside, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if _, err := InitGlobal(paths, base, claudeDir, testExecutable(t), false); err != nil {
+		t.Fatalf("InitGlobal() error = %v", err)
+	}
+	// A consented directory too, so the machine is collecting rather than merely not
+	// broken and the zeroes below are about the outside directory.
+	transcriptAt(t, claudeDir, "session-in", inside, time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC))
+	transcriptAt(t, claudeDir, "session-out", outside, time.Date(2026, 8, 13, 12, 5, 0, 0, time.UTC))
+
+	if _, err := Ingest(paths, claudeDir); err != nil {
+		t.Fatalf("Ingest() error = %v; a directory outside the boundary must be counted, not fatal", err)
+	}
+	counters := scanCounters(t, paths)
+	if counters.BoundaryRefused != 0 {
+		t.Errorf("BoundaryRefused = %d, want 0; a directory outside the boundary is the boundary working", counters.BoundaryRefused)
+	}
+	if counters.BoundarySkipped != 0 {
+		t.Errorf("BoundarySkipped = %d, want 0; the directory is there and was never going to be collected", counters.BoundarySkipped)
+	}
+	for _, root := range recordedRoots(t, paths) {
+		if root == outside {
+			t.Errorf("an entry was recorded for %q, a plain directory outside the boundary", outside)
+		}
+	}
+}
+
+// requireGit skips a case that needs the real tool, and neutralises the developer's
+// own git configuration so what `git init` produces here cannot depend on the machine
+// the test runs on.
+//
+// The one legitimate skip in this file: the case below asserts what `git worktree add`
+// and `git rev-parse` do, which is a property of an external program rather than of
+// this tree. The source-scanning cases must never skip — a skip there would be
+// indistinguishable from a pass.
+func requireGit(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git is not installed: %v", err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+}
+
+// initWorktreeOutside creates a repository under base and a linked worktree of it
+// somewhere else entirely — the shape DG-113 is about, since where a worktree lives
+// is a property of whichever tool manages them and is usually not inside the
+// consented tree.
+func initWorktreeOutside(t *testing.T, base string) (main, worktree string) {
+	t.Helper()
+	main = filepath.Join(base, "main")
+	if err := os.MkdirAll(main, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	worktree = filepath.Join(realTempDir(t), "wt")
+	for _, step := range [][]string{
+		{"init", main},
+		{"-C", main, "-c", "user.email=wake@example.invalid", "-c", "user.name=wake", "commit", "--allow-empty", "-m", "init"},
+		{"-C", main, "worktree", "add", worktree},
+	} {
+		if output, err := exec.Command("git", step...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", step, err, output)
+		}
+	}
+	return main, worktree
+}
+
+// DG-113's first acceptance criterion, end to end. A session run in a linked worktree
+// of a consented repository produces records, and they are counted under the
+// repository — which is what the user consented and what they expect to read.
+//
+// Before ADR-0044 the spool was empty for exactly this shape: the worktree lives
+// outside the boundary, so it failed a path test its own repository passes.
+//
+// Nothing is asserted per renderer. The roll-up is established once at the counting
+// input, and re-implementing it per renderer is what ADR-0011 forbids — `wake report`,
+// the dashboard and the static report all read this one Summary.
+func TestAScanRegistersALinkedWorktreeOutsideTheBoundaryAndRollsItUpToItsRepository(t *testing.T) {
+	requireGit(t)
+	paths := testPaths(t)
+	claudeDir, base := boundaryFixture(t)
+	main, worktree := initWorktreeOutside(t, base)
+	executable := testExecutable(t)
+
+	// The repository is consented before the worktree is discovered, which is what
+	// ADR-0040 §2 requires for the relation to be recorded at all.
+	if _, err := Init(paths, main, claudeDir, executable, false); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	if _, err := InitGlobal(paths, base, claudeDir, executable, false); err != nil {
+		t.Fatalf("InitGlobal() error = %v", err)
+	}
+	transcriptOfToolAt(t, claudeDir, "session-w", worktree, "mcp__wake__probe", time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC))
+
+	if _, err := Ingest(paths, claudeDir); err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+
+	repos, err := config.OpenRepos(paths)
+	if err != nil {
+		t.Fatalf("OpenRepos() error = %v", err)
+	}
+	mainID := mustIdentify(t, repos, main).ID
+	worktreeIdentity := mustIdentify(t, repos, worktree)
+	if !worktreeIdentity.Matched {
+		t.Fatalf("Identify(the worktree) = %+v, want a matched entry of its own", worktreeIdentity)
+	}
+	// Its own identity and its own hash: the roll-up is a counting decision, never a
+	// storage one (ADR-0019 §9, ADR-0040 §1).
+	if worktreeIdentity.ID == mainID {
+		t.Fatalf("the worktree resolved to the repository's id %q; a worktree is its own repository", mainID)
+	}
+
+	entries := spoolEntries(t, paths)
+	if len(entries) == 0 {
+		t.Fatal("the spool is empty; a session in a linked worktree of a consented repository collected nothing")
+	}
+	records := make([]record.Record, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Record.Repo != record.Hash(worktreeIdentity.ID) {
+			t.Errorf("a record's repo = %q, want the worktree's own id %q", entry.Record.Repo, worktreeIdentity.ID)
+		}
+		records = append(records, entry.Record)
+	}
+
+	rollup := config.RepoRollup(paths)
+	if got := rollup[worktreeIdentity.ID]; got != mainID {
+		t.Fatalf("the roll-up maps the worktree to %q, want the repository %q", got, mainID)
+	}
+
+	summary := metrics.Aggregate(records, metrics.RepoRollup(rollup))
+	if len(summary.Primitives) == 0 {
+		t.Fatal("Aggregate() counted no primitive; the fixture proves nothing about the roll-up")
+	}
+	for _, primitive := range summary.Primitives {
+		for _, repo := range primitive.Repos {
+			if repo != record.Hash(mainID) {
+				t.Errorf("%s is counted under %q, want the repository the worktree belongs to %q", primitive.Name, repo, mainID)
+			}
+		}
+	}
+}
+
+// The other half of the pair, and the half a widened candidate set can lose silently.
+//
+// Since ADR-0044 §1 every unmatched working directory is offered to registration, so
+// the ordinary answer for the many that are not linked worktrees is a refusal a scan
+// must not count. That skip may not swallow this case: a directory the boundary
+// strictly encloses — consented by the user naming the boundary — whose discovered
+// root escapes it. Register records the symlink-resolved root, so a directory inside
+// the boundary that physically lives outside it is exactly that case, and the
+// GIT_CEILING_DIRECTORIES colon hole is the other route to it.
+//
+// The sessions in it were readable and no number carries them, which is what
+// health.Scan.BoundaryRefused is for (plan §3.3, §12) and what keeps `doctor` able to
+// tell "collects nothing" from "collects zero".
+func TestARegistrationWhoseDiscoveredRootEscapesTheBoundaryIsCountedAsARefusal(t *testing.T) {
+	paths := testPaths(t)
+	claudeDir, base := boundaryFixture(t)
+	elsewhere := filepath.Join(realTempDir(t), "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	link := filepath.Join(base, "project")
+	if err := os.Symlink(elsewhere, link); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+	// A consented directory too, so the machine is collecting rather than merely not
+	// broken and the counter below is about the escaping root.
+	inside := filepath.Join(base, "consented")
+	if err := os.MkdirAll(inside, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if _, err := InitGlobal(paths, base, claudeDir, testExecutable(t), false); err != nil {
+		t.Fatalf("InitGlobal() error = %v", err)
+	}
+	transcriptAt(t, claudeDir, "session-in", inside, time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC))
+	transcriptAt(t, claudeDir, "session-link", link, time.Date(2026, 8, 13, 12, 5, 0, 0, time.UTC))
+
+	if _, err := Ingest(paths, claudeDir); err != nil {
+		t.Fatalf("Ingest() error = %v; a refused registration must be counted, not fatal", err)
+	}
+	counters := scanCounters(t, paths)
+	if counters.BoundaryRefused != 1 {
+		t.Errorf("BoundaryRefused = %d, want 1; a root that escaped the boundary is collection that was lost", counters.BoundaryRefused)
+	}
+	if counters.EventsWritten == 0 {
+		t.Errorf("EventsWritten = 0; the fixture is not collecting and the counter above means nothing")
+	}
+	for _, root := range recordedRoots(t, paths) {
+		if root == elsewhere || root == link {
+			t.Errorf("an entry was recorded for %q, a root outside the boundary reached through a link inside it", root)
+		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // requireGit skips a case that needs the real tool ADR-0019 §1 names.
@@ -108,16 +109,19 @@ func TestTheParentLookupAnswersNothingOutsideAGitRepository(t *testing.T) {
 	}
 }
 
-// GIT_DIR and GIT_WORK_TREE are dropped for the reason boundedDiscoveryEnv drops
-// them: the hook-fired registration path inherits a session's environment, and an
-// exported GIT_DIR would otherwise make a main checkout look like a worktree of
-// whatever it names — or point a worktree at a common directory nowhere near it.
+// Every variable that re-points where git looks is dropped, for the reason
+// boundedDiscoveryEnv drops them: the hook-fired registration path inherits a
+// session's environment, and any of them would otherwise make a main checkout look
+// like a worktree of whatever they name — or point a worktree at a common directory
+// nowhere near it. GIT_COMMON_DIR is the one this lookup is most directly exposed to,
+// since --git-common-dir reports it verbatim.
 func TestTheParentLookupIgnoresAnInheritedGitDir(t *testing.T) {
 	requireGit(t)
 	main, worktree := initWorktree(t)
 	elsewhere, _ := initRepo(t)
 	t.Setenv("GIT_DIR", filepath.Join(elsewhere, ".git"))
 	t.Setenv("GIT_WORK_TREE", elsewhere)
+	t.Setenv("GIT_COMMON_DIR", filepath.Join(elsewhere, ".git"))
 
 	if got := discoverParentRepositoryForRegistration(main); got != nil {
 		t.Errorf("discoverParentRepositoryForRegistration(%q) = %q, want nil; the environment made a main checkout look like a worktree", main, got)
@@ -378,5 +382,261 @@ func TestDiscoverRootForRegistrationIsNamedOnlyOnInitsPath(t *testing.T) {
 	}
 	if scanned == 0 {
 		t.Fatal("the walk scanned no Go file; the check proved nothing")
+	}
+}
+
+// The probe DG-113 adds, from a subdirectory of a linked worktree. Both answers
+// matter: the top level is what the ceiling is derived from and what the root git
+// discovers under that ceiling is checked against, and the parent spellings are what
+// the caller matches against the recorded table before anything is admitted
+// (ADR-0044 §2).
+func TestTheWorktreeProbeFindsTheTopLevelAndTheRepositoryFromASubdirectory(t *testing.T) {
+	requireGit(t)
+	main, worktree := initWorktree(t)
+	sub := mkdirAll(t, filepath.Join(worktree, "sub"))
+
+	topLevel, parent := discoverLinkedWorktreeForRegistration(sub)
+	if topLevel != worktree {
+		t.Errorf("discoverLinkedWorktreeForRegistration(%q) top level = %q, want the worktree %q", sub, topLevel, worktree)
+	}
+	if len(parent) == 0 || parent[0] != main {
+		t.Errorf("discoverLinkedWorktreeForRegistration(%q) parent = %q, want the main checkout %q first", sub, parent, main)
+	}
+}
+
+// A main checkout's subdirectory is not a worktree, and it is the case the relative
+// `--git-common-dir` join exists for: git answers `../.git` from `main/sub`, so
+// joining against the directory git was asked in and comparing the result against the
+// *top level* is what tells the two apart. Comparing against the asked-in directory
+// would read every main checkout's subdirectory as a worktree of the checkout itself.
+func TestTheWorktreeProbeAnswersNothingInAMainCheckoutSubdirectory(t *testing.T) {
+	requireGit(t)
+	_, nested := initRepo(t)
+
+	topLevel, parent := discoverLinkedWorktreeForRegistration(nested)
+	if topLevel != "" || parent != nil {
+		t.Errorf("discoverLinkedWorktreeForRegistration(%q) = (%q, %q), want nothing", nested, topLevel, parent)
+	}
+}
+
+// A plain directory is a repository wake will happily consent (ADR-0019 §5) and a
+// worktree of nothing. Every git failure direction answers nothing, which is the
+// fail-closed answer: the caller then refuses the directory.
+func TestTheWorktreeProbeAnswersNothingOutsideAGitRepository(t *testing.T) {
+	requireGit(t)
+	dir := mkdirAll(t, filepath.Join(tempRealDir(t), "plain"))
+
+	topLevel, parent := discoverLinkedWorktreeForRegistration(dir)
+	if topLevel != "" || parent != nil {
+		t.Errorf("discoverLinkedWorktreeForRegistration(%q) = (%q, %q), want nothing", dir, topLevel, parent)
+	}
+}
+
+// Every variable that re-points where git looks is dropped for the reason
+// scrubbedGitEnv gives: the registration a hook fires inherits a session's
+// environment, and any of them would otherwise make git answer about the repository
+// they name rather than the directory being asked about — which here would admit a
+// directory nobody consented. GIT_COMMON_DIR is the sharpest of the three: it leaves
+// --show-toplevel alone, so every check made against the discovered root still passes
+// while the parent the answer names is entirely the environment's.
+//
+// The enumeration is not the contract —
+// TestScrubbedGitEnvDropsEveryGitVariableItDoesNotNameSafe is. These three are here
+// because this is the call whose answer decides admission.
+func TestTheWorktreeProbeIgnoresAnInheritedGitDir(t *testing.T) {
+	requireGit(t)
+	main, worktree := initWorktree(t)
+	elsewhere, _ := initRepo(t)
+	t.Setenv("GIT_DIR", filepath.Join(elsewhere, ".git"))
+	t.Setenv("GIT_WORK_TREE", elsewhere)
+	t.Setenv("GIT_COMMON_DIR", filepath.Join(elsewhere, ".git"))
+
+	if topLevel, parent := discoverLinkedWorktreeForRegistration(main); topLevel != "" || parent != nil {
+		t.Errorf("discoverLinkedWorktreeForRegistration(%q) = (%q, %q), want nothing; the environment made a main checkout look like a worktree", main, topLevel, parent)
+	}
+	topLevel, parent := discoverLinkedWorktreeForRegistration(worktree)
+	if topLevel != worktree {
+		t.Errorf("discoverLinkedWorktreeForRegistration(%q) top level = %q, want its own %q", worktree, topLevel, worktree)
+	}
+	if len(parent) == 0 || parent[0] != main {
+		t.Errorf("discoverLinkedWorktreeForRegistration(%q) parent = %q, want the real main checkout %q", worktree, parent, main)
+	}
+}
+
+// The mechanical half of the layering rule, for the reason
+// TestTheParentLookupIsNamedOnlyOnTheRegistrationPath gives: ADR-0019 §1 makes
+// derivation a pure string operation over the recorded snapshot, and a probe that
+// shelled out from the derivation path would attribute the same event differently
+// depending on what the working tree looked like at the time.
+//
+// globalroot.go is in the allowed set because it holds ADR-0032 §2's second
+// registration call site, which ADR-0044 §1 gives a second admission arm. That is a
+// registration-path file, never a derivation-path one.
+func TestTheWorktreeProbeIsNamedOnlyOnTheRegistrationPath(t *testing.T) {
+	root := moduleRoot(t)
+	allowed := map[string]bool{
+		"internal/config/root.go":       true,
+		"internal/config/globalroot.go": true,
+		"internal/config/root_test.go":  true,
+	}
+	const symbol = "discoverLinkedWorktreeForRegistration"
+	scanned := 0
+
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if name := d.Name(); path != root && strings.HasPrefix(name, ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(path) != ".go" {
+			return nil
+		}
+		relative, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		relative = filepath.ToSlash(relative)
+		scanned++
+		if allowed[relative] {
+			return nil
+		}
+
+		raw, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if strings.Contains(string(raw), symbol) {
+			t.Errorf("%s names %s; the worktree probe runs only on the registration path, never on the derivation path", relative, symbol)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking the module: %v", err)
+	}
+	if scanned == 0 {
+		t.Fatal("the walk scanned no Go file; the check proved nothing")
+	}
+}
+
+// The off-by-one registerLinkedWorktree depends on, asserted where it is a property
+// of git rather than of this tree.
+//
+// GIT_CEILING_DIRECTORIES names directories git will not chdir up *into*, so a
+// ceiling at a top level stops the walk one directory short of it and the starting
+// directory becomes its own root. ADR-0044 §2's "may not walk above the worktree's
+// own top level" is therefore spelled filepath.Dir(topLevel), and this pair is what
+// would catch a later simplification to topLevel.
+func TestDiscoverRootForRegistrationReachesATopLevelUnderItsParentCeilingButNotUnderItsOwn(t *testing.T) {
+	requireGit(t)
+	root, nested := initRepo(t)
+
+	got, err := DiscoverRootForRegistration(nested, filepath.Dir(root))
+	if err != nil {
+		t.Fatalf("DiscoverRootForRegistration(%q, the top level's parent) error = %v", nested, err)
+	}
+	if got != root {
+		t.Errorf("DiscoverRootForRegistration(%q, the top level's parent) = %q, want the top level %q", nested, got, root)
+	}
+
+	got, err = DiscoverRootForRegistration(nested, root)
+	if err != nil {
+		t.Fatalf("DiscoverRootForRegistration(%q, the top level itself) error = %v", nested, err)
+	}
+	if got != nested {
+		t.Errorf("DiscoverRootForRegistration(%q, the top level itself) = %q, want the directory itself %q; a ceiling at the top level stops the walk one directory short", nested, got, nested)
+	}
+}
+
+// The rule scrubbedGitEnv enforces is a property, not a list: a git call this package
+// makes must not inherit anything that re-points where git looks. Enumerating the
+// variables that do is how GIT_COMMON_DIR was missed once already, so the guarantee is
+// the other way round — everything named GIT_ is dropped unless it is one of the three
+// this package has a stated reason to keep — and this case pins that shape by including
+// a variable that does not exist. A future git that adds a fourth location variable is
+// then a refusal rather than an admission.
+//
+// GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM are kept because requireGit points them at
+// os.DevNull: dropping them would make what git answers here depend on the developer's
+// own configuration. Neither can re-point a working tree — git honours core.worktree
+// only from a repository's own config (verified on git 2.50.1). GIT_CEILING_DIRECTORIES
+// is kept because it can only make git find less, which is the fail-closed direction,
+// and boundedDiscoveryEnv appends its own after it.
+func TestScrubbedGitEnvDropsEveryGitVariableItDoesNotNameSafe(t *testing.T) {
+	dropped := []string{
+		"GIT_DIR",
+		"GIT_WORK_TREE",
+		"GIT_COMMON_DIR",
+		"GIT_INDEX_FILE",
+		"GIT_OBJECT_DIRECTORY",
+		"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+		"GIT_DISCOVERY_ACROSS_FILESYSTEM",
+		"GIT_CONFIG_COUNT",
+		"GIT_CONFIG_KEY_0",
+		"GIT_CONFIG_VALUE_0",
+		"GIT_NAMESPACE",
+		"GIT_NOT_A_REAL_VARIABLE_YET",
+	}
+	kept := []string{"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CEILING_DIRECTORIES"}
+	for _, name := range append(append([]string{}, dropped...), kept...) {
+		t.Setenv(name, "/somewhere/"+name)
+	}
+	t.Setenv("WAKE_TEST_UNRELATED", "kept")
+
+	got := map[string]string{}
+	for _, entry := range scrubbedGitEnv() {
+		name, value, _ := strings.Cut(entry, "=")
+		got[name] = value
+	}
+
+	for _, name := range dropped {
+		if value, ok := got[name]; ok {
+			t.Errorf("scrubbedGitEnv() kept %s=%q; a variable git reads for where the repository is must not be inherited", name, value)
+		}
+	}
+	for _, name := range kept {
+		if _, ok := got[name]; !ok {
+			t.Errorf("scrubbedGitEnv() dropped %s, which this package has a stated reason to keep", name)
+		}
+	}
+	if got["WAKE_TEST_UNRELATED"] != "kept" {
+		t.Errorf("scrubbedGitEnv() dropped an unrelated variable; only git's own are in scope")
+	}
+}
+
+// A git call that never returns is the failure plan §4.3 says must not happen: "could
+// not read" means "collects nothing", never an error that breaks a command. Since
+// ADR-0044 §1 the probe is pointed at every unmatched working directory a scan sees —
+// values read out of harness transcripts, one of which may be a mount that no longer
+// answers — so a call that hangs would hang the scan rather than skip one directory.
+//
+// The deadline is asserted by being made unmeetable rather than by making git slow: a
+// fake git on PATH would test the fake, and a real hang is not reproducible. What has
+// to hold is that the deadline is wired into every call and that every one of them
+// fails closed when it expires — the probe and the parent lookup answer nothing, and
+// discovery falls back to the directory itself, exactly as they do for a directory
+// that is not a repository at all.
+func TestTheRegistrationPathsGitCallsFailClosedWhenTheDeadlineExpires(t *testing.T) {
+	requireGit(t)
+	main, worktree := initWorktree(t)
+	restore := gitCallTimeout
+	gitCallTimeout = time.Nanosecond
+	t.Cleanup(func() { gitCallTimeout = restore })
+
+	if topLevel, parent := discoverLinkedWorktreeForRegistration(worktree); topLevel != "" || parent != nil {
+		t.Errorf("discoverLinkedWorktreeForRegistration(%q) = (%q, %q), want nothing; the call outlived its deadline", worktree, topLevel, parent)
+	}
+	if got := discoverParentRepositoryForRegistration(worktree); got != nil {
+		t.Errorf("discoverParentRepositoryForRegistration(%q) = %q, want nil; the call outlived its deadline", worktree, got)
+	}
+	got, err := DiscoverRootForRegistration(worktree, main)
+	if err != nil {
+		t.Fatalf("DiscoverRootForRegistration() error = %v, want the directory itself", err)
+	}
+	if got != worktree {
+		t.Errorf("DiscoverRootForRegistration(%q) = %q, want the fallback to the directory itself", worktree, got)
 	}
 }

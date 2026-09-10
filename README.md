@@ -139,7 +139,7 @@ wake uninstall           # Remove everything, including ~/.config/wake and the b
 | `wake serve` | Open the local dashboard. |
 | `wake init` | Enable collection for the current project. |
 | `wake init --full` | Enable collection and import existing history now. |
-| `wake init --global [path]` | Consent every project under a directory (your home directory when no path is given), registering each repository under its own identity as sessions run in it. Records the boundary; consents no root of its own. |
+| `wake init --global [path]` | Consent every project under a directory (your home directory when no path is given), registering each repository under its own identity as sessions run in it, and linked worktrees of those repositories wherever on disk they live. Records the boundary; consents no root of its own. |
 | `wake init --global --full` | ...and import the existing Claude Code history under that boundary in the same call. |
 | `wake ingest` | Import activity for consented projects. |
 | `wake doctor` | Show collection and hook health. |
