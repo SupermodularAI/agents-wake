@@ -83,7 +83,16 @@ import (
 // unexplained, it would explain it wrongly, which is the worse half of the failure the
 // bump to 2 avoided. Same remedy, and the same cost — one scan's diagnostics, on a file
 // that is derived and non-precious (ADR-0014).
-const reportVersion = 8
+// Bumped to 9 when the scan gained the skipped-transcript breakdown and the flag
+// saying whether it classified at all (DG-114): a version-8 file carries no breakdown,
+// and its zero value is not a real one. SkippedClassified false is the honest reading
+// of a file nobody classified — but only if the flag is trusted, and a file written
+// before the flag existed decodes it as false for exactly the same reason it decodes
+// every count as zero. Read as this format it would report "no worktree of a consented
+// repository was skipped" for a scan that never asked, which is the failure the bump to
+// 2 avoided. Same remedy, and the same cost — one scan's diagnostics, on a file that is
+// derived and non-precious (ADR-0014).
+const reportVersion = 9
 
 // reportFileMode is the mode the counter file is written with. It holds no path and
 // no label, but it is state about this user's machine and the rest of the local
@@ -111,13 +120,65 @@ type Report struct {
 // would make one historical read failure mark every later clean scan as dirty,
 // destroying the distinction this package exists to draw.
 type Scan struct {
-	At              time.Time `json:"at"`
-	Transcripts     int       `json:"transcripts"`
-	Unreadable      int       `json:"unreadable"`
-	ParseErrors     int       `json:"parse_errors"`
-	Skipped         int       `json:"skipped"`
-	EventsWritten   int       `json:"events_written"`
-	RefusedProjects int       `json:"refused_projects"`
+	At          time.Time `json:"at"`
+	Transcripts int       `json:"transcripts"`
+	Unreadable  int       `json:"unreadable"`
+	ParseErrors int       `json:"parse_errors"`
+	// Skipped counts transcripts a scan read successfully that yielded no terminal
+	// event. It is an honest zero and never a failure — and it summed three unrelated
+	// populations, which is why the six counters below break it down: a transcript from
+	// a plain directory nobody consented, one from a repository nobody consented, and
+	// one from a linked worktree of a repository the user did consent are three
+	// different facts, and only the third describes collection the user asked for and
+	// did not get. The six partition this number exactly.
+	Skipped int `json:"skipped"`
+	// SkippedNotARepository counts them for a working directory git answered was inside
+	// no working tree. The ordinary case on any machine that runs agents outside a
+	// checkout, and no loss: those sessions were never attributable to a repository.
+	SkippedNotARepository int `json:"skipped_not_a_repository"`
+	// SkippedUnconsentedRepository counts them for a working directory inside a
+	// repository this machine has not consented — including a linked worktree of one.
+	// No loss either: nobody asked Wake to collect it.
+	SkippedUnconsentedRepository int `json:"skipped_unconsented_repository"`
+	// SkippedUnregisteredWorktree counts them for a working directory inside a linked
+	// worktree whose repository this machine *did* consent, and it is the line this
+	// breakdown exists for. On the machine where the problem was found it was 223 of
+	// 1,422 transcripts: nine days of collection the user had asked for, lost, while
+	// every counter beside it read healthy — because one integer summed three
+	// populations and this one was invisible inside it (ADR-0047 §1).
+	//
+	// It deliberately does not move Diagnose's state word, on the same standing-fact
+	// argument BoundaryRefused carries: there is no incremental cursor, so every scan
+	// re-classifies the same directory and re-counts the same transcripts, and a state
+	// word following this counter could never change back. This line is what reports
+	// the loss instead, which is why it prints whatever the state word says.
+	SkippedUnregisteredWorktree int `json:"skipped_unregistered_worktree"`
+	// SkippedOutsideCollectionWindow counts them for a working directory the recorded
+	// table does match — so consent is not what skipped the transcript; the window is.
+	// Its events predate the instant collection began for that repository (ADR-0024,
+	// ADR-0025), which is the population Scope was added for and now has its own line.
+	SkippedOutsideCollectionWindow int `json:"skipped_outside_collection_window"`
+	// SkippedUnclassified counts them for a working directory nothing could answer
+	// about: the directory is gone, or git could not be run, timed out, or answered a
+	// shape this build cannot read. ADR-0047 §4 — never a default bucket. It is also
+	// the zero value of the classification, so a path that forgets to classify lands
+	// here rather than in a reason it did not measure.
+	SkippedUnclassified int `json:"skipped_unclassified"`
+	// SkippedNothingTerminal counts them where no working directory was declined at
+	// all: the transcript resolved as consented and still produced nothing, because
+	// every call in it is unterminated and not yet stale (ADR-0015), or because it
+	// carried no usable working directory to decline.
+	SkippedNothingTerminal int `json:"skipped_nothing_terminal"`
+	// SkippedClassified is whether this scan classified the transcripts it skipped at
+	// all. A scan whose walk did not finish did not, and its zeroes are not zeroes:
+	// doctor renders the six counters above as "not observed" rather than as 0, which
+	// is ADR-0046's rule and the distinction ADR-0010 asks doctor to draw.
+	//
+	// A bool on StaleRebuilt's stated terms — a yes-or-no fact an int would have to
+	// encode as a count of something it does not count.
+	SkippedClassified bool `json:"skipped_classified"`
+	EventsWritten     int  `json:"events_written"`
+	RefusedProjects   int  `json:"refused_projects"`
 	// RefusedCalls counts primitive invocations a reader found but could not
 	// derive a valid record from — it could not name the primitive, or a bounded
 	// dimension such as the entrypoint carried a value outside Wake's vocabulary:
@@ -231,8 +292,10 @@ type Scan struct {
 	// rather than only those under the boundary, and the ordinary answer for one that
 	// is not a linked worktree of a consented repository is a refusal about a directory
 	// nobody consented — no loss, and counting it here would pin this counter non-zero
-	// on every machine that has ever run a session outside its boundary. Counting that
-	// population honestly is DG-114's question.
+	// on every machine that has ever run a session outside its boundary. That
+	// population is counted by reason instead, in the skipped breakdown above, as a
+	// classification that registers nothing rather than as a refusal (ADR-0047 §1);
+	// SkippedUnregisteredWorktree is the line inside it that does describe loss.
 	//
 	// It is deliberately not one of Diagnose's "collects nothing" reasons, and that
 	// exclusion is argued where the arm is: every scan re-observes the same directory

@@ -330,3 +330,39 @@ func TestDiagnoseOnlyEverReturnsAKnownCollectionScope(t *testing.T) {
 		}
 	}
 }
+
+// Ticket AC 4. The breakdown reports a loss the state word deliberately does not
+// follow, for the reason BoundaryRefused's exclusion is argued: every scan
+// re-classifies the same directory, so a state word driven by any of these counters
+// could never change back.
+//
+// The want is the literal "collects zero" rather than StateCollectsZero, so the
+// assertion is byte-for-byte against the word the state had before this change and not
+// against a constant a later edit could move along with the behaviour.
+func TestTheStateWordIsUnaffectedByTheSkippedBreakdown(t *testing.T) {
+	base := Scan{At: scannedAt, Transcripts: 3, Skipped: 3}
+	if got := string(Diagnose(Report{Scan: base}, nil, nil).State); got != "collects zero" {
+		t.Fatalf("the base scan reports %q, want \"collects zero\"; the rest of this test is about moving off it", got)
+	}
+
+	for _, c := range []struct {
+		name string
+		with func(Scan) Scan
+	}{
+		{"not in a repository", func(s Scan) Scan { s.SkippedNotARepository = 3; return s }},
+		{"in an unconsented repository", func(s Scan) Scan { s.SkippedUnconsentedRepository = 3; return s }},
+		{"in an unregistered worktree", func(s Scan) Scan { s.SkippedUnregisteredWorktree = 3; return s }},
+		{"outside the collection window", func(s Scan) Scan { s.SkippedOutsideCollectionWindow = 3; return s }},
+		{"not classified", func(s Scan) Scan { s.SkippedUnclassified = 3; return s }},
+		{"holding nothing terminal", func(s Scan) Scan { s.SkippedNothingTerminal = 3; return s }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			scan := c.with(base)
+			scan.SkippedClassified = true
+
+			if got := string(Diagnose(Report{Scan: scan}, nil, nil).State); got != "collects zero" {
+				t.Errorf("State = %q, want \"collects zero\"; the breakdown reports the loss and never moves the word", got)
+			}
+		})
+	}
+}
