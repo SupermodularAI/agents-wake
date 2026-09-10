@@ -11,8 +11,9 @@
 //   - which repository an observed working directory belongs to — OpenRepos and
 //     Identify, over a salted hash of a consented root (ADR-0019) — and, since
 //     ADR-0032, whether the machine-wide collection boundary encloses that
-//     directory at all: SetGlobalRoot, WithinGlobalRoot and
-//     RegisterUnderGlobalRoot, over a keyed digest of the recorded boundary. The
+//     directory at all: SetGlobalRoot, WithinGlobalRoot,
+//     OfferableUnderGlobalRoot and RegisterUnderGlobalRoot, over a keyed digest
+//     of the recorded boundary. The
 //     boundary answers consent, never identity: nothing resolves to it, and it is
 //     recorded beside the table rather than in it.
 //

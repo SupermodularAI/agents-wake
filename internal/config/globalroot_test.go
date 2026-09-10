@@ -446,7 +446,7 @@ func TestGlobalRootRefusalsNameNoPath(t *testing.T) {
 	r := openRepos(t, p)
 	setGlobalRoot(t, r, boundary)
 
-	for _, c := range []struct {
+	cases := []struct {
 		name string
 		run  func() error
 	}{
@@ -459,7 +459,36 @@ func TestGlobalRootRefusalsNameNoPath(t *testing.T) {
 			_, err := r.RegisterUnderGlobalRoot(filepath.Join(boundary, marker+"-gone"), time.Time{})
 			return err
 		}},
-	} {
+	}
+
+	// The refusal ADR-0044 §1's second arm adds. Both the worktree and the repository
+	// it belongs to sit under the marker directory, so a message that leaked either
+	// one is caught here. Appended rather than declared inline because it needs a real
+	// git, and a machine without one should still run the three cases above.
+	if _, err := exec.LookPath("git"); err == nil {
+		t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+		t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+		main := mkdirAll(t, filepath.Join(base, "main"))
+		worktree := filepath.Join(base, "worktree")
+		for _, step := range [][]string{
+			{"init", main},
+			{"-C", main, "-c", "user.email=wake@example.invalid", "-c", "user.name=wake", "commit", "--allow-empty", "-m", "init"},
+			{"-C", main, "worktree", "add", worktree},
+		} {
+			if output, gitErr := exec.Command("git", step...).CombinedOutput(); gitErr != nil {
+				t.Fatalf("git %v: %v: %s", step, gitErr, output)
+			}
+		}
+		cases = append(cases, struct {
+			name string
+			run  func() error
+		}{"a linked worktree of an unconsented repository", func() error {
+			_, err := r.RegisterUnderGlobalRoot(worktree, time.Time{})
+			return err
+		}})
+	}
+
+	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			err := c.run()
 			if err == nil {
@@ -611,5 +640,256 @@ func TestRegisterUnderGlobalRootRefusesTheRelationWhenTheWorktreeIsDiscoveredFir
 	}
 	if entries := recordedEntries(t, p); len(entries) != 2 {
 		t.Errorf("projects.json holds %d entries, want 2", len(entries))
+	}
+}
+
+// ADR-0019 §1, for the candidate test DG-113 widens the walk's gate to.
+//
+// It runs on the derivation path for every unmatched working directory a scan sees,
+// exactly where WithinGlobalRoot ran, so it may not stat, resolve a symlink, or shell
+// out — whatever has happened to the disk since. The git question ADR-0044 §1 adds is
+// asked after the walk, once, in RegisterUnderGlobalRoot.
+func TestOfferableUnderGlobalRootAdmitsNothingAndTouchesNoFilesystem(t *testing.T) {
+	p := testPaths(t)
+	base := tempRealDir(t)
+	boundary := mkdirAll(t, filepath.Join(base, "boundary"))
+	inside := filepath.Join(boundary, "project")
+	outside := mkdirAll(t, filepath.Join(base, "elsewhere"))
+
+	r := openRepos(t, p)
+	// The common case first: no boundary recorded, so nothing is ever a candidate and
+	// a scan on a machine that never ran `init --global` pays for nothing.
+	if r.OfferableUnderGlobalRoot(inside) {
+		t.Error("OfferableUnderGlobalRoot() = true with no boundary recorded")
+	}
+
+	setGlobalRoot(t, r, boundary)
+	if !r.OfferableUnderGlobalRoot(inside) {
+		t.Error("OfferableUnderGlobalRoot(a directory under the boundary) = false")
+	}
+	// The widening itself: where a linked worktree lives is a property of whichever
+	// tool manages them, so no path test can tell one from any other directory
+	// (ADR-0044 §1). Admission is RegisterUnderGlobalRoot's decision, not this one's.
+	if !r.OfferableUnderGlobalRoot(outside) {
+		t.Error("OfferableUnderGlobalRoot(a directory outside the boundary) = false; a linked worktree cannot be told from its path")
+	}
+
+	if err := os.RemoveAll(base); err != nil {
+		t.Fatalf("removing %s: %v", base, err)
+	}
+	if !r.OfferableUnderGlobalRoot(inside) || !r.OfferableUnderGlobalRoot(outside) {
+		t.Error("OfferableUnderGlobalRoot() changed after the tree was deleted; the answer read the disk")
+	}
+}
+
+// initWorktreeElsewhere is initWorktree's fixture with the worktree deliberately
+// outside the directory a test records as the boundary — the shape DG-113 is about,
+// and the one initWorktree (both siblings under one base) cannot express.
+//
+// Two separate temporary bases, so filepath.Dir(main) can be the boundary and the
+// worktree still falls outside it. The commit identity is supplied per invocation for
+// the reason initWorktree gives.
+func initWorktreeElsewhere(t *testing.T) (main, worktree string) {
+	t.Helper()
+	main = mkdirAll(t, filepath.Join(tempRealDir(t), "main"))
+	worktree = filepath.Join(tempRealDir(t), "worktree")
+	for _, step := range [][]string{
+		{"init", main},
+		{"-C", main, "-c", "user.email=wake@example.invalid", "-c", "user.name=wake", "commit", "--allow-empty", "-m", "init"},
+		{"-C", main, "worktree", "add", worktree},
+	} {
+		if output, err := exec.Command("git", step...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", step, err, output)
+		}
+	}
+	return main, worktree
+}
+
+// The bug DG-113 fixes. A linked worktree of a consented repository lives wherever
+// the tool that created it put it, which is usually not inside the consented tree —
+// so it failed a path test its own repository passes, and collected nothing.
+//
+// ADR-0044 §1: it is admitted under its own identity, carrying the belongs_to
+// relation ADR-0040 defined, exactly as though the user had run `wake init` in it.
+func TestRegisterUnderGlobalRootAdmitsALinkedWorktreeOfAConsentedRepository(t *testing.T) {
+	requireGit(t)
+	p := testPaths(t)
+	main, worktree := initWorktreeElsewhere(t)
+	boundary := filepath.Dir(main)
+	from := time.Now().UTC()
+
+	r := openRepos(t, p)
+	setGlobalRoot(t, r, boundary)
+
+	mainID := mustRegisterUnderGlobalRoot(t, r, main, from)
+	worktreeID := mustRegisterUnderGlobalRoot(t, r, worktree, from)
+
+	if mainID == worktreeID {
+		t.Fatalf("the worktree registered under the main checkout's identity %q; a worktree is its own repository (ADR-0019 §6)", mainID)
+	}
+	if got := recordedEntry(t, p, worktreeID).Root; got != worktree {
+		t.Errorf("the worktree's recorded root = %q, want its own top level %q", got, worktree)
+	}
+	if got := recordedEntry(t, p, worktreeID).BelongsTo; got != mainID {
+		t.Errorf("the worktree's belongs_to = %q, want the main checkout's id %q", got, mainID)
+	}
+	if entries := recordedEntries(t, p); len(entries) != 2 {
+		t.Errorf("projects.json holds %d entries, want 2", len(entries))
+	}
+}
+
+// The recorded root is the worktree's top level and never the subdirectory a session
+// happened to run in — the same thing the first arm's bounded discovery guarantees
+// under the boundary.
+//
+// It is also the ceiling's behavioural assertion: this fails if the ceiling handed to
+// git is the top level itself rather than its parent, because git will not chdir up
+// *into* a ceiling directory and the walk would stop one directory short.
+func TestRegisterUnderGlobalRootAdmitsALinkedWorktreeFromASubdirectoryOfIt(t *testing.T) {
+	requireGit(t)
+	p := testPaths(t)
+	main, worktree := initWorktreeElsewhere(t)
+	sub := mkdirAll(t, filepath.Join(worktree, "sub"))
+	boundary := filepath.Dir(main)
+	from := time.Now().UTC()
+
+	r := openRepos(t, p)
+	setGlobalRoot(t, r, boundary)
+	mustRegisterUnderGlobalRoot(t, r, main, from)
+
+	id := mustRegisterUnderGlobalRoot(t, r, sub, from)
+	if got := recordedEntry(t, p, id).Root; got != worktree {
+		t.Errorf("the recorded root = %q, want the worktree's top level %q", got, worktree)
+	}
+}
+
+// ADR-0044 §1's disjunction: consented *or* inside the boundary. A repository the
+// boundary encloses is one the user consented by naming the boundary, whether or not
+// a scan has reached it yet.
+//
+// The relation is a separate question and ADR-0040 §2 owns it: a parent this table
+// does not hold is a parent this machine has not consented, so belongs_to is refused
+// and the registration is not. This is the narrower true statement behind ADR-0044's
+// Consequences bullet about DG-109's ordering hazard, which claims it disappears on
+// this path by construction — true when the parent is a recorded entry, and not when
+// it is merely inside the boundary.
+func TestRegisterUnderGlobalRootAdmitsAWorktreeWhoseRepositoryIsInsideTheBoundaryButNotYetAnEntry(t *testing.T) {
+	requireGit(t)
+	p := testPaths(t)
+	main, worktree := initWorktreeElsewhere(t)
+	boundary := filepath.Dir(main)
+	from := time.Now().UTC()
+
+	r := openRepos(t, p)
+	setGlobalRoot(t, r, boundary)
+
+	id := mustRegisterUnderGlobalRoot(t, r, worktree, from)
+	if got := recordedEntry(t, p, id).Root; got != worktree {
+		t.Errorf("the recorded root = %q, want the worktree %q", got, worktree)
+	}
+	if got := recordedEntry(t, p, id).BelongsTo; got != "" {
+		t.Errorf("belongs_to = %q with the parent not yet an entry, want none (ADR-0040 §2)", got)
+	}
+}
+
+// Acceptance criterion 3, and the rule working rather than failing: a worktree whose
+// repository is not consented is still refused. The exposure ADR-0044 §2 accepts is
+// bounded by a consent decision the user already made, and here there is none.
+func TestRegisterUnderGlobalRootRefusesAWorktreeWhoseRepositoryIsNotConsented(t *testing.T) {
+	requireGit(t)
+	p := testPaths(t)
+	_, worktree := initWorktreeElsewhere(t)
+	boundary := tempRealDir(t)
+	from := time.Now().UTC()
+
+	r := openRepos(t, p)
+	setGlobalRoot(t, r, boundary)
+
+	if _, err := r.RegisterUnderGlobalRoot(worktree, from); !errors.Is(err, ErrOutsideGlobalRoot) {
+		t.Errorf("RegisterUnderGlobalRoot(a worktree of an unconsented repository) error = %v, want ErrOutsideGlobalRoot", err)
+	}
+	if entries := recordedEntries(t, p); len(entries) != 0 {
+		t.Errorf("projects.json holds %d entries, want none", len(entries))
+	}
+}
+
+// Acceptance criterion 4. The second arm admits linked worktrees and nothing else: a
+// plain git repository outside the boundary is exactly as unconsented as it was
+// before ADR-0044, and so is every directory that is not a repository at all.
+func TestRegisterUnderGlobalRootRefusesAGitRepositoryOutsideTheBoundaryThatIsNotAWorktree(t *testing.T) {
+	requireGit(t)
+	p := testPaths(t)
+	repo, _ := initRepo(t)
+	boundary := tempRealDir(t)
+	from := time.Now().UTC()
+
+	r := openRepos(t, p)
+	setGlobalRoot(t, r, boundary)
+
+	if _, err := r.RegisterUnderGlobalRoot(repo, from); !errors.Is(err, ErrOutsideGlobalRoot) {
+		t.Errorf("RegisterUnderGlobalRoot(a main checkout outside the boundary) error = %v, want ErrOutsideGlobalRoot", err)
+	}
+	if entries := recordedEntries(t, p); len(entries) != 0 {
+		t.Errorf("projects.json holds %d entries, want none", len(entries))
+	}
+}
+
+// Acceptance criterion 6. The registration a hook fires inherits a session's
+// environment, and git documents that GIT_DIR is not excluded by a ceiling — so an
+// exported GIT_DIR would otherwise make both git calls answer about a repository
+// nowhere near the directory being asked about, and admit it.
+func TestRegisterUnderGlobalRootDoesNotLetGitsEnvironmentWidenTheAdmittedWorktree(t *testing.T) {
+	requireGit(t)
+	p := testPaths(t)
+	main, worktree := initWorktreeElsewhere(t)
+	boundary := filepath.Dir(main)
+	elsewhere, _ := initRepo(t)
+	t.Setenv("GIT_DIR", filepath.Join(elsewhere, ".git"))
+	t.Setenv("GIT_WORK_TREE", elsewhere)
+	from := time.Now().UTC()
+
+	r := openRepos(t, p)
+	setGlobalRoot(t, r, boundary)
+	mainID := mustRegisterUnderGlobalRoot(t, r, main, from)
+
+	worktreeID := mustRegisterUnderGlobalRoot(t, r, worktree, from)
+	if got := recordedEntry(t, p, worktreeID).Root; got != worktree {
+		t.Errorf("the recorded root = %q, want the worktree's own %q; the environment widened the answer", got, worktree)
+	}
+	if got := recordedEntry(t, p, worktreeID).BelongsTo; got != mainID {
+		t.Errorf("belongs_to = %q, want the main checkout's id %q", got, mainID)
+	}
+	for _, entry := range recordedEntries(t, p) {
+		if entry.Root == elsewhere {
+			t.Errorf("an entry was recorded for %q, the repository only the environment named", elsewhere)
+		}
+	}
+}
+
+// Fail closed, in the one direction the probe's inherited ceiling can be pushed. The
+// probe deliberately honours an inherited GIT_CEILING_DIRECTORIES because it can only
+// make git find less; a ceiling at the worktree itself makes the probe unable to see
+// the worktree from a subdirectory of it, and the answer is a refusal rather than a
+// registration of the subdirectory as a repository of its own.
+func TestRegisterUnderGlobalRootRefusesAWorktreeWhoseCeilingBoundDiscoveryDisagreesWithTheProbe(t *testing.T) {
+	requireGit(t)
+	p := testPaths(t)
+	main, worktree := initWorktreeElsewhere(t)
+	sub := mkdirAll(t, filepath.Join(worktree, "sub"))
+	boundary := filepath.Dir(main)
+	from := time.Now().UTC()
+
+	r := openRepos(t, p)
+	setGlobalRoot(t, r, boundary)
+	mustRegisterUnderGlobalRoot(t, r, main, from)
+
+	t.Setenv("GIT_CEILING_DIRECTORIES", worktree)
+	if _, err := r.RegisterUnderGlobalRoot(sub, from); !errors.Is(err, ErrOutsideGlobalRoot) {
+		t.Errorf("RegisterUnderGlobalRoot(a worktree subdirectory under a hostile ceiling) error = %v, want ErrOutsideGlobalRoot", err)
+	}
+	for _, entry := range recordedEntries(t, p) {
+		if entry.Root == sub {
+			t.Errorf("an entry was recorded for %q, a subdirectory of a worktree", sub)
+		}
 	}
 }
