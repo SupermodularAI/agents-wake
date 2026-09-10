@@ -263,6 +263,16 @@ func (r *Repos) WithinGlobalRoot(cwd string) bool {
 //
 // With no boundary recorded the answer is always false, so a scan on a machine that
 // never ran `init --global` walks once and pays for nothing.
+//
+// On a machine that did, the cost of the widening is real and repeated, and it is
+// accepted rather than overlooked: a directory this offers that is not a worktree
+// records nothing, so every distinct historical working directory outside the boundary
+// pays one bounded probe on every scan rather than once. It stays within what
+// ADR-0044 §2 allows — at most one probe per directory per attempt — and it is paid in
+// the detached child rather than in the hook the user waits on (plan §4.1.1).
+// Remembering the refusals to avoid re-probing would mean recording state about
+// directories nobody consented, which is the population DG-114 is about and not a
+// question this decision settles.
 func (r *Repos) OfferableUnderGlobalRoot(cwd string) bool {
 	// The boundary arm, kept explicit rather than folded away: it is the arm
 	// ADR-0044's Consequences require a future change to name, and it keeps
@@ -496,9 +506,23 @@ func (r *Repos) registerLinkedWorktree(cleaned string, boundary *globalRootEntry
 	return r.Register(discovered, filepath.Base(discovered), from)
 }
 
-// consentsRepository reports whether the repository named by any of these spellings is
-// one this machine has consented: an entry already recorded, or a directory the
-// boundary encloses — ADR-0044 §1's disjunction.
+// consentsRepository reports whether the repository these spellings name is one this
+// machine has consented: an entry already recorded, or a directory the boundary
+// encloses — ADR-0044 §1's disjunction.
+//
+// The two disjuncts weigh the spellings differently, and deliberately. A recorded
+// entry matches under any of them, because an entry is a consent decision the user
+// made about a repository and the alias is how the same repository is recognised
+// through its other spelling (ADR-0019 §5). The boundary is the inferred disjunct, so
+// it requires every spelling to be inside: git can name a repository through a path
+// lexically inside the boundary while it physically lives outside, and the first arm
+// refuses exactly that repository — checking both the discovered and the canonical
+// spelling against the boundary — because Register records the canonical root and
+// consent is about where the repository is. ADR-0044 §2 replaces the boundary ceiling
+// here with a consent decision the user already made and calls the replacement
+// stronger, not weaker; admitting a parent the first arm would turn away is the one
+// way this arm could be weaker instead. No spellings at all is no consent, rather than
+// the vacuous truth the loop alone would answer.
 //
 // Pure over the snapshot and over the answer git already gave. The snapshot rather
 // than a re-read, exactly as the boundary itself is read above; Register re-reads
@@ -508,12 +532,15 @@ func (r *Repos) consentsRepository(spellings []string, boundary *globalRootEntry
 	if entryIDForRoot(r.table.Projects, spellings) != "" {
 		return true
 	}
+	if len(spellings) == 0 {
+		return false
+	}
 	for _, spelling := range spellings {
-		if strictlyEncloses(boundary.Root, spelling, boundary.CaseInsensitive) {
-			return true
+		if !strictlyEncloses(boundary.Root, spelling, boundary.CaseInsensitive) {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 // strictlyEncloses reports whether inner is a directory inside outer, and not outer

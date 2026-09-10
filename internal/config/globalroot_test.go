@@ -913,3 +913,79 @@ func TestRegisterUnderGlobalRootRefusesAWorktreeWhoseCeilingBoundDiscoveryDisagr
 		}
 	}
 }
+
+// The second arm's consent check has to be as strict as the first arm's, not looser.
+//
+// git can name a repository through one spelling while it physically lives at another,
+// and the two spellings can straddle the boundary. The first arm refuses a repository
+// on exactly that shape: it requires both the discovered and the canonical spelling to
+// be inside the boundary, because Register records the canonical root and consent is
+// about where the repository is rather than about how something spelled the way to it
+// (ADR-0019 §5). ADR-0044 §2 replaces the boundary ceiling on this arm with "a consent
+// decision the user already made" and calls the replacement stronger, not weaker — so
+// the boundary disjunct here has to agree with the first arm rather than admit what it
+// refuses.
+//
+// The recorded-entry disjunct keeps matching under any spelling, and that is not the
+// same rule: an entry is a consent decision the user made about a repository, and the
+// alias is how the same repository is recognised through the other spelling (ADR-0019
+// §5). The boundary disjunct is the inferred one, and it is the one that has to be
+// conservative.
+func TestConsentsRepositoryRequiresEverySpellingInsideTheBoundary(t *testing.T) {
+	p := testPaths(t)
+	base := tempRealDir(t)
+	boundary := mkdirAll(t, filepath.Join(base, "boundary"))
+	inside := filepath.Join(boundary, "main")
+	outside := filepath.Join(base, "external", "main")
+
+	r := openRepos(t, p)
+	setGlobalRoot(t, r, boundary)
+	recorded := r.table.GlobalRoot
+
+	if !r.consentsRepository([]string{inside}, recorded) {
+		t.Error("consentsRepository(a repository inside the boundary) = false")
+	}
+	if r.consentsRepository([]string{outside}, recorded) {
+		t.Error("consentsRepository(a repository outside the boundary) = true")
+	}
+	if r.consentsRepository([]string{inside, outside}, recorded) {
+		t.Error("consentsRepository(a repository the boundary only names, and does not hold) = true; the first arm refuses that repository outright")
+	}
+	if r.consentsRepository([]string{outside, inside}, recorded) {
+		t.Error("consentsRepository() answered differently with the spellings the other way round; the rule is about the set, not the order")
+	}
+}
+
+// The identity-collapse guard, the one refusal branch in the second arm that had no
+// test of its own.
+//
+// A worktree top level at or above the boundary would become the recorded root of
+// everything inside it, which is the collapse ADR-0019 §5 keeps the root set
+// non-nested to prevent and what the first arm's own post-discovery check exists for.
+// ADR-0044 §2 says the same thing about this arm's ceiling — "not the boundary and not
+// the filesystem root" — and consent being satisfied is not a reason to skip it: here
+// the repository *is* a recorded entry, so the refusal comes from the guard and
+// nowhere else.
+//
+// The sentinel is ErrOutsideGlobalRoot rather than ErrNotAnAdmittedWorktree, because
+// consent has already been decided by this point: a scan counts this one.
+func TestRegisterUnderGlobalRootRefusesAWorktreeThatEnclosesTheBoundary(t *testing.T) {
+	requireGit(t)
+	p := testPaths(t)
+	main, worktree := initWorktreeElsewhere(t)
+	boundary := mkdirAll(t, filepath.Join(worktree, "inner"))
+	from := time.Now().UTC()
+
+	r := openRepos(t, p)
+	setGlobalRoot(t, r, boundary)
+	mustRegister(t, r, main, "main")
+
+	if _, err := r.RegisterUnderGlobalRoot(worktree, from); !errors.Is(err, ErrOutsideGlobalRoot) {
+		t.Errorf("RegisterUnderGlobalRoot(a worktree enclosing the boundary) error = %v, want ErrOutsideGlobalRoot", err)
+	}
+	for _, entry := range recordedEntries(t, p) {
+		if entry.Root == worktree {
+			t.Errorf("an entry was recorded for %q, a root that encloses the boundary", worktree)
+		}
+	}
+}
