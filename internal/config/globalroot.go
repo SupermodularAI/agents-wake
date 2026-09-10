@@ -271,8 +271,10 @@ func (r *Repos) WithinGlobalRoot(cwd string) bool {
 // ADR-0044 §2 allows — at most one probe per directory per attempt — and it is paid in
 // the detached child rather than in the hook the user waits on (plan §4.1.1).
 // Remembering the refusals to avoid re-probing would mean recording state about
-// directories nobody consented, which is the population DG-114 is about and not a
-// question this decision settles.
+// directories nobody consented. ADR-0047 §1 settles what to do about that population
+// without recording anything: classification may look where registration may not, and
+// it still remembers nothing — so this gate is unchanged and registration keeps paying
+// one probe per attempt.
 func (r *Repos) OfferableUnderGlobalRoot(cwd string) bool {
 	// The boundary arm, kept explicit rather than folded away: it is the arm
 	// ADR-0044's Consequences require a future change to name, and it keeps

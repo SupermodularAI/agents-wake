@@ -687,21 +687,21 @@ func TestDoctorNamesNoDirectoryOfASkippedTranscript(t *testing.T) {
 				t.Fatalf("Marshal() error = %v", err)
 			}
 			transcriptDir := filepath.Join(claudeDir, "projects", "session")
-			if err := os.MkdirAll(transcriptDir, 0o700); err != nil {
-				t.Fatalf("MkdirAll() transcript error = %v", err)
+			if mkErr := os.MkdirAll(transcriptDir, 0o700); mkErr != nil {
+				t.Fatalf("MkdirAll() transcript error = %v", mkErr)
 			}
 			transcript := `{"uuid":"entry-1","sessionId":"session-1","cwd":` + string(encoded) + `,"timestamp":"2026-08-17T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}
 {"uuid":"entry-2","sessionId":"session-1","cwd":` + string(encoded) + `,"timestamp":"2026-08-17T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`
-			if err := os.WriteFile(filepath.Join(transcriptDir, "session.jsonl"), []byte(transcript), 0o600); err != nil {
-				t.Fatalf("WriteFile() transcript error = %v", err)
+			if writeErr := os.WriteFile(filepath.Join(transcriptDir, "session.jsonl"), []byte(transcript), 0o600); writeErr != nil {
+				t.Fatalf("WriteFile() transcript error = %v", writeErr)
 			}
-			if _, _, err := runSplit(t, "ingest"); err != nil {
-				t.Fatalf("ingest error = %v", err)
+			if _, _, ingestErr := runSplit(t, "ingest"); ingestErr != nil {
+				t.Fatalf("ingest error = %v", ingestErr)
 			}
 
-			out, _, err := runSplit(t, "doctor")
-			if err != nil {
-				t.Fatalf("doctor error = %v", err)
+			out, _, doctorErr := runSplit(t, "doctor")
+			if doctorErr != nil {
+				t.Fatalf("doctor error = %v", doctorErr)
 			}
 
 			if got := lineValue(t, out, "skipped transcripts"); got != "1" {

@@ -97,8 +97,9 @@ func registerDiscovered(repos *config.Repos, dirs []string, from time.Time) (reg
 			// directories that are not one. Counting it as refused would report
 			// "collection that was lost" about a directory nobody consented, and would
 			// pin a non-zero counter on every machine that has ever run a session
-			// outside its boundary. Counting these populations honestly is DG-114's
-			// question, which this issue blocks.
+			// outside its boundary. They are counted, by reason, in classifySkipped —
+			// as a classification that registers nothing rather than as a refusal,
+			// because a refusal here is the boundary working (ADR-0047 §1, §2).
 			//
 			// It is this sentinel and never ErrOutsideGlobalRoot, which is the narrower
 			// fact that a discovered root left the bound its own consent rests on — a

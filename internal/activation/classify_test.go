@@ -194,8 +194,8 @@ func TestClassifyingASkippedTranscriptRegistersNothing(t *testing.T) {
 	}
 	beforeRoots := recordedRoots(t, paths)
 
-	if _, err := Ingest(paths, claudeDir); err != nil {
-		t.Fatalf("Ingest() error = %v", err)
+	if _, ingestErr := Ingest(paths, claudeDir); ingestErr != nil {
+		t.Fatalf("Ingest() error = %v", ingestErr)
 	}
 
 	if scan := readScan(t, paths); scan.SkippedUnregisteredWorktree != 1 {

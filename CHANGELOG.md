@@ -22,6 +22,17 @@ called out under Changed.
   not consulted or blended: one provenance, always. A call with no terminal result,
   and a pair whose result instant precedes its call, stay `nil` and are counted —
   never clamped to `0`, because `0` on the wire means a genuinely instant call.
+- `doctor` splits `skipped transcripts` by reason, with transcripts from an
+  unregistered worktree of a consented repository on their own line. That
+  population was invisible inside one integer that summed three unrelated ones:
+  over 1,422 transcripts on one machine it was 223, and nine days of collection
+  the user had asked for were lost while the scan reported healthy. The other five
+  lines are a directory that is not a repository, a repository nobody consented, a
+  transcript predating its repository's consent instant, one nothing could
+  classify, and one that held nothing terminal; the six sum to the count above
+  them. A machine that has not scanned reads the breakdown as `not observed`
+  rather than `0`, which is not the same answer. Classification registers nothing
+  and consents nothing — the directories are counted, never collected from.
 - An MCP tool's invocation now records which server provided it. A server's tools
   are named `mcp__<server>__<tool>` by the harness, and the server segment is
   stored as the harness spells it, validated as a bounded token. Before this,
