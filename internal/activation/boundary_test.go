@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -12,6 +13,8 @@ import (
 	"github.com/SupermodularAI/agents-wake/internal/adapter/claudecode"
 	"github.com/SupermodularAI/agents-wake/internal/config"
 	"github.com/SupermodularAI/agents-wake/internal/health"
+	"github.com/SupermodularAI/agents-wake/internal/metrics"
+	"github.com/SupermodularAI/agents-wake/internal/record"
 	"github.com/SupermodularAI/agents-wake/internal/store"
 )
 
@@ -41,12 +44,20 @@ func boundaryFixture(t *testing.T) (claudeDir, base string) {
 	return claudeDir, realTempDir(t)
 }
 
-// transcriptAt writes one session holding exactly one terminal tool call, attributed
+// transcriptAt writes one session holding exactly one terminal Bash call, attributed
 // to cwd and timestamped at.
 func transcriptAt(t *testing.T, claudeDir, name, cwd string, at time.Time) {
 	t.Helper()
+	transcriptOfToolAt(t, claudeDir, name, cwd, "Bash", at)
+}
+
+// transcriptOfToolAt is transcriptAt with the tool named, for the one case that needs
+// a primitive rather than a builtin: metrics.Aggregate excludes builtin tool calls
+// before anything is counted, so a Bash call produces no row to assert a roll-up on.
+func transcriptOfToolAt(t *testing.T, claudeDir, name, cwd, tool string, at time.Time) {
+	t.Helper()
 	stamp := at.UTC().Format(time.RFC3339)
-	transcript := `{"uuid":"` + name + `-1","sessionId":"` + name + `","cwd":"` + cwd + `","timestamp":"` + stamp + `","message":{"content":[{"type":"tool_use","id":"` + name + `-call","name":"Bash"}]}}
+	transcript := `{"uuid":"` + name + `-1","sessionId":"` + name + `","cwd":"` + cwd + `","timestamp":"` + stamp + `","message":{"content":[{"type":"tool_use","id":"` + name + `-call","name":"` + tool + `"}]}}
 {"uuid":"` + name + `-2","sessionId":"` + name + `","cwd":"` + cwd + `","timestamp":"` + stamp + `","message":{"content":[{"type":"tool_result","tool_use_id":"` + name + `-call","is_error":false}]}}`
 	writeFixture(t, filepath.Join(claudeDir, "projects", name, "session.jsonl"), transcript)
 }
@@ -483,6 +494,122 @@ func TestAScanDoesNotCountADirectoryOutsideTheBoundaryAsARefusal(t *testing.T) {
 	for _, root := range recordedRoots(t, paths) {
 		if root == outside {
 			t.Errorf("an entry was recorded for %q, a plain directory outside the boundary", outside)
+		}
+	}
+}
+
+// requireGit skips a case that needs the real tool, and neutralises the developer's
+// own git configuration so what `git init` produces here cannot depend on the machine
+// the test runs on.
+//
+// The one legitimate skip in this file: the case below asserts what `git worktree add`
+// and `git rev-parse` do, which is a property of an external program rather than of
+// this tree. The source-scanning cases must never skip — a skip there would be
+// indistinguishable from a pass.
+func requireGit(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git is not installed: %v", err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+}
+
+// initWorktreeOutside creates a repository under base and a linked worktree of it
+// somewhere else entirely — the shape DG-113 is about, since where a worktree lives
+// is a property of whichever tool manages them and is usually not inside the
+// consented tree.
+func initWorktreeOutside(t *testing.T, base string) (main, worktree string) {
+	t.Helper()
+	main = filepath.Join(base, "main")
+	if err := os.MkdirAll(main, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	worktree = filepath.Join(realTempDir(t), "wt")
+	for _, step := range [][]string{
+		{"init", main},
+		{"-C", main, "-c", "user.email=wake@example.invalid", "-c", "user.name=wake", "commit", "--allow-empty", "-m", "init"},
+		{"-C", main, "worktree", "add", worktree},
+	} {
+		if output, err := exec.Command("git", step...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", step, err, output)
+		}
+	}
+	return main, worktree
+}
+
+// DG-113's first acceptance criterion, end to end. A session run in a linked worktree
+// of a consented repository produces records, and they are counted under the
+// repository — which is what the user consented and what they expect to read.
+//
+// Before ADR-0044 the spool was empty for exactly this shape: the worktree lives
+// outside the boundary, so it failed a path test its own repository passes.
+//
+// Nothing is asserted per renderer. The roll-up is established once at the counting
+// input, and re-implementing it per renderer is what ADR-0011 forbids — `wake report`,
+// the dashboard and the static report all read this one Summary.
+func TestAScanRegistersALinkedWorktreeOutsideTheBoundaryAndRollsItUpToItsRepository(t *testing.T) {
+	requireGit(t)
+	paths := testPaths(t)
+	claudeDir, base := boundaryFixture(t)
+	main, worktree := initWorktreeOutside(t, base)
+	executable := testExecutable(t)
+
+	// The repository is consented before the worktree is discovered, which is what
+	// ADR-0040 §2 requires for the relation to be recorded at all.
+	if _, err := Init(paths, main, claudeDir, executable, false); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	if _, err := InitGlobal(paths, base, claudeDir, executable, false); err != nil {
+		t.Fatalf("InitGlobal() error = %v", err)
+	}
+	transcriptOfToolAt(t, claudeDir, "session-w", worktree, "mcp__wake__probe", time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC))
+
+	if _, err := Ingest(paths, claudeDir); err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+
+	repos, err := config.OpenRepos(paths)
+	if err != nil {
+		t.Fatalf("OpenRepos() error = %v", err)
+	}
+	mainID := mustIdentify(t, repos, main).ID
+	worktreeIdentity := mustIdentify(t, repos, worktree)
+	if !worktreeIdentity.Matched {
+		t.Fatalf("Identify(the worktree) = %+v, want a matched entry of its own", worktreeIdentity)
+	}
+	// Its own identity and its own hash: the roll-up is a counting decision, never a
+	// storage one (ADR-0019 §9, ADR-0040 §1).
+	if worktreeIdentity.ID == mainID {
+		t.Fatalf("the worktree resolved to the repository's id %q; a worktree is its own repository", mainID)
+	}
+
+	entries := spoolEntries(t, paths)
+	if len(entries) == 0 {
+		t.Fatal("the spool is empty; a session in a linked worktree of a consented repository collected nothing")
+	}
+	records := make([]record.Record, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Record.Repo != record.Hash(worktreeIdentity.ID) {
+			t.Errorf("a record's repo = %q, want the worktree's own id %q", entry.Record.Repo, worktreeIdentity.ID)
+		}
+		records = append(records, entry.Record)
+	}
+
+	rollup := config.RepoRollup(paths)
+	if got := rollup[worktreeIdentity.ID]; got != mainID {
+		t.Fatalf("the roll-up maps the worktree to %q, want the repository %q", got, mainID)
+	}
+
+	summary := metrics.Aggregate(records, metrics.RepoRollup(rollup))
+	if len(summary.Primitives) == 0 {
+		t.Fatal("Aggregate() counted no primitive; the fixture proves nothing about the roll-up")
+	}
+	for _, primitive := range summary.Primitives {
+		for _, repo := range primitive.Repos {
+			if repo != record.Hash(mainID) {
+				t.Errorf("%s is counted under %q, want the repository the worktree belongs to %q", primitive.Name, repo, mainID)
+			}
 		}
 	}
 }
