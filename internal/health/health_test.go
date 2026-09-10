@@ -345,3 +345,52 @@ func TestReadRejectsAVersion7Report(t *testing.T) {
 		t.Fatal("Read() error = nil, want a refusal for the version-7 format")
 	}
 }
+
+// A version-8 file carries no breakdown, and its zero value is not a real one.
+// SkippedClassified false is the honest reading of a file nobody classified — but only
+// if the flag is trusted, and a file written before the flag existed decodes it as
+// false for the same reason it decodes every count as zero. Read as this format it
+// would report "no worktree of a consented repository was skipped" for a scan that
+// never asked, which is the failure every bump since 2 has avoided.
+func TestReadRejectsAVersion8Report(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "health.json")
+	version8 := `{"version":8,"scan":{"at":"2026-08-17T10:00:00Z","transcripts":1422,"skipped":1041,"scope":1},` +
+		`"hooks":{"at":"2026-08-17T10:00:00Z","installed":2}}`
+	if err := os.WriteFile(path, []byte(version8), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	if _, err := New(path).Read(); err == nil {
+		t.Fatal("Read() error = nil, want a refusal for the version-8 format")
+	}
+}
+
+// The breakdown travels to disk with the counter it explains, or the pairing is only
+// true in memory: a JSON tag that never made it onto a field would drop that reason on
+// the round trip while every in-process assertion still passed.
+func TestAScanCarriesItsSkippedBreakdown(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "health.json")
+	want := Scan{
+		At:                             time.Now().UTC().Truncate(time.Second),
+		Skipped:                        21,
+		SkippedNotARepository:          1,
+		SkippedUnconsentedRepository:   2,
+		SkippedUnregisteredWorktree:    3,
+		SkippedOutsideCollectionWindow: 4,
+		SkippedUnclassified:            5,
+		SkippedNothingTerminal:         6,
+		SkippedClassified:              true,
+	}
+	store := New(path)
+	if err := store.RecordScan(want); err != nil {
+		t.Fatalf("RecordScan() error = %v", err)
+	}
+
+	got, err := store.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if got.Scan != want {
+		t.Errorf("Scan round-tripped as %+v, want %+v", got.Scan, want)
+	}
+}

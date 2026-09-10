@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,9 +32,15 @@ var gitCallTimeout = 10 * time.Second
 // gitCommand builds a git invocation bounded by gitCallTimeout. The caller keeps the
 // cancel func alive until the command has been run and its output read, which is what
 // exec.CommandContext requires.
-func gitCommand(args ...string) (*exec.Cmd, context.CancelFunc) {
+//
+// The context comes back with it because exec reports a deadline the same way it
+// reports any other non-zero exit — an *exec.ExitError — and a caller that has to tell
+// "git ran and refused this directory" from "git never answered" can only do so by
+// asking the context (ADR-0047 §4). A caller that does not need the distinction
+// discards it.
+func gitCommand(args ...string) (*exec.Cmd, context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(context.Background(), gitCallTimeout)
-	return exec.CommandContext(ctx, "git", args...), cancel
+	return exec.CommandContext(ctx, "git", args...), ctx, cancel
 }
 
 // DiscoverRootForRegistration returns the repository root to record consent for,
@@ -99,7 +106,7 @@ func DiscoverRootForRegistration(dir, ceiling string) (string, error) {
 		return "", errRootNotADirectory
 	}
 
-	cmd, cancel := gitCommand("-C", cleaned, "rev-parse", "--show-toplevel")
+	cmd, _, cancel := gitCommand("-C", cleaned, "rev-parse", "--show-toplevel")
 	defer cancel()
 	if ceiling != "" {
 		cmd.Env = boundedDiscoveryEnv(ceiling)
@@ -142,7 +149,7 @@ func DiscoverRootForRegistration(dir, ceiling string) (string, error) {
 // It returns no error and therefore names no path in one, and git's own stderr is
 // captured and discarded, as DiscoverRootForRegistration's is (plan §4.2).
 func discoverParentRepositoryForRegistration(root string) []string {
-	cmd, cancel := gitCommand("-C", root, "rev-parse", "--git-common-dir")
+	cmd, _, cancel := gitCommand("-C", root, "rev-parse", "--git-common-dir")
 	defer cancel()
 	cmd.Env = scrubbedGitEnv()
 	output, err := cmd.Output()
@@ -193,6 +200,89 @@ func parentSpellingsFromCommonDir(from, topLevel, common string) []string {
 	return spellings
 }
 
+// worktreeProbe is everything one `git rev-parse --show-toplevel --git-common-dir`
+// answered about a directory. It is the one bounded probe this package makes about a
+// worktree (ADR-0044 §2); ADR-0047 §2 widens who may read its answer and forbids a
+// second one, so this type is what the answer is read through and there is no other
+// git call about a directory's identity in this package.
+//
+// It carries the directory's own answer and never a decision about it: whether a
+// repository is consented is the recorded table's to say, after git has spoken
+// (ADR-0044 §2).
+type worktreeProbe struct {
+	// answered is whether git ran and gave this directory's own answer. False when git
+	// could not be run at all, when the deadline expired, and when git exited 0 with a
+	// shape this build cannot read — no classification then (ADR-0047 §4), because a
+	// probe that could not answer must not be read as any particular answer.
+	answered bool
+	// repository is whether git answered that the directory is inside a working tree.
+	// False with answered true is git's own refusal of the directory, which is an
+	// answer: it is not a repository.
+	repository bool
+	// topLevel is that working tree's own top level, cleaned and absolute.
+	topLevel string
+	// parent is the spellings of the repository topLevel is a *linked worktree* of,
+	// and nil when it is not one — a main checkout included.
+	parent []string
+}
+
+// probeWorktree asks git, once, what a directory is.
+//
+// The three failure modes are separated because ADR-0047 §4 needs them apart. A
+// deadline and a cancelled call are told from an ordinary non-zero exit by the
+// context, since exec reports both as an *exec.ExitError; a git that cannot be run at
+// all is an *exec.Error; and what is left — git ran, in a directory that exists, and
+// exited non-zero — is git's answer that the directory is in no working tree. That is
+// the same reading DiscoverRootForRegistration already makes when it falls back to the
+// directory as its own root. A directory that is not there is the caller's to rule out
+// before asking, for the reason that function gives.
+//
+// It runs under scrubbedGitEnv, which is load-bearing rather than defensive for the
+// reason discoverLinkedWorktreeForRegistration gives: the unattended paths inherit a
+// session's environment, and a variable that re-points where git looks would make this
+// answer about a repository somewhere else entirely.
+//
+// It fails closed in every direction: an answer this build cannot read is no answer,
+// never a guess. git's own stderr is captured and discarded, so a failure in a
+// directory it cannot read cannot print that directory either (plan §4.2).
+func probeWorktree(dir string) worktreeProbe {
+	cmd, ctx, cancel := gitCommand("-C", dir, "rev-parse", "--show-toplevel", "--git-common-dir")
+	defer cancel()
+	cmd.Env = scrubbedGitEnv()
+	output, err := cmd.Output()
+	switch {
+	case err == nil:
+	case ctx.Err() != nil:
+		// The deadline, or a cancelled call: git gave no answer at all.
+		return worktreeProbe{}
+	case errors.As(err, new(*exec.Error)):
+		// git could not be run — not installed, not executable.
+		return worktreeProbe{}
+	case errors.As(err, new(*exec.ExitError)):
+		// git ran and refused the directory. That is git's answer and not a failure.
+		return worktreeProbe{answered: true}
+	default:
+		return worktreeProbe{}
+	}
+	// `git rev-parse` prints its answers in the order the options are given, so the
+	// first line is the top level and the second the common directory; any other shape
+	// answers nothing rather than being guessed at.
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) != 2 {
+		return worktreeProbe{}
+	}
+	top := filepath.Clean(strings.TrimSpace(lines[0]))
+	if !filepath.IsAbs(top) {
+		return worktreeProbe{}
+	}
+	return worktreeProbe{
+		answered:   true,
+		repository: true,
+		topLevel:   top,
+		parent:     parentSpellingsFromCommonDir(dir, top, strings.TrimSpace(lines[1])),
+	}
+}
+
 // discoverLinkedWorktreeForRegistration answers, in one git call, whether dir sits
 // inside a linked git worktree and — when it does — the worktree's own top level and
 // the spellings of the repository it belongs to.
@@ -219,27 +309,19 @@ func parentSpellingsFromCommonDir(from, topLevel, common string) []string {
 // repository this names against the recorded table before anything is admitted
 // (ADR-0044 §2). It returns no error and therefore names no path in one, and git's
 // own stderr is captured and discarded (plan §4.2).
+//
+// Since ADR-0047 §2 it is a projection of probeWorktree rather than a call of its own,
+// and that is the whole of the change: every input that answered "", nil before still
+// does. §2 widens who may read the probe's answer and forbids a second probe, so this
+// asks the shared one and throws away the two answers it has no way to express — a
+// repository that is nobody's worktree, and a directory git says is in no working tree
+// at all. Classification reads those; registration never needed them.
 func discoverLinkedWorktreeForRegistration(dir string) (topLevel string, parent []string) {
-	cmd, cancel := gitCommand("-C", dir, "rev-parse", "--show-toplevel", "--git-common-dir")
-	defer cancel()
-	cmd.Env = scrubbedGitEnv()
-	output, err := cmd.Output()
-	if err != nil {
+	probe := probeWorktree(dir)
+	if len(probe.parent) == 0 {
 		return "", nil
 	}
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	if len(lines) != 2 {
-		return "", nil
-	}
-	top := filepath.Clean(strings.TrimSpace(lines[0]))
-	if !filepath.IsAbs(top) {
-		return "", nil
-	}
-	spellings := parentSpellingsFromCommonDir(dir, top, strings.TrimSpace(lines[1]))
-	if len(spellings) == 0 {
-		return "", nil
-	}
-	return top, spellings
+	return probe.topLevel, probe.parent
 }
 
 // boundedDiscoveryEnv is the environment a bounded discovery runs git in.

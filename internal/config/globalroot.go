@@ -271,8 +271,10 @@ func (r *Repos) WithinGlobalRoot(cwd string) bool {
 // ADR-0044 §2 allows — at most one probe per directory per attempt — and it is paid in
 // the detached child rather than in the hook the user waits on (plan §4.1.1).
 // Remembering the refusals to avoid re-probing would mean recording state about
-// directories nobody consented, which is the population DG-114 is about and not a
-// question this decision settles.
+// directories nobody consented. ADR-0047 §1 settles what to do about that population
+// without recording anything: classification may look where registration may not, and
+// it still remembers nothing — so this gate is unchanged and registration keeps paying
+// one probe per attempt.
 func (r *Repos) OfferableUnderGlobalRoot(cwd string) bool {
 	// The boundary arm, kept explicit rather than folded away: it is the arm
 	// ADR-0044's Consequences require a future change to name, and it keeps
@@ -528,11 +530,25 @@ func (r *Repos) registerLinkedWorktree(cleaned string, boundary *globalRootEntry
 // than a re-read, exactly as the boundary itself is read above; Register re-reads
 // under the lock, and ADR-0040 §2 decides what happens if the parent is not an entry
 // by then — the relation is refused and the registration is not.
+//
+// ADR-0047 §1 adds a second caller, and it consents nothing either: classification asks
+// this the same question registration does and turns the answer into a counter. That
+// caller runs on a machine with no boundary recorded, which admission cannot reach, so
+// a nil boundary is answered rather than dereferenced — and answered false, since with
+// no boundary the recorded entries are the whole of what this machine consented.
 func (r *Repos) consentsRepository(spellings []string, boundary *globalRootEntry) bool {
 	if entryIDForRoot(r.table.Projects, spellings) != "" {
 		return true
 	}
 	if len(spellings) == 0 {
+		return false
+	}
+	// No boundary recorded: the entry test above is the whole answer. Admission never
+	// reaches this — RegisterUnderGlobalRoot refuses a nil boundary before the second
+	// arm is entered — and the classification caller ADR-0047 §1 admits does, on
+	// precisely the machine the diagnostic exists for: a plain `wake init`, no
+	// boundary, and a worktree of the repository that init consented.
+	if boundary == nil {
 		return false
 	}
 	for _, spelling := range spellings {

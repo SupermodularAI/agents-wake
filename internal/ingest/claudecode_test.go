@@ -877,3 +877,21 @@ func TestClaudeCodePersistsATypedInvocationAndCountsASkippedOne(t *testing.T) {
 		t.Fatalf("ClaudeCode() = %+v, want one skip and no refusal", result)
 	}
 }
+
+// The ordinals reach the caller that keeps the per-source notes. A count that arrived
+// without them would leave the breakdown guessing which source it was about, and the
+// nil this package would forward silently is exactly the failure the assertion catches.
+func TestCloseForwardsTheSkippedSourceOrdinals(t *testing.T) {
+	collecting := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","entrypoint":"cli","message":{"model":"sonnet","id":"msg_1","content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}
+{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","entrypoint":"cli","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`
+	unconsented := `{"uuid":"other-1","sessionId":"session-2","cwd":"/elsewhere","timestamp":"2026-08-13T12:00:00Z","entrypoint":"cli","message":{"model":"sonnet","id":"msg_2","content":[{"type":"tool_use","id":"call-2","name":"Bash"}]}}`
+
+	_, final := walkSources(t, claudecode.Idleness{}, collecting, unconsented)
+
+	if final.SkippedSources != 1 {
+		t.Fatalf("SkippedSources = %d, want 1", final.SkippedSources)
+	}
+	if !slices.Equal(final.SkippedSourceOrdinals, []int{1}) {
+		t.Errorf("SkippedSourceOrdinals = %v, want [1]: the second source is the one that produced nothing", final.SkippedSourceOrdinals)
+	}
+}

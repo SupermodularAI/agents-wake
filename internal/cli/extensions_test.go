@@ -62,6 +62,12 @@ func TestDoctorOutputOnAFreshInstall(t *testing.T) {
 		"parse errors: 0\n" +
 		"skipped transcripts: 0\n" +
 		"collection scope: not recorded\n" +
+		"skipped transcripts not in a repository: not observed\n" +
+		"skipped transcripts in an unconsented repository: not observed\n" +
+		"skipped transcripts in an unregistered worktree of a consented repository: not observed\n" +
+		"skipped transcripts outside the collection window: not observed\n" +
+		"skipped transcripts not classified: not observed\n" +
+		"skipped transcripts holding nothing terminal: not observed\n" +
 		"events written: 0\n" +
 		"records from an earlier schema version: 0\n" +
 		"refused project entries: 0\n" +

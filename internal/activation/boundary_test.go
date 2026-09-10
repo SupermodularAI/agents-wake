@@ -73,7 +73,7 @@ func countWalks(t *testing.T) *int {
 	original := importHistory
 	t.Cleanup(func() { importHistory = original })
 	walks := 0
-	importHistory = func(repos *config.Repos, claudeDir string, destination *store.Store, installed claudecode.Installed, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope, discover *boundaryDiscovery) (int, health.Scan, error) {
+	importHistory = func(repos *config.Repos, claudeDir string, destination *store.Store, installed claudecode.Installed, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope, discover *boundaryDiscovery) (int, health.Scan, skippedByDirectory, error) {
 		walks++
 		return original(repos, claudeDir, destination, installed, stale, idle, scope, discover)
 	}
@@ -461,7 +461,8 @@ func TestInitGlobalRegistersNoRootOfItsOwn(t *testing.T) {
 // are turned away. health.Scan.BoundaryRefused reports collection that was lost;
 // counting these there would report a loss about a directory nobody consented, and
 // would pin a non-zero counter on every machine that has ever run a session outside
-// its boundary. Counting these populations honestly is DG-114's question.
+// its boundary. They are counted by reason in the skipped breakdown instead, where a
+// directory nobody consented reads as exactly that (ADR-0047 §1).
 func TestAScanDoesNotCountADirectoryOutsideTheBoundaryAsARefusal(t *testing.T) {
 	paths := testPaths(t)
 	claudeDir, base := boundaryFixture(t)

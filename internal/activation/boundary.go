@@ -97,8 +97,9 @@ func registerDiscovered(repos *config.Repos, dirs []string, from time.Time) (reg
 			// directories that are not one. Counting it as refused would report
 			// "collection that was lost" about a directory nobody consented, and would
 			// pin a non-zero counter on every machine that has ever run a session
-			// outside its boundary. Counting these populations honestly is DG-114's
-			// question, which this issue blocks.
+			// outside its boundary. They are counted, by reason, in classifySkipped —
+			// as a classification that registers nothing rather than as a refusal,
+			// because a refusal here is the boundary working (ADR-0047 §1, §2).
 			//
 			// It is this sentinel and never ErrOutsideGlobalRoot, which is the narrower
 			// fact that a discovered root left the bound its own consent rests on — a
@@ -139,6 +140,14 @@ func registerDiscovered(repos *config.Repos, dirs []string, from time.Time) (reg
 // not a property of the source but of the work done, so the two walks' contributions
 // are summed. Taking the second walk's alone would report zero events written for a
 // scan that wrote plenty on the first, and doctor would say "collects zero".
+// The skipped breakdown follows the surviving walk's counters for the same reason they
+// are replaced wholesale: a breakdown of one walk printed beside another walk's total
+// would be two answers on one screen, and the six reasons would not sum to the number
+// above them. It is computed once, here, after the walks — never inside one — so no git
+// call reaches the derivation path (ADR-0019 §1, ADR-0044 §4, ADR-0047 §3). A walk that
+// returned an error is left unclassified, which is honest: it did not finish, so it
+// measured nothing.
+//
 // The two stale-spool counters are set here rather than inside either walk, for the
 // reason the paragraph above gives: a walk's counters describe the source it read, and
 // these describe the store it wrote into. Setting them at the one return point is also
@@ -221,12 +230,15 @@ func rebuildStaleSpool(events *store.Store, scope collectionScope) (found int, r
 
 func scanBoundaryWalks(paths config.Paths, repos *config.Repos, claudeDir string, events *store.Store, installed claudecode.Installed, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope) (int, health.Scan, error) {
 	discovery := newBoundaryDiscovery(repos)
-	written, scan, err := importHistory(repos, claudeDir, events, installed, stale, idle, scope, discovery)
+	written, scan, skipped, err := importHistory(repos, claudeDir, events, installed, stale, idle, scope, discovery)
 	if err != nil {
+		// Unclassified on the way out, and correctly: the walk did not finish, so it
+		// measured nothing to classify and doctor reads the breakdown as "not observed".
 		return written, scan, err
 	}
 	pending := discovery.pending()
 	if len(pending) == 0 {
+		classifySkipped(repos, skipped, &scan)
 		return written, scan, nil
 	}
 
@@ -234,6 +246,7 @@ func scanBoundaryWalks(paths config.Paths, repos *config.Repos, claudeDir string
 	registered, gone, refused := registerDiscovered(repos, pending, time.Now().UTC())
 	scan.BoundarySkipped, scan.BoundaryRefused = gone, refused
 	if registered == 0 {
+		classifySkipped(repos, skipped, &scan)
 		return written, scan, nil
 	}
 
@@ -253,11 +266,14 @@ func scanBoundaryWalks(paths config.Paths, repos *config.Repos, claudeDir string
 	// command's discovery picks it up, and the skip counter is what reports the gap
 	// meanwhile — the same fallibility ADR-0036 §3 puts that counter there for. Building
 	// a second set here would pay for discovery twice on the hook-fired path (ADR-0016).
-	second, secondScan, err := importHistory(reopened, claudeDir, events, installed, stale, idle, scope, nil)
+	second, secondScan, secondSkipped, err := importHistory(reopened, claudeDir, events, installed, stale, idle, scope, nil)
 	if err != nil {
 		return written + second, scan, err
 	}
 	secondScan.EventsWritten += scan.EventsWritten
 	secondScan.BoundarySkipped, secondScan.BoundaryRefused = gone, refused
+	// The second walk's grouping, against the table the second walk ran under. The
+	// first walk's is discarded here exactly as its counters are.
+	classifySkipped(reopened, secondSkipped, &secondScan)
 	return written + second, secondScan, nil
 }

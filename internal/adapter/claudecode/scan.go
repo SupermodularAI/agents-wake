@@ -547,10 +547,14 @@ func (s *Scan) Close() Result {
 	result.AmbiguousSkillRuns = ambiguous
 	result.Pending = len(s.pending)
 	result.OpenSessions = s.sessions.OpenSessions(s.stale)
-	for _, tally := range s.sources {
-		if !tally.productive() {
-			result.SkippedSources++
+	// Ascending by construction: s.sources is indexed by the ordinal Read claimed, so
+	// ranging it is ranging the ordinals in the order they were assigned.
+	for ordinal, tally := range s.sources {
+		if tally.productive() {
+			continue
 		}
+		result.SkippedSources++
+		result.SkippedSourceOrdinals = append(result.SkippedSourceOrdinals, ordinal)
 	}
 	return result
 }
