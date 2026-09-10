@@ -425,13 +425,27 @@ func (s collectionScope) health() health.Scope {
 // (ADR-0032 §5). Registering here would judge two events of one scan against two
 // different tables. It is nil when there is nothing to collect for, and observe treats
 // a nil collector as a no-op.
-func resolverFor(repos *config.Repos, scope collectionScope, discover *boundaryDiscovery) claudecode.Resolver {
+//
+// notes is where the working directory this resolver declined is noted against the
+// source being read, and noting is all that happens there too: no git, no os.Stat, no
+// registration on this path (ADR-0019 §1). Noting is not classifying — the
+// classification runs once, after the walk, over the distinct directories these notes
+// name (ADR-0047 §3). Every decline is recorded, the collection-window one included,
+// because that population is a reason of its own and folding it into any other would
+// leave the breakdown unable to sum to the count it explains. It is nil-safe, like
+// discover.
+func resolverFor(repos *config.Repos, scope collectionScope, discover *boundaryDiscovery, notes *skippedNotes) claudecode.Resolver {
 	return func(cwd string, at time.Time) (record.Hash, bool) {
 		identity, err := repos.Identify(cwd)
 		if err != nil || !identity.Matched {
 			if err == nil {
 				discover.observe(cwd)
 			}
+			// Recorded even when Identify refused the spelling: a working directory this
+			// build cannot read is one the classification cannot answer about either, and
+			// ADR-0047 §4 wants that unclassified rather than folded into the nearest
+			// bucket.
+			notes.decline(cwd)
 			return record.Hash(identity.ID), false
 		}
 		if scope == wholeHistory {
@@ -440,7 +454,14 @@ func resolverFor(repos *config.Repos, scope collectionScope, discover *boundaryD
 		// An event exactly at the boundary is inside it: the boundary is the instant
 		// collection began, not the instant after.
 		from := repos.CollectsFrom(identity.ID)
-		return record.Hash(identity.ID), !at.Before(from)
+		if at.Before(from) {
+			// Consented, and outside the window collection began at (ADR-0024, ADR-0025).
+			// A different skip from every other one, and the counter DG-110 taught doctor
+			// to pair with the scope is the one it explains.
+			notes.decline(cwd)
+			return record.Hash(identity.ID), false
+		}
+		return record.Hash(identity.ID), true
 	}
 }
 
@@ -459,10 +480,18 @@ var importHistory = ingestHistory
 // rather than an error that breaks the command (plan §4.3). Swallowed and
 // uncounted, though, they are indistinguishable from a machine with no history —
 // which is the confusion ADR-0010 asks doctor to end.
-func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Store, installed claudecode.Installed, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope, discover *boundaryDiscovery) (int, health.Scan, error) {
+//
+// The third return value is the walk's skipped transcripts grouped by the working
+// directory each was declined for. It is not classified here: classifying inside the
+// walk would put a git call on the derivation path (ADR-0019 §1, ADR-0044 §4), and
+// classifying the first walk of a two-walk scan would produce a breakdown of counters
+// the second walk goes on to replace. The caller classifies once, against the walk
+// whose counters survive (ADR-0047 §3).
+func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Store, installed claudecode.Installed, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope, discover *boundaryDiscovery) (int, health.Scan, skippedByDirectory, error) {
 	written := 0
 	scan := health.Scan{At: time.Now().UTC(), RefusedProjects: repos.DroppedEntries()}
-	resolve := resolverFor(repos, scope, discover)
+	notes := &skippedNotes{}
+	resolve := resolverFor(repos, scope, discover, notes)
 	// One scan for the whole walk, not one per transcript. Claude Code writes one
 	// session id into several files — the parent's and one per subagent — so a reader
 	// whose session state died with each file judged every session from a partial view:
@@ -496,6 +525,9 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 			return nil
 		}
 		defer file.Close()
+		// Immediately before the Read that claims the same ordinal, and exactly once per
+		// Read: that adjacency is the whole of what keeps the two ordinal sequences one.
+		notes.openSource()
 		result, ingestErr := transcripts.Read(file)
 		if ingestErr != nil {
 			scan.ParseErrors++
@@ -535,14 +567,18 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 		// would judge a session closed from a partial view — permanently, since ADR-0015
 		// rejects upsert and ADR-0004 deduplicates the correction away. Deferring to the
 		// next scan costs a slower scan and never a wrong record.
-		return written, scan, err
+		//
+		// A walk that did not finish classified nothing either, so the grouping goes
+		// back empty and doctor reads the breakdown as "not observed" rather than as a
+		// row of zeroes nobody measured (ADR-0046).
+		return written, scan, skippedByDirectory{}, err
 	}
 	// Resolved once, over the union of every transcript the walk read. With no projects
 	// directory at all this read no source, so it derives nothing and store.Append on
 	// an empty slice creates no spool — the same clean zero that arm reported before.
 	final, closeErr := transcripts.Close()
 	if closeErr != nil {
-		return written, scan, closeErr
+		return written, scan, skippedByDirectory{}, closeErr
 	}
 	// A subagent transcript that declares no usable name is refused at the closure
 	// boundary, not while its own lines are read (ADR-0036 §2, ADR-0015), so leaving it
@@ -590,7 +626,7 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 	scan.Skipped = final.SkippedSources
 	scan.EventsWritten += final.Written
 	written += final.Written
-	return written, scan, nil
+	return written, scan, notes.group(final.SkippedSourceOrdinals), nil
 }
 
 // DiscoveryScope resolves which Claude Code discovery paths cwd may read.
