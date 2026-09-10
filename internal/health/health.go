@@ -211,6 +211,11 @@ type Scan struct {
 	// exists (ADR-0032 Consequences). It is an honest zero, not lost collection: there
 	// is nothing left there to read, so it is deliberately not one of Diagnose's
 	// "collects nothing" reasons — the same reason Skipped is not.
+	//
+	// Only directories the boundary encloses reach it. A vanished directory outside the
+	// boundary fails ADR-0044 §1's probe before consent is decided — git cannot answer
+	// about a directory that is not there — so it is turned away as not admitted and
+	// skipped without being counted at all.
 	BoundarySkipped int `json:"boundary_skipped"`
 	// BoundaryRefused counts working directories a scan offered to registration under
 	// the recorded global root and could not register — most often a root that nests
