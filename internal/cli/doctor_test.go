@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -287,7 +289,15 @@ func TestDoctorOutputNamesNoPathOrLabel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
-	if recordErr := health.New(paths.HealthFile).RecordScan(health.Scan{At: time.Now().UTC(), Transcripts: 2}); recordErr != nil {
+	// The breakdown is recorded non-zero, so the no-slash and no-marker assertions
+	// below cover the six lines it adds rather than passing on the "not observed"
+	// rendering that a scan without it would print.
+	if recordErr := health.New(paths.HealthFile).RecordScan(health.Scan{
+		At: time.Now().UTC(), Transcripts: 2, Skipped: 6,
+		SkippedNotARepository: 1, SkippedUnconsentedRepository: 1, SkippedUnregisteredWorktree: 1,
+		SkippedOutsideCollectionWindow: 1, SkippedUnclassified: 1, SkippedNothingTerminal: 1,
+		SkippedClassified: true,
+	}); recordErr != nil {
 		t.Fatalf("RecordScan() error = %v", recordErr)
 	}
 
@@ -544,4 +554,174 @@ func TestDoctorShortSaysWhatTheCommandShows(t *testing.T) {
 		return
 	}
 	t.Fatal("no doctor command is registered")
+}
+
+// Ticket AC 1, at the surface: the count above splits into six lines, and the third
+// is the one this ticket exists for. The state word stays where it was — the
+// breakdown reports the loss and does not blind the state.
+func TestDoctorSplitsSkippedTranscriptsByReason(t *testing.T) {
+	paths := isolate(t)
+	if err := health.New(paths.HealthFile).RecordScan(health.Scan{
+		At:                             time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC),
+		Transcripts:                    6,
+		Skipped:                        21,
+		SkippedNotARepository:          1,
+		SkippedUnconsentedRepository:   2,
+		SkippedUnregisteredWorktree:    3,
+		SkippedOutsideCollectionWindow: 4,
+		SkippedUnclassified:            5,
+		SkippedNothingTerminal:         6,
+		SkippedClassified:              true,
+	}); err != nil {
+		t.Fatalf("RecordScan() error = %v", err)
+	}
+
+	out, _, err := runSplit(t, "doctor")
+	if err != nil {
+		t.Fatalf("doctor error = %v", err)
+	}
+
+	for key, want := range map[string]string{
+		"skipped transcripts":                                                       "21",
+		"skipped transcripts not in a repository":                                   "1",
+		"skipped transcripts in an unconsented repository":                          "2",
+		"skipped transcripts in an unregistered worktree of a consented repository": "3",
+		"skipped transcripts outside the collection window":                         "4",
+		"skipped transcripts not classified":                                        "5",
+		"skipped transcripts holding nothing terminal":                              "6",
+	} {
+		if got := lineValue(t, out, key); got != want {
+			t.Errorf("%q = %q, want %q:\n%s", key, got, want, out)
+		}
+	}
+	if got := lineValue(t, out, "integration"); got != "collects zero" {
+		t.Errorf("integration = %q, want \"collects zero\"; the breakdown reports the loss and never moves the word:\n%s", got, out)
+	}
+}
+
+// Ticket AC 3: the two readings must not be confusable. A scan that never classified
+// has no zeroes to report, and the count above it is unchanged — so a reader can tell
+// "these are all zero" from "nobody measured these" (ADR-0046).
+func TestDoctorReadsAnUnclassifiedBreakdownAsNotObserved(t *testing.T) {
+	paths := isolate(t)
+	if err := health.New(paths.HealthFile).RecordScan(health.Scan{
+		At:      time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC),
+		Skipped: 4,
+	}); err != nil {
+		t.Fatalf("RecordScan() error = %v", err)
+	}
+
+	out, _, err := runSplit(t, "doctor")
+	if err != nil {
+		t.Fatalf("doctor error = %v", err)
+	}
+
+	for _, key := range skippedReasonKeys {
+		if got := lineValue(t, out, key); got != "not observed" {
+			t.Errorf("%q = %q, want \"not observed\":\n%s", key, got, out)
+		}
+	}
+	if got := lineValue(t, out, "skipped transcripts"); got != "4" {
+		t.Errorf("skipped transcripts = %q, want \"4\"; the count above is unaffected:\n%s", got, out)
+	}
+}
+
+// skippedReasonKeys is the six lines, spelled once so a test asserting on all of them
+// cannot drift from a test asserting on one.
+var skippedReasonKeys = []string{
+	"skipped transcripts not in a repository",
+	"skipped transcripts in an unconsented repository",
+	"skipped transcripts in an unregistered worktree of a consented repository",
+	"skipped transcripts outside the collection window",
+	"skipped transcripts not classified",
+	"skipped transcripts holding nothing terminal",
+}
+
+// hostileDirectoryNames is doctor's hostile-payload corpus for the skipped breakdown.
+// ADR-0007 requires one per new input shape, and DG-114 gives doctor a new one: the
+// working directory of a transcript nothing collected. Every value here is a directory
+// a user can really create, chosen to break a different thing — a line the output
+// format would swallow, an escape sequence a terminal would act on, a format verb, a
+// value that impersonates one of doctor's own keys.
+var hostileDirectoryNames = []string{
+	"plain-marker",
+	"marker with spaces",
+	"marker\nskipped transcripts: 999",
+	"marker\x1b[31mred",
+	"marker%s%d",
+	"marker\"quoted\"",
+	"marker'squoted'",
+	"marker`tick`",
+	"marker\ttab",
+	strings.Repeat("marker", 200),
+}
+
+// Ticket AC 2, the hostile-payload half. The breakdown is counts, so no directory of a
+// skipped transcript may reach the output — not the name, not the path it sits at, and
+// not a line the name smuggled in.
+func TestDoctorNamesNoDirectoryOfASkippedTranscript(t *testing.T) {
+	for index, name := range hostileDirectoryNames {
+		t.Run(strconv.Itoa(index), func(t *testing.T) {
+			isolate(t)
+			claudeDir := claudeHome(t)
+			base := t.TempDir()
+			skipped := filepath.Join(base, name)
+			if err := os.MkdirAll(skipped, 0o700); err != nil {
+				// The corpus is about what doctor does with a directory that exists, so a
+				// name the local filesystem refuses is skipped rather than failed.
+				t.Skipf("the filesystem refuses %q: %v", name, err)
+			}
+			root := filepath.Join(t.TempDir(), "repo")
+			if err := os.MkdirAll(root, 0o700); err != nil {
+				t.Fatalf("MkdirAll() root error = %v", err)
+			}
+			t.Chdir(root)
+			if out, initErr := run(t, "init"); initErr != nil {
+				t.Fatalf("init error = %v: %s", initErr, out)
+			}
+			// JSON-encoded rather than concatenated: a directory holding a quote or a
+			// newline would otherwise produce a transcript the reader could not parse,
+			// and the test would pass on a file nothing ever read.
+			encoded, err := json.Marshal(skipped)
+			if err != nil {
+				t.Fatalf("Marshal() error = %v", err)
+			}
+			transcriptDir := filepath.Join(claudeDir, "projects", "session")
+			if err := os.MkdirAll(transcriptDir, 0o700); err != nil {
+				t.Fatalf("MkdirAll() transcript error = %v", err)
+			}
+			transcript := `{"uuid":"entry-1","sessionId":"session-1","cwd":` + string(encoded) + `,"timestamp":"2026-08-17T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}
+{"uuid":"entry-2","sessionId":"session-1","cwd":` + string(encoded) + `,"timestamp":"2026-08-17T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`
+			if err := os.WriteFile(filepath.Join(transcriptDir, "session.jsonl"), []byte(transcript), 0o600); err != nil {
+				t.Fatalf("WriteFile() transcript error = %v", err)
+			}
+			if _, _, err := runSplit(t, "ingest"); err != nil {
+				t.Fatalf("ingest error = %v", err)
+			}
+
+			out, _, err := runSplit(t, "doctor")
+			if err != nil {
+				t.Fatalf("doctor error = %v", err)
+			}
+
+			if got := lineValue(t, out, "skipped transcripts"); got != "1" {
+				t.Fatalf("skipped transcripts = %q, want \"1\"; the fixture no longer reaches the breakdown:\n%s", got, out)
+			}
+			for _, secret := range []string{name, skipped, base} {
+				if strings.Contains(out, secret) {
+					t.Errorf("output carries %q:\n%s", secret, out)
+				}
+			}
+			// The strongest form: nothing in this output has a legitimate slash in it.
+			if strings.Contains(out, "/") {
+				t.Errorf("output carries a path separator:\n%s", out)
+			}
+			// And no injected line survived: every line is still one `key: value`.
+			for line := range strings.SplitSeq(strings.TrimSuffix(out, "\n"), "\n") {
+				if !strings.Contains(line, ": ") {
+					t.Errorf("output line %q is not a key and a value; a directory name became a line of its own:\n%s", line, out)
+				}
+			}
+		})
+	}
 }

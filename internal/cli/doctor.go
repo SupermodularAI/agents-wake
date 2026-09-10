@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"strconv"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -55,6 +56,25 @@ type counterLine struct {
 func writeCounters(out io.Writer, lines []counterLine) error {
 	for _, line := range lines {
 		if _, err := fmt.Fprintf(out, "%s: %d\n", line.key, line.value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeReasons prints one group of counter lines that read a word rather than a number
+// when no scan measured them.
+//
+// It holds no decision: which lines these are, and whether they were observed, are
+// health's (ADR-0001, plan §6.2). It is the same shape as the `last scan: never` line
+// above — a rendering choice made from a flag the layer below computed.
+func writeReasons(out io.Writer, lines []counterLine, observed bool) error {
+	for _, line := range lines {
+		value := health.SkippedUnobserved
+		if observed {
+			value = strconv.Itoa(line.value)
+		}
+		if _, err := fmt.Fprintf(out, "%s: %s\n", line.key, value); err != nil {
 			return err
 		}
 	}
@@ -135,6 +155,23 @@ func writeCounters(out io.Writer, lines []counterLine) error {
 // word is health.Diagnose's and not this function's, the same way `store rebuild` is
 // printed here and decided there: internal/cli only parses and prints (ADR-0001,
 // plan §6.2).
+//
+// The six skipped-reason lines sit *after* the collection-scope line rather than
+// between it and `skipped transcripts`, because DG-110's adjacency is the reason that
+// line exists at all and six lines between them would break it. The whole skipped
+// family is then contiguous. The third of them — a transcript from a linked worktree of
+// a repository this machine consented — is the line the breakdown exists for: on the
+// machine where the problem was found it was 223 of 1,422, nine days of collection the
+// user had asked for and did not get, invisible because one integer summed three
+// populations. It deliberately does not move the state word, for the reason
+// health.Diagnose argues about every standing fact: every scan re-classifies the same
+// directory, so a word following it could never change back. This line is what reports
+// the loss instead.
+//
+// `not observed` is never the same reading as `0` (ADR-0046): the six lines say
+// "nobody measured these" when no scan classified, and a real zero only when one did.
+// No key contains a slash — TestDoctorOutputNamesNoPathOrLabel reads any slash in this
+// output as a leaked path, and that check is worth more than the punctuation.
 func writeDiagnosis(out io.Writer, paths config.Paths, claudeDir string) error {
 	report, readErr := health.New(paths.HealthFile).Read()
 
@@ -175,6 +212,17 @@ func writeDiagnosis(out io.Writer, paths config.Paths, claudeDir string) error {
 		return err
 	}
 	if _, err := fmt.Fprintf(out, "collection scope: %s\n", diagnosis.Scope); err != nil {
+		return err
+	}
+	skipped := health.SkippedByReason(report.Scan)
+	if err := writeReasons(out, []counterLine{
+		{"skipped transcripts not in a repository", skipped.NotARepository},
+		{"skipped transcripts in an unconsented repository", skipped.UnconsentedRepository},
+		{"skipped transcripts in an unregistered worktree of a consented repository", skipped.UnregisteredWorktree},
+		{"skipped transcripts outside the collection window", skipped.OutsideCollectionWindow},
+		{"skipped transcripts not classified", skipped.Unclassified},
+		{"skipped transcripts holding nothing terminal", skipped.NothingTerminal},
+	}, skipped.Observed); err != nil {
 		return err
 	}
 	if err := writeCounters(out, []counterLine{
