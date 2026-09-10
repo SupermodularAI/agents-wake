@@ -205,8 +205,14 @@ func TestRegisterUnderGlobalRootRefusesADirectoryOutsideTheBoundary(t *testing.T
 	r := openRepos(t, p)
 	setGlobalRoot(t, r, boundary)
 
-	if _, err := r.RegisterUnderGlobalRoot(outside, time.Time{}); !errors.Is(err, ErrOutsideGlobalRoot) {
-		t.Errorf("RegisterUnderGlobalRoot(a directory outside the boundary) = %v, want ErrOutsideGlobalRoot", err)
+	_, err := r.RegisterUnderGlobalRoot(outside, time.Time{})
+	if !errors.Is(err, ErrNotAnAdmittedWorktree) {
+		t.Errorf("RegisterUnderGlobalRoot(a directory outside the boundary) = %v, want ErrNotAnAdmittedWorktree", err)
+	}
+	// The sentinel a scan skips rather than counts. This directory was never
+	// consented, so nothing was lost by turning it away.
+	if errors.Is(err, ErrOutsideGlobalRoot) {
+		t.Errorf("the refusal is also ErrOutsideGlobalRoot; a scan would count a directory nobody consented as collection that was lost")
 	}
 }
 
@@ -221,8 +227,8 @@ func TestRegisterUnderGlobalRootRefusesTheBoundaryItself(t *testing.T) {
 	r := openRepos(t, p)
 	setGlobalRoot(t, r, boundary)
 
-	if _, err := r.RegisterUnderGlobalRoot(boundary, time.Time{}); !errors.Is(err, ErrOutsideGlobalRoot) {
-		t.Errorf("RegisterUnderGlobalRoot(the boundary itself) = %v, want ErrOutsideGlobalRoot", err)
+	if _, err := r.RegisterUnderGlobalRoot(boundary, time.Time{}); !errors.Is(err, ErrNotAnAdmittedWorktree) {
+		t.Errorf("RegisterUnderGlobalRoot(the boundary itself) = %v, want ErrNotAnAdmittedWorktree", err)
 	}
 }
 
@@ -250,8 +256,15 @@ func TestRegisterUnderGlobalRootRefusesARootDiscoveredOutsideTheBoundary(t *test
 	setGlobalRoot(t, r, boundary)
 	before := readFileOrFail(t, p.ProjectsFile)
 
-	if _, err := r.RegisterUnderGlobalRoot(project, time.Time{}); !errors.Is(err, ErrOutsideGlobalRoot) {
+	_, err := r.RegisterUnderGlobalRoot(project, time.Time{})
+	if !errors.Is(err, ErrOutsideGlobalRoot) {
 		t.Errorf("RegisterUnderGlobalRoot(a directory whose discovered root is outside the boundary) = %v, want ErrOutsideGlobalRoot", err)
+	}
+	// The sentinel a scan counts. The user consented this directory by naming the
+	// boundary that encloses it, and the refusal means its sessions are carried by no
+	// number — collection that was lost, not the boundary working.
+	if errors.Is(err, ErrNotAnAdmittedWorktree) {
+		t.Errorf("the refusal is also ErrNotAnAdmittedWorktree; a scan would skip a root that escaped the boundary instead of counting it")
 	}
 	if after := readFileOrFail(t, p.ProjectsFile); after != before {
 		t.Errorf("a root the boundary does not enclose was recorded:\n%s", after)
@@ -276,8 +289,12 @@ func TestRegisterUnderGlobalRootRefusesADirectoryThatSymlinksOutsideTheBoundary(
 	setGlobalRoot(t, r, boundary)
 	before := readFileOrFail(t, p.ProjectsFile)
 
-	if _, err := r.RegisterUnderGlobalRoot(link, time.Time{}); !errors.Is(err, ErrOutsideGlobalRoot) {
+	_, err := r.RegisterUnderGlobalRoot(link, time.Time{})
+	if !errors.Is(err, ErrOutsideGlobalRoot) {
 		t.Errorf("RegisterUnderGlobalRoot(a link out of the boundary) = %v, want ErrOutsideGlobalRoot", err)
+	}
+	if errors.Is(err, ErrNotAnAdmittedWorktree) {
+		t.Errorf("the refusal is also ErrNotAnAdmittedWorktree; a scan would skip a root that escaped the boundary instead of counting it")
 	}
 	if after := readFileOrFail(t, p.ProjectsFile); after != before {
 		t.Errorf("a root outside the boundary was recorded through a link inside it:\n%s", after)
@@ -805,8 +822,8 @@ func TestRegisterUnderGlobalRootRefusesAWorktreeWhoseRepositoryIsNotConsented(t 
 	r := openRepos(t, p)
 	setGlobalRoot(t, r, boundary)
 
-	if _, err := r.RegisterUnderGlobalRoot(worktree, from); !errors.Is(err, ErrOutsideGlobalRoot) {
-		t.Errorf("RegisterUnderGlobalRoot(a worktree of an unconsented repository) error = %v, want ErrOutsideGlobalRoot", err)
+	if _, err := r.RegisterUnderGlobalRoot(worktree, from); !errors.Is(err, ErrNotAnAdmittedWorktree) {
+		t.Errorf("RegisterUnderGlobalRoot(a worktree of an unconsented repository) error = %v, want ErrNotAnAdmittedWorktree", err)
 	}
 	if entries := recordedEntries(t, p); len(entries) != 0 {
 		t.Errorf("projects.json holds %d entries, want none", len(entries))
@@ -826,8 +843,8 @@ func TestRegisterUnderGlobalRootRefusesAGitRepositoryOutsideTheBoundaryThatIsNot
 	r := openRepos(t, p)
 	setGlobalRoot(t, r, boundary)
 
-	if _, err := r.RegisterUnderGlobalRoot(repo, from); !errors.Is(err, ErrOutsideGlobalRoot) {
-		t.Errorf("RegisterUnderGlobalRoot(a main checkout outside the boundary) error = %v, want ErrOutsideGlobalRoot", err)
+	if _, err := r.RegisterUnderGlobalRoot(repo, from); !errors.Is(err, ErrNotAnAdmittedWorktree) {
+		t.Errorf("RegisterUnderGlobalRoot(a main checkout outside the boundary) error = %v, want ErrNotAnAdmittedWorktree", err)
 	}
 	if entries := recordedEntries(t, p); len(entries) != 0 {
 		t.Errorf("projects.json holds %d entries, want none", len(entries))
@@ -884,8 +901,11 @@ func TestRegisterUnderGlobalRootRefusesAWorktreeWhoseCeilingBoundDiscoveryDisagr
 	mustRegisterUnderGlobalRoot(t, r, main, from)
 
 	t.Setenv("GIT_CEILING_DIRECTORIES", worktree)
-	if _, err := r.RegisterUnderGlobalRoot(sub, from); !errors.Is(err, ErrOutsideGlobalRoot) {
-		t.Errorf("RegisterUnderGlobalRoot(a worktree subdirectory under a hostile ceiling) error = %v, want ErrOutsideGlobalRoot", err)
+	// ErrNotAnAdmittedWorktree rather than ErrOutsideGlobalRoot: the ceiling stops the
+	// probe before it can name a worktree at all, so this directory is indistinguishable
+	// from one that is not a worktree and consent is never decided for it.
+	if _, err := r.RegisterUnderGlobalRoot(sub, from); !errors.Is(err, ErrNotAnAdmittedWorktree) {
+		t.Errorf("RegisterUnderGlobalRoot(a worktree subdirectory under a hostile ceiling) error = %v, want ErrNotAnAdmittedWorktree", err)
 	}
 	for _, entry := range recordedEntries(t, p) {
 		if entry.Root == sub {

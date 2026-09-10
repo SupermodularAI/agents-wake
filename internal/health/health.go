@@ -206,17 +206,28 @@ type Scan struct {
 	// same transcript and re-counts the same pairs, so a state word following it could
 	// never change back.
 	OutOfOrderPairs int `json:"out_of_order_pairs"`
-	// BoundarySkipped counts directories a scan discovered under the recorded global
-	// root and did not register because the directory no longer exists (ADR-0032
-	// Consequences). It is an honest zero, not lost collection: there is nothing left
-	// there to read, so it is deliberately not one of Diagnose's "collects nothing"
-	// reasons — the same reason Skipped is not.
+	// BoundarySkipped counts working directories a scan offered to registration under
+	// the recorded global root and did not register because the directory no longer
+	// exists (ADR-0032 Consequences). It is an honest zero, not lost collection: there
+	// is nothing left there to read, so it is deliberately not one of Diagnose's
+	// "collects nothing" reasons — the same reason Skipped is not.
 	BoundarySkipped int `json:"boundary_skipped"`
-	// BoundaryRefused counts directories a scan discovered under the recorded global
-	// root and could not register — most often a root that nests with one already
-	// recorded (ADR-0019 §5), and otherwise a discovered root the boundary does not
-	// enclose. The sessions in it were readable and no number carries them, so this is
-	// collection that was lost and the counter is what reports it (plan §3.3, §12).
+	// BoundaryRefused counts working directories a scan offered to registration under
+	// the recorded global root and could not register — most often a root that nests
+	// with one already recorded (ADR-0019 §5), and otherwise a discovered root that
+	// left the bound its own admission rests on: the boundary, for a directory the
+	// boundary encloses, and the worktree the probe named, for a linked worktree of a
+	// consented repository (ADR-0044 §1). The sessions in it were readable and no
+	// number carries them, so this is collection that was lost and the counter is what
+	// reports it (plan §3.3, §12).
+	//
+	// What it does not count is the directory that is simply not admitted. Since
+	// ADR-0044 §1 the offered set is every working directory no recorded entry matched
+	// rather than only those under the boundary, and the ordinary answer for one that
+	// is not a linked worktree of a consented repository is a refusal about a directory
+	// nobody consented — no loss, and counting it here would pin this counter non-zero
+	// on every machine that has ever run a session outside its boundary. Counting that
+	// population honestly is DG-114's question.
 	//
 	// It is deliberately not one of Diagnose's "collects nothing" reasons, and that
 	// exclusion is argued where the arm is: every scan re-observes the same directory

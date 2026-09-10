@@ -613,3 +613,56 @@ func TestAScanRegistersALinkedWorktreeOutsideTheBoundaryAndRollsItUpToItsReposit
 		}
 	}
 }
+
+// The other half of the pair, and the half a widened candidate set can lose silently.
+//
+// Since ADR-0044 §1 every unmatched working directory is offered to registration, so
+// the ordinary answer for the many that are not linked worktrees is a refusal a scan
+// must not count. That skip may not swallow this case: a directory the boundary
+// strictly encloses — consented by the user naming the boundary — whose discovered
+// root escapes it. Register records the symlink-resolved root, so a directory inside
+// the boundary that physically lives outside it is exactly that case, and the
+// GIT_CEILING_DIRECTORIES colon hole is the other route to it.
+//
+// The sessions in it were readable and no number carries them, which is what
+// health.Scan.BoundaryRefused is for (plan §3.3, §12) and what keeps `doctor` able to
+// tell "collects nothing" from "collects zero".
+func TestARegistrationWhoseDiscoveredRootEscapesTheBoundaryIsCountedAsARefusal(t *testing.T) {
+	paths := testPaths(t)
+	claudeDir, base := boundaryFixture(t)
+	elsewhere := filepath.Join(realTempDir(t), "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	link := filepath.Join(base, "project")
+	if err := os.Symlink(elsewhere, link); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+	// A consented directory too, so the machine is collecting rather than merely not
+	// broken and the counter below is about the escaping root.
+	inside := filepath.Join(base, "consented")
+	if err := os.MkdirAll(inside, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if _, err := InitGlobal(paths, base, claudeDir, testExecutable(t), false); err != nil {
+		t.Fatalf("InitGlobal() error = %v", err)
+	}
+	transcriptAt(t, claudeDir, "session-in", inside, time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC))
+	transcriptAt(t, claudeDir, "session-link", link, time.Date(2026, 8, 13, 12, 5, 0, 0, time.UTC))
+
+	if _, err := Ingest(paths, claudeDir); err != nil {
+		t.Fatalf("Ingest() error = %v; a refused registration must be counted, not fatal", err)
+	}
+	counters := scanCounters(t, paths)
+	if counters.BoundaryRefused != 1 {
+		t.Errorf("BoundaryRefused = %d, want 1; a root that escaped the boundary is collection that was lost", counters.BoundaryRefused)
+	}
+	if counters.EventsWritten == 0 {
+		t.Errorf("EventsWritten = 0; the fixture is not collecting and the counter above means nothing")
+	}
+	for _, root := range recordedRoots(t, paths) {
+		if root == elsewhere || root == link {
+			t.Errorf("an entry was recorded for %q, a root outside the boundary reached through a link inside it", root)
+		}
+	}
+}

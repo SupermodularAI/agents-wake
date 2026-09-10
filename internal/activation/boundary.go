@@ -77,8 +77,9 @@ func (d *boundaryDiscovery) pending() []string {
 //
 // Each failure that describes collection this machine lost is also counted, because a
 // silent refusal is indistinguishable from a machine with nothing to discover. The one
-// that describes no loss is not: a directory the two admission arms turn away was never
-// consented and was never going to be collected (see the case below).
+// that describes no loss is not: a directory the second arm does not admit — not a
+// linked worktree, or a worktree of a repository nobody consented — was never going to
+// be collected (see the case below).
 func registerDiscovered(repos *config.Repos, dirs []string, from time.Time) (registered, gone, refused int) {
 	for _, dir := range dirs {
 		_, err := repos.RegisterUnderGlobalRoot(dir, from)
@@ -89,7 +90,7 @@ func registerDiscovered(repos *config.Repos, dirs []string, from time.Time) (reg
 			// An honest zero: there is nothing left there to read, so nothing was lost
 			// by not registering it.
 			gone++
-		case errors.Is(err, config.ErrOutsideGlobalRoot):
+		case errors.Is(err, config.ErrNotAnAdmittedWorktree):
 			// The boundary working, not a failure. ADR-0044 §1 widened the candidate set
 			// to every unmatched directory, because where a linked worktree lives cannot
 			// be decided from its path — so this is now the ordinary answer for the many
@@ -98,12 +99,18 @@ func registerDiscovered(repos *config.Repos, dirs []string, from time.Time) (reg
 			// pin a non-zero counter on every machine that has ever run a session
 			// outside its boundary. Counting these populations honestly is DG-114's
 			// question, which this issue blocks.
+			//
+			// It is this sentinel and never ErrOutsideGlobalRoot, which is the narrower
+			// fact that a discovered root left the bound its own consent rests on — a
+			// directory the user did consent, carried by no number. Skipping that one
+			// too would hide the case ADR-0044 was written to end.
 			continue
 		default:
-			// A NestedRootError, a boundary that moved out from under the directory, an
-			// entry this build could not read back. The sessions were readable and no
-			// number carries them, which is why the counter joins doctor's "collects
-			// nothing" arm.
+			// A NestedRootError, a discovered root that escaped the boundary or the
+			// worktree the probe named, a boundary that moved out from under the
+			// directory, an entry this build could not read back. The sessions were
+			// readable and no number carries them, which is why the counter joins
+			// doctor's "collects nothing" arm.
 			refused++
 		}
 	}

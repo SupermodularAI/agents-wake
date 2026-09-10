@@ -23,11 +23,32 @@ import (
 // consented by an edit that added no entry and broke no other rule.
 const globalRootMACDomain = "wake/global-root/v1"
 
-// ErrOutsideGlobalRoot refuses a directory the recorded boundary does not strictly
-// enclose, which includes the boundary itself and every directory on a machine with
-// no boundary recorded. It names the requirement and never the directory, which is
+// ErrOutsideGlobalRoot refuses a registration whose discovered root left the bound the
+// admission test rests on: the boundary, for a directory the boundary strictly
+// encloses, and the worktree the probe named, for a linked worktree of a consented
+// repository (ADR-0044 §1). Every directory on a machine with no boundary recorded is
+// outside it too. It names the requirement and never the directory, which is
 // repository content (plan §4.2).
-var ErrOutsideGlobalRoot = errors.New("a directory outside the recorded collection boundary is never registered")
+//
+// It is not the answer for a directory the boundary does not enclose. Since ADR-0044
+// widened the candidate set to every unmatched working directory, that question is the
+// second arm's and its answer is ErrNotAnAdmittedWorktree — a scan counts the two
+// differently, because only one of them describes collection that was lost.
+var ErrOutsideGlobalRoot = errors.New("a discovered repository root outside what the recorded consent covers is never registered")
+
+// ErrNotAnAdmittedWorktree refuses a directory outside the recorded boundary that the
+// admission test's second arm does not admit: one that is not a linked worktree at
+// all, or one whose repository this machine has not consented (ADR-0044 §1). It names
+// the requirement and never the directory (plan §4.2).
+//
+// It is separate from ErrOutsideGlobalRoot because the two are different facts and a
+// scan counts them differently. This one describes a directory nobody consented, and
+// since ADR-0044 made every unmatched working directory a candidate it is the ordinary
+// answer for the many that are not worktrees — counting it as a refusal would report
+// lost collection on every machine that has ever run a session outside its boundary.
+// ErrOutsideGlobalRoot describes a directory the recorded consent does cover, and that
+// one is lost collection (health.Scan.BoundaryRefused, plan §3.3, §12).
+var ErrNotAnAdmittedWorktree = errors.New("a directory outside the collection boundary is registered only as a linked worktree of a consented repository")
 
 // ErrDiscoveredDirectoryGone refuses a discovered directory that is no longer there.
 // It is separate from ErrOutsideGlobalRoot because the two are different facts and a
@@ -405,22 +426,33 @@ func (r *Repos) RegisterUnderGlobalRoot(dir string, from time.Time) (string, err
 // the user already made. The ceiling narrows what git may answer; the checks after git
 // answers are what the guarantee rests on, exactly as on the first arm.
 //
-// Every failure is the same sentinel the path test raises, naming the requirement and
-// never the directory (plan §4.2). ErrDiscoveredDirectoryGone is deliberately not
-// raised here: a scan counts it as the honest zero for a directory *under* the
-// boundary that vanished, and a directory outside the boundary that cannot be read was
-// never going to be collected.
+// Every failure names the requirement and never the directory (plan §4.2), and there
+// are two of them because a scan counts them differently. Until consent is decided the
+// answer is ErrNotAnAdmittedWorktree: nothing here was consented, so nothing is lost by
+// turning it away, and this is the ordinary answer for the many directories a widened
+// candidate set offers that are not worktrees. After consent is decided the answer is
+// ErrOutsideGlobalRoot, the same sentinel the first arm's post-discovery check raises
+// and for the same reason — the repository is one the user consented, the sessions in
+// its worktree were readable, and a refusal from here is collection that was lost.
+//
+// ErrDiscoveredDirectoryGone is deliberately not raised here. A worktree directory that
+// is gone fails the probe before consent is ever decided, since git cannot answer about
+// a directory that is not there, so it is turned away as not admitted rather than
+// counted as an honest zero — and a directory outside the boundary that cannot be read
+// was never going to be collected.
 func (r *Repos) registerLinkedWorktree(cleaned string, boundary *globalRootEntry, from time.Time) (string, error) {
 	// One bounded probe, and the only one a directory that is not a linked worktree
 	// pays for the question (ADR-0044 §2).
 	topLevel, parentSpellings := discoverLinkedWorktreeForRegistration(cleaned)
 	if topLevel == "" {
-		return "", ErrOutsideGlobalRoot
+		return "", ErrNotAnAdmittedWorktree
 	}
 	// Checked after git answers, against the recorded table — never trusted from
-	// git's environment (ADR-0044 §2).
+	// git's environment (ADR-0044 §2). This is where consent is decided, and it is the
+	// line the two sentinels fall on: everything above answers about a directory
+	// nobody consented, everything below about a repository the user did.
 	if !r.consentsRepository(parentSpellings, boundary) {
-		return "", ErrOutsideGlobalRoot
+		return "", ErrNotAnAdmittedWorktree
 	}
 	// The ceiling ADR-0044 §2 requires: the walk may not go above the worktree's own
 	// top level. GIT_CEILING_DIRECTORIES names directories git will not chdir up
