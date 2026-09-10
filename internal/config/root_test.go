@@ -640,3 +640,128 @@ func TestTheRegistrationPathsGitCallsFailClosedWhenTheDeadlineExpires(t *testing
 		t.Errorf("DiscoverRootForRegistration(%q) = %q, want the fallback to the directory itself", worktree, got)
 	}
 }
+
+// The two answers discoverLinkedWorktreeForRegistration throws away, asserted where
+// they are now read: a main checkout is a repository nobody can name a parent for,
+// and ADR-0047 §1 makes that answer a classification rather than a nothing.
+func TestTheProbeReportsAMainCheckoutAsARepositoryItCannotNameAParentFor(t *testing.T) {
+	requireGit(t)
+	root, _ := initRepo(t)
+
+	probe := probeWorktree(root)
+	if !probe.answered || !probe.repository {
+		t.Fatalf("probeWorktree(%q) = %+v, want an answered repository", root, probe)
+	}
+	if probe.topLevel != root {
+		t.Errorf("probeWorktree(%q).topLevel = %q, want the checkout itself", root, probe.topLevel)
+	}
+	if probe.parent != nil {
+		t.Errorf("probeWorktree(%q).parent = %q, want nil; a main checkout is a worktree of nothing", root, probe.parent)
+	}
+}
+
+// The answer the wrapper cannot express at all: git ran, and said this directory is
+// in no working tree. It is git's answer and not a failure, which is what separates
+// "not in a repository" from "no classification" (ADR-0047 §4).
+func TestTheProbeReportsADirectoryThatIsNotARepository(t *testing.T) {
+	requireGit(t)
+	// GIT_CEILING_DIRECTORIES stops the upward walk at the temporary directory, so a
+	// developer whose /tmp happens to sit inside a repository does not make git answer
+	// about that one instead. It is inherited by scrubbedGitEnv on purpose.
+	base := tempRealDir(t)
+	t.Setenv("GIT_CEILING_DIRECTORIES", base)
+	plain := mkdirAll(t, filepath.Join(base, "plain"))
+
+	probe := probeWorktree(plain)
+	if !probe.answered {
+		t.Fatalf("probeWorktree(%q) = %+v, want an answer; git ran and refused the directory", plain, probe)
+	}
+	if probe.repository {
+		t.Errorf("probeWorktree(%q).repository = true, want false for a plain directory", plain)
+	}
+}
+
+// The answer the wrapper does express, asserted through the probe so the projection
+// below it cannot be the only thing that reads it.
+func TestTheProbeReportsALinkedWorktreeAndItsParent(t *testing.T) {
+	requireGit(t)
+	main, worktree := initWorktree(t)
+
+	probe := probeWorktree(worktree)
+	if !probe.answered || !probe.repository {
+		t.Fatalf("probeWorktree(%q) = %+v, want an answered repository", worktree, probe)
+	}
+	if probe.topLevel != worktree {
+		t.Errorf("probeWorktree(%q).topLevel = %q, want the worktree itself", worktree, probe.topLevel)
+	}
+	if len(probe.parent) == 0 || probe.parent[0] != main {
+		t.Errorf("probeWorktree(%q).parent = %q, want the main checkout %q first", worktree, probe.parent, main)
+	}
+}
+
+// ADR-0047 §4: a git call that could not be run, or that times out, yields no
+// classification. answered false is how the probe says so, and it is the one thing
+// separating a deadline from a directory git legitimately refused.
+func TestTheProbeAnswersNothingWhenTheDeadlineExpires(t *testing.T) {
+	requireGit(t)
+	_, worktree := initWorktree(t)
+	restore := gitCallTimeout
+	gitCallTimeout = time.Nanosecond
+	t.Cleanup(func() { gitCallTimeout = restore })
+
+	if probe := probeWorktree(worktree); probe.answered {
+		t.Errorf("probeWorktree(%q) = %+v, want no answer; the call outlived its deadline", worktree, probe)
+	}
+}
+
+// assertSymbolNamedOnlyIn fails for every Go file in the module outside allowed that
+// names symbol. It is the mechanical half of a layering rule (see
+// TestDiscoverRootForRegistrationIsNamedOnlyOnInitsPath), factored out of the three
+// guards that spell the same walk, so a fourth costs a call rather than a copy.
+//
+// why is appended to the failure, because what the rule protects differs per symbol
+// and a bare "not allowed here" tells the next reader nothing.
+func assertSymbolNamedOnlyIn(t *testing.T, symbol, why string, allowed map[string]bool) {
+	t.Helper()
+	root := moduleRoot(t)
+	scanned := 0
+
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if name := d.Name(); path != root && strings.HasPrefix(name, ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(path) != ".go" {
+			return nil
+		}
+		relative, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		relative = filepath.ToSlash(relative)
+		scanned++
+		if allowed[relative] {
+			return nil
+		}
+
+		raw, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if strings.Contains(string(raw), symbol) {
+			t.Errorf("%s names %s; %s", relative, symbol, why)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking the module: %v", err)
+	}
+	if scanned == 0 {
+		t.Fatal("the walk scanned no Go file; the check proved nothing")
+	}
+}
