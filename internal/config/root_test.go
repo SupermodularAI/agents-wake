@@ -108,16 +108,19 @@ func TestTheParentLookupAnswersNothingOutsideAGitRepository(t *testing.T) {
 	}
 }
 
-// GIT_DIR and GIT_WORK_TREE are dropped for the reason boundedDiscoveryEnv drops
-// them: the hook-fired registration path inherits a session's environment, and an
-// exported GIT_DIR would otherwise make a main checkout look like a worktree of
-// whatever it names — or point a worktree at a common directory nowhere near it.
+// Every variable that re-points where git looks is dropped, for the reason
+// boundedDiscoveryEnv drops them: the hook-fired registration path inherits a
+// session's environment, and any of them would otherwise make a main checkout look
+// like a worktree of whatever they name — or point a worktree at a common directory
+// nowhere near it. GIT_COMMON_DIR is the one this lookup is most directly exposed to,
+// since --git-common-dir reports it verbatim.
 func TestTheParentLookupIgnoresAnInheritedGitDir(t *testing.T) {
 	requireGit(t)
 	main, worktree := initWorktree(t)
 	elsewhere, _ := initRepo(t)
 	t.Setenv("GIT_DIR", filepath.Join(elsewhere, ".git"))
 	t.Setenv("GIT_WORK_TREE", elsewhere)
+	t.Setenv("GIT_COMMON_DIR", filepath.Join(elsewhere, ".git"))
 
 	if got := discoverParentRepositoryForRegistration(main); got != nil {
 		t.Errorf("discoverParentRepositoryForRegistration(%q) = %q, want nil; the environment made a main checkout look like a worktree", main, got)
@@ -428,16 +431,24 @@ func TestTheWorktreeProbeAnswersNothingOutsideAGitRepository(t *testing.T) {
 	}
 }
 
-// GIT_DIR and GIT_WORK_TREE are dropped for the reason scrubbedGitEnv gives: the
-// registration a hook fires inherits a session's environment, and either variable
-// would otherwise make git answer about the repository it names rather than the
-// directory being asked about — which here would admit a directory nobody consented.
+// Every variable that re-points where git looks is dropped for the reason
+// scrubbedGitEnv gives: the registration a hook fires inherits a session's
+// environment, and any of them would otherwise make git answer about the repository
+// they name rather than the directory being asked about — which here would admit a
+// directory nobody consented. GIT_COMMON_DIR is the sharpest of the three: it leaves
+// --show-toplevel alone, so every check made against the discovered root still passes
+// while the parent the answer names is entirely the environment's.
+//
+// The enumeration is not the contract —
+// TestScrubbedGitEnvDropsEveryGitVariableItDoesNotNameSafe is. These three are here
+// because this is the call whose answer decides admission.
 func TestTheWorktreeProbeIgnoresAnInheritedGitDir(t *testing.T) {
 	requireGit(t)
 	main, worktree := initWorktree(t)
 	elsewhere, _ := initRepo(t)
 	t.Setenv("GIT_DIR", filepath.Join(elsewhere, ".git"))
 	t.Setenv("GIT_WORK_TREE", elsewhere)
+	t.Setenv("GIT_COMMON_DIR", filepath.Join(elsewhere, ".git"))
 
 	if topLevel, parent := discoverLinkedWorktreeForRegistration(main); topLevel != "" || parent != nil {
 		t.Errorf("discoverLinkedWorktreeForRegistration(%q) = (%q, %q), want nothing; the environment made a main checkout look like a worktree", main, topLevel, parent)
@@ -536,5 +547,61 @@ func TestDiscoverRootForRegistrationReachesATopLevelUnderItsParentCeilingButNotU
 	}
 	if got != nested {
 		t.Errorf("DiscoverRootForRegistration(%q, the top level itself) = %q, want the directory itself %q; a ceiling at the top level stops the walk one directory short", nested, got, nested)
+	}
+}
+
+// The rule scrubbedGitEnv enforces is a property, not a list: a git call this package
+// makes must not inherit anything that re-points where git looks. Enumerating the
+// variables that do is how GIT_COMMON_DIR was missed once already, so the guarantee is
+// the other way round — everything named GIT_ is dropped unless it is one of the three
+// this package has a stated reason to keep — and this case pins that shape by including
+// a variable that does not exist. A future git that adds a fourth location variable is
+// then a refusal rather than an admission.
+//
+// GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM are kept because requireGit points them at
+// os.DevNull: dropping them would make what git answers here depend on the developer's
+// own configuration. Neither can re-point a working tree — git honours core.worktree
+// only from a repository's own config (verified on git 2.50.1). GIT_CEILING_DIRECTORIES
+// is kept because it can only make git find less, which is the fail-closed direction,
+// and boundedDiscoveryEnv appends its own after it.
+func TestScrubbedGitEnvDropsEveryGitVariableItDoesNotNameSafe(t *testing.T) {
+	dropped := []string{
+		"GIT_DIR",
+		"GIT_WORK_TREE",
+		"GIT_COMMON_DIR",
+		"GIT_INDEX_FILE",
+		"GIT_OBJECT_DIRECTORY",
+		"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+		"GIT_DISCOVERY_ACROSS_FILESYSTEM",
+		"GIT_CONFIG_COUNT",
+		"GIT_CONFIG_KEY_0",
+		"GIT_CONFIG_VALUE_0",
+		"GIT_NAMESPACE",
+		"GIT_NOT_A_REAL_VARIABLE_YET",
+	}
+	kept := []string{"GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CEILING_DIRECTORIES"}
+	for _, name := range append(append([]string{}, dropped...), kept...) {
+		t.Setenv(name, "/somewhere/"+name)
+	}
+	t.Setenv("WAKE_TEST_UNRELATED", "kept")
+
+	got := map[string]string{}
+	for _, entry := range scrubbedGitEnv() {
+		name, value, _ := strings.Cut(entry, "=")
+		got[name] = value
+	}
+
+	for _, name := range dropped {
+		if value, ok := got[name]; ok {
+			t.Errorf("scrubbedGitEnv() kept %s=%q; a variable git reads for where the repository is must not be inherited", name, value)
+		}
+	}
+	for _, name := range kept {
+		if _, ok := got[name]; !ok {
+			t.Errorf("scrubbedGitEnv() dropped %s, which this package has a stated reason to keep", name)
+		}
+	}
+	if got["WAKE_TEST_UNRELATED"] != "kept" {
+		t.Errorf("scrubbedGitEnv() dropped an unrelated variable; only git's own are in scope")
 	}
 }

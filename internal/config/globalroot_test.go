@@ -851,10 +851,51 @@ func TestRegisterUnderGlobalRootRefusesAGitRepositoryOutsideTheBoundaryThatIsNot
 	}
 }
 
+// ADR-0044 §2, second bullet, in the one direction that is not about paths: the
+// repository a worktree resolves to is checked after git answers, against the recorded
+// table, and is never trusted from git's environment. GIT_COMMON_DIR is the variable
+// that makes the distinction bite — git reports it verbatim from --git-common-dir, so
+// an ordinary main checkout outside the boundary presents itself as a linked worktree
+// of whichever repository the environment names. Every check the arm makes about the
+// *root* still passes, because --show-toplevel is unaffected and the root genuinely is
+// the plain checkout; only the parent is fabricated, and the parent is what consent is
+// decided from. Without the scrub the recorded-table check is satisfied by a repository
+// that has nothing to do with the directory being admitted.
+//
+// A session started from a shell that exports GIT_COMMON_DIR — some worktree and
+// monorepo tooling does — reaches this with no attacker involved, and the scan that
+// inherits it is unattended and silent (ADR-0016), so nothing would be printed and
+// nobody asked.
+func TestRegisterUnderGlobalRootRefusesACheckoutOnlyTheEnvironmentCallsAWorktree(t *testing.T) {
+	requireGit(t)
+	p := testPaths(t)
+	main, _ := initWorktreeElsewhere(t)
+	boundary := filepath.Dir(main)
+	plain, _ := initRepo(t)
+	from := time.Now().UTC()
+
+	r := openRepos(t, p)
+	setGlobalRoot(t, r, boundary)
+	mustRegisterUnderGlobalRoot(t, r, main, from)
+
+	t.Setenv("GIT_COMMON_DIR", filepath.Join(main, ".git"))
+
+	if _, err := r.RegisterUnderGlobalRoot(plain, from); !errors.Is(err, ErrNotAnAdmittedWorktree) {
+		t.Errorf("RegisterUnderGlobalRoot(a plain checkout the environment calls a worktree) error = %v, want ErrNotAnAdmittedWorktree", err)
+	}
+	for _, entry := range recordedEntries(t, p) {
+		if entry.Root == plain {
+			t.Errorf("an entry was recorded for %q, a repository outside the boundary that only the environment relates to a consented one", plain)
+		}
+	}
+}
+
 // Acceptance criterion 6. The registration a hook fires inherits a session's
 // environment, and git documents that GIT_DIR is not excluded by a ceiling — so an
 // exported GIT_DIR would otherwise make both git calls answer about a repository
-// nowhere near the directory being asked about, and admit it.
+// nowhere near the directory being asked about, and admit it. GIT_COMMON_DIR does the
+// same to the half of the answer that decides consent, without disturbing the half
+// every other check is made against.
 func TestRegisterUnderGlobalRootDoesNotLetGitsEnvironmentWidenTheAdmittedWorktree(t *testing.T) {
 	requireGit(t)
 	p := testPaths(t)
@@ -863,6 +904,7 @@ func TestRegisterUnderGlobalRootDoesNotLetGitsEnvironmentWidenTheAdmittedWorktre
 	elsewhere, _ := initRepo(t)
 	t.Setenv("GIT_DIR", filepath.Join(elsewhere, ".git"))
 	t.Setenv("GIT_WORK_TREE", elsewhere)
+	t.Setenv("GIT_COMMON_DIR", filepath.Join(elsewhere, ".git"))
 	from := time.Now().UTC()
 
 	r := openRepos(t, p)

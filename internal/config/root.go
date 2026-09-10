@@ -97,11 +97,12 @@ func DiscoverRootForRegistration(dir, ceiling string) (string, error) {
 // recorded — hashing it would create stored data outside the consent boundary
 // (ADR-0019 §9).
 //
-// GIT_DIR and GIT_WORK_TREE are dropped for the reason boundedDiscoveryEnv drops
-// them: the hook-fired registration path inherits a session's environment, and an
-// exported GIT_DIR would otherwise make a main checkout name a common directory
-// nowhere near it. Containment is not enforced by the environment — it is enforced
-// by the caller's requirement that the answer already be a recorded entry.
+// It runs under scrubbedGitEnv for the reason that function gives: the hook-fired
+// registration path inherits a session's environment, and a variable that re-points
+// where git looks — GIT_COMMON_DIR above all, which --git-common-dir reports verbatim
+// — would otherwise make a main checkout name a common directory nowhere near it.
+// Containment is not enforced by the environment — it is enforced by the caller's
+// requirement that the answer already be a recorded entry.
 //
 // Every failure answers nil: a directory that is not a repository, a git that is not
 // installed, a bare main repository whose common directory names no working tree.
@@ -175,10 +176,13 @@ func parentSpellingsFromCommonDir(from, topLevel, common string) []string {
 // options are given, so the first line is the top level and the second the common
 // directory; any other shape answers nothing rather than being guessed at.
 //
-// GIT_DIR and GIT_WORK_TREE are dropped for scrubbedGitEnv's stated reason. An
-// inherited GIT_CEILING_DIRECTORIES is deliberately left alone: it can only make git
-// find less, so the worst it costs is a refusal, and a refusal is the fail-closed
-// answer.
+// It runs under scrubbedGitEnv, which is load-bearing here rather than defensive:
+// this answer is what ADR-0044 §1 decides admission from, and its second bullet
+// requires the repository a worktree resolves to be checked against the recorded table
+// after git answers and never trusted from git's environment. An inherited
+// GIT_CEILING_DIRECTORIES is the one git variable deliberately left alone: it can only
+// make git find less, so the worst it costs is a refusal, and a refusal is the
+// fail-closed answer.
 //
 // Every failure answers "", nil. It consents nothing: the caller checks the
 // repository this names against the recorded table before anything is admitted
@@ -208,10 +212,11 @@ func discoverLinkedWorktreeForRegistration(dir string) (topLevel string, parent 
 
 // boundedDiscoveryEnv is the environment a bounded discovery runs git in.
 //
-// GIT_DIR and GIT_WORK_TREE are dropped because git documents that the ceiling "will
-// not exclude ... a GIT_DIR set on the command line or in the environment": with
-// either set, the toplevel git reports is the one they name and the ceiling is not
-// consulted at all.
+// A ceiling does not bound the environment: git documents that it "will not exclude
+// ... a GIT_DIR set on the command line or in the environment", so with GIT_DIR or
+// GIT_WORK_TREE set the toplevel git reports is the one they name and the ceiling is
+// not consulted at all. scrubbedGitEnv is what removes them, along with every other
+// GIT_ variable it does not name safe.
 //
 // Dropped here, where a ceiling was asked for, and not from DiscoverRootForRegistration's
 // unbounded call. With no ceiling there is no boundary to escape and the directory
@@ -224,24 +229,55 @@ func boundedDiscoveryEnv(ceiling string) []string {
 	return append(scrubbedGitEnv(), "GIT_CEILING_DIRECTORIES="+ceiling)
 }
 
-// scrubbedGitEnv is os.Environ with GIT_DIR and GIT_WORK_TREE removed.
+// inheritableGitVars are the only GIT_-prefixed variables a git call this package
+// makes may inherit. Everything else named GIT_ is dropped, whatever it is.
 //
-// os.Environ rather than a bare slice: a caller — a test, most often — that
-// neutralised GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM has to keep doing so, or what git
-// answers would depend on the machine's own configuration.
+// GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM are kept because a caller — a test, most
+// often — that neutralised them has to keep doing so, or what git answers would depend
+// on the machine's own configuration. Neither can re-point a working tree: git honours
+// core.worktree from a repository's own config and not from a global or system one
+// (verified against git 2.50.1).
 //
-// The two are dropped because the calls that use this are the unattended ones — the
-// scan a hook fires inherits the session's environment — and either variable makes
-// git answer about the repository it names rather than the one the caller is asking
-// about. Shared by both call sites so the two cannot drift about which variables a
-// git call this package makes is allowed to inherit.
+// GIT_CEILING_DIRECTORIES is kept because it can only make git find less, so the worst
+// an inherited one costs is a refusal, and a refusal is the fail-closed answer.
+// boundedDiscoveryEnv appends its own after this, which is what a bounded discovery
+// runs under.
+var inheritableGitVars = map[string]bool{
+	"GIT_CONFIG_GLOBAL":       true,
+	"GIT_CONFIG_SYSTEM":       true,
+	"GIT_CEILING_DIRECTORIES": true,
+}
+
+// scrubbedGitEnv is os.Environ with every GIT_ variable removed except the three
+// inheritableGitVars names.
+//
+// The rule is stated the safe way round on purpose. The calls that use this are the
+// unattended ones — the scan a hook fires inherits the session's environment — and a
+// variable that re-points where git looks makes git answer about the repository it
+// names rather than the one the caller is asking about. Under ADR-0044 §1 that answer
+// decides admission, so a variable this list forgets is a directory nobody consented
+// gaining an entry. An enumeration of the dangerous variables is exactly how
+// GIT_COMMON_DIR was missed: git documents it as making "non-worktree files that are
+// normally in $GIT_DIR ... taken from this path instead", `rev-parse --git-common-dir`
+// reports it verbatim, and it does so without disturbing --show-toplevel, so every
+// check made against the discovered root still passes while the repository the answer
+// names is entirely the environment's. Dropping the whole prefix instead means the
+// next such variable — in a git that does not exist yet — is a refusal rather than a
+// review miss.
+//
+// os.Environ rather than a bare slice: everything that is not git's own is the
+// caller's, and unrelated to what git is being asked.
+//
+// Shared by both call sites so the two cannot drift about which variables a git call
+// this package makes is allowed to inherit.
 //
 // The +1 of capacity is boundedDiscoveryEnv's append.
 func scrubbedGitEnv() []string {
 	environ := os.Environ()
 	kept := make([]string, 0, len(environ)+1)
 	for _, entry := range environ {
-		if strings.HasPrefix(entry, "GIT_DIR=") || strings.HasPrefix(entry, "GIT_WORK_TREE=") {
+		name, _, found := strings.Cut(entry, "=")
+		if found && strings.HasPrefix(name, "GIT_") && !inheritableGitVars[name] {
 			continue
 		}
 		kept = append(kept, entry)
