@@ -178,3 +178,40 @@ func TestInitGlobalTwiceReplacesTheBoundary(t *testing.T) {
 		t.Error("the replaced boundary is still in effect")
 	}
 }
+
+// ADR-0044 §3. The decision widens what `--global` consents past what the boundary
+// sentence describes — a linked worktree of a consented repository is included
+// wherever on disk it lives, which is a place no boundary sentence can name — and a
+// consent model whose scope a user cannot predict from what they were told is not
+// consent.
+//
+// Before anything is written, in the same disclosure ADR-0010 already requires, and
+// naming only wake's own table rather than any repository path.
+func TestInitGlobalDisclosesThatLinkedWorktreesAreIncludedBeforeWriting(t *testing.T) {
+	paths := isolate(t)
+	boundary := filepath.Join(t.TempDir(), "boundary")
+	if err := os.MkdirAll(boundary, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	out, err := run(t, "init", "-g", boundary)
+	if err != nil {
+		t.Fatalf("init -g error = %v; output:\n%s", err, out)
+	}
+
+	const sentence = "Linked git worktrees"
+	for _, want := range []string{sentence, "wherever on disk they live", paths.ProjectsFile} {
+		if !strings.Contains(out, want) {
+			t.Errorf("init -g output is missing %q; got:\n%s", want, out)
+		}
+	}
+	disclosure := strings.Index(out, "Wake will modify:")
+	worktrees := strings.Index(out, sentence)
+	confirmation := strings.Index(out, "Collection boundary recorded")
+	if disclosure < 0 || worktrees < 0 || confirmation < 0 {
+		t.Fatalf("the output is missing one of the three landmarks:\n%s", out)
+	}
+	if worktrees < disclosure || worktrees > confirmation {
+		t.Errorf("the worktree sentence at %d is not inside the disclosure (%d) that precedes the write (%d):\n%s", worktrees, disclosure, confirmation, out)
+	}
+}

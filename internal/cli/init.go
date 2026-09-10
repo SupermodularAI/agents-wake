@@ -166,6 +166,14 @@ func newInitCmd() *cobra.Command {
 			// repository path, label or log content appears — the repositories under it
 			// are not known yet, and the ones that become known are never printed.
 			sentences = append(sentences, fmt.Sprintf("Wake will consent every project under %s, and will register each repository it finds there in %s as sessions run in it — including repositories created later.", boundary, paths.ProjectsFile))
+			// ADR-0044 §3. Consent is over repositories, and a linked worktree is not a
+			// second repository — so one follows its repository wherever on disk it
+			// lives, which is somewhere the sentence above cannot describe. Said
+			// outright, in the same disclosure and before anything is written
+			// (ADR-0010), because a consent model whose scope a user cannot predict
+			// from what they were told is not consent. No repository path appears here
+			// either: only wake's own table is named.
+			sentences = append(sentences, fmt.Sprintf("Linked git worktrees of those repositories are consented with them, wherever on disk they live, and each is registered in %s as sessions run in it.", paths.ProjectsFile))
 		}
 		// Dimmed rather than left plain: a column of paths is the part of the
 		// disclosure a reader's eye should move past quickly, not the part fighting
