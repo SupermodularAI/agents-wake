@@ -117,14 +117,27 @@ func discoverParentRepositoryForRegistration(root string) []string {
 	if err != nil {
 		return nil
 	}
-	common := strings.TrimSpace(string(output))
+	return parentSpellingsFromCommonDir(root, root, strings.TrimSpace(string(output)))
+}
+
+// parentSpellingsFromCommonDir turns git's --git-common-dir answer into the spellings
+// of the repository a working tree is a linked worktree of, or nil when it is not one.
+//
+// from is the directory git was asked in, because git answers relative to it when it
+// can. topLevel is the working tree the answer is about: a main checkout is its own
+// common directory's parent, and comparing against `from` instead would read a main
+// checkout's subdirectory as a worktree of the checkout it sits in.
+//
+// Shared by the two git questions this package asks about worktrees, so the two
+// cannot drift about what counts as a linked worktree.
+func parentSpellingsFromCommonDir(from, topLevel, common string) []string {
 	if common == "" {
 		return nil
 	}
 	// git answers relative to the directory -C moved it to when it can. Absolute
 	// first, then clean, so the comparison below is against one spelling rule.
 	if !filepath.IsAbs(common) {
-		common = filepath.Join(root, common)
+		common = filepath.Join(from, common)
 	}
 	common = filepath.Clean(common)
 	// A linked worktree's common directory is the main working tree's `.git`.
@@ -135,7 +148,7 @@ func discoverParentRepositoryForRegistration(root string) []string {
 	}
 	parent := filepath.Dir(common)
 	// The main checkout is its own common directory's parent. Not a worktree.
-	if parent == root || !filepath.IsAbs(parent) {
+	if parent == topLevel || !filepath.IsAbs(parent) {
 		return nil
 	}
 	spellings := []string{parent}
@@ -146,6 +159,51 @@ func discoverParentRepositoryForRegistration(root string) []string {
 		spellings = append(spellings, canonical)
 	}
 	return spellings
+}
+
+// discoverLinkedWorktreeForRegistration answers, in one git call, whether dir sits
+// inside a linked git worktree and — when it does — the worktree's own top level and
+// the spellings of the repository it belongs to.
+//
+// Registration only, and unexported for the reason
+// discoverParentRepositoryForRegistration is (ADR-0019 §1).
+// TestTheWorktreeProbeIsNamedOnlyOnTheRegistrationPath is the mechanical guard.
+//
+// One call rather than two: ADR-0044 §2 allows a directory that is not a linked
+// worktree at most one bounded probe for the question, and almost every directory a
+// widened walk offers is not one. `git rev-parse` prints its answers in the order the
+// options are given, so the first line is the top level and the second the common
+// directory; any other shape answers nothing rather than being guessed at.
+//
+// GIT_DIR and GIT_WORK_TREE are dropped for scrubbedGitEnv's stated reason. An
+// inherited GIT_CEILING_DIRECTORIES is deliberately left alone: it can only make git
+// find less, so the worst it costs is a refusal, and a refusal is the fail-closed
+// answer.
+//
+// Every failure answers "", nil. It consents nothing: the caller checks the
+// repository this names against the recorded table before anything is admitted
+// (ADR-0044 §2). It returns no error and therefore names no path in one, and git's
+// own stderr is captured and discarded (plan §4.2).
+func discoverLinkedWorktreeForRegistration(dir string) (topLevel string, parent []string) {
+	cmd := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel", "--git-common-dir")
+	cmd.Env = scrubbedGitEnv()
+	output, err := cmd.Output()
+	if err != nil {
+		return "", nil
+	}
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) != 2 {
+		return "", nil
+	}
+	top := filepath.Clean(strings.TrimSpace(lines[0]))
+	if !filepath.IsAbs(top) {
+		return "", nil
+	}
+	spellings := parentSpellingsFromCommonDir(dir, top, strings.TrimSpace(lines[1]))
+	if len(spellings) == 0 {
+		return "", nil
+	}
+	return top, spellings
 }
 
 // boundedDiscoveryEnv is the environment a bounded discovery runs git in.
