@@ -95,9 +95,16 @@ type Result struct {
 	// "parsed nothing" at the end of one read no longer distinguishes an honest zero
 	// from a deferral (see claudecode.Result.SkippedSources).
 	SkippedSources int
-	Written        int
-	Duplicate      int
-	Dropped        int
+	// SkippedSourceOrdinals names which sources those were, in ascending order, by the
+	// ordinal the walk assigned each source as it arrived. A caller keeping its own
+	// per-source notes keys them the same way, so it needs no path from here — a source
+	// is an ordinal all the way through this package too (see
+	// claudecode.Result.SkippedSourceOrdinals). Read leaves it nil, for SkippedSources'
+	// reason.
+	SkippedSourceOrdinals []int
+	Written               int
+	Duplicate             int
+	Dropped               int
 }
 
 // ClaudeCode reads one already-authorized Claude Code transcript and persists
@@ -227,6 +234,7 @@ func persist(derived claudecode.Result, destination *store.Store) (Result, error
 		Interrupted:             derived.Interrupted,
 		AmbiguousSkillRuns:      derived.AmbiguousSkillRuns,
 		SkippedSources:          derived.SkippedSources,
+		SkippedSourceOrdinals:   derived.SkippedSourceOrdinals,
 		Written:                 written.Written,
 		Duplicate:               written.Duplicate,
 		Dropped:                 written.Dropped,

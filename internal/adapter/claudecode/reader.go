@@ -178,6 +178,18 @@ type Result struct {
 	// It is a count of sources, never of paths: a source is the ordinal the scan
 	// assigned it (ADR-0007, plan §4.2). Read reports it for the one source it read.
 	SkippedSources int
+	// SkippedSourceOrdinals names which sources those were, in ascending order — the
+	// ordinal this scan assigned each source as it arrived, and never anything else.
+	//
+	// A caller keeping its own per-source notes — which working directory it declined
+	// for that source, say — keys them the same way and needs no path from here: this
+	// package's guarantee is that a source is an ordinal, and a directory would be a
+	// path leaving a package that has none (ADR-0007, plan §4.2). DG-114's breakdown of
+	// doctor's skipped count is built on the caller's side from these.
+	//
+	// Close reports it whole. Read leaves it nil for SkippedSources' reason: a source's
+	// contribution can resolve after its own read has ended (ADR-0036).
+	SkippedSourceOrdinals []int
 }
 
 // Resolver maps one observed event — a recorded working directory and the instant it

@@ -375,3 +375,28 @@ func TestScanIgnoresASidechainCopyOfATypedInvocation(t *testing.T) {
 		t.Errorf("Close() = %+v", result)
 	}
 }
+
+// The ordinals, not just the count. A caller keeping its own per-source notes — which
+// working directory it declined for that source — needs to know which sources those
+// were, and the ordinal is exactly what this package says a source is (ADR-0007,
+// plan §4.2). Three sources, the first and third deriving nothing: the count alone
+// cannot say which two, and the productive one between them must not drift into the
+// answer.
+func TestCloseNamesTheOrdinalsOfTheSourcesItSkipped(t *testing.T) {
+	elsewhere := func(uuid string) string {
+		return fmt.Sprintf(
+			`{"uuid":%q,"sessionId":%q,"cwd":"/elsewhere","timestamp":"2026-08-13T12:00:00Z","version":"1.0.0","entrypoint":"cli",`+
+				`"message":{"model":"sonnet","id":%q,"content":[{"type":"tool_use","id":%q,"name":"Bash"}]}}`,
+			uuid, uuid+"-session", uuid+"-msg", uuid+"-call")
+	}
+	collecting := toolCallLines("kept-1", "session-kept", "2026-08-13T12:00:00Z", "kept-call", "Bash", "{}")
+
+	_, final := twoSources(t, Staleness{}, Idleness{}, elsewhere("skip-a"), collecting, elsewhere("skip-b"))
+
+	if final.SkippedSources != 2 {
+		t.Fatalf("SkippedSources = %d, want 2", final.SkippedSources)
+	}
+	if !slices.Equal(final.SkippedSourceOrdinals, []int{0, 2}) {
+		t.Errorf("SkippedSourceOrdinals = %v, want [0 2]; the productive source sits between them", final.SkippedSourceOrdinals)
+	}
+}
