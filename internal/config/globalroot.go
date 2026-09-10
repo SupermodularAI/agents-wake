@@ -528,11 +528,25 @@ func (r *Repos) registerLinkedWorktree(cleaned string, boundary *globalRootEntry
 // than a re-read, exactly as the boundary itself is read above; Register re-reads
 // under the lock, and ADR-0040 §2 decides what happens if the parent is not an entry
 // by then — the relation is refused and the registration is not.
+//
+// ADR-0047 §1 adds a second caller, and it consents nothing either: classification asks
+// this the same question registration does and turns the answer into a counter. That
+// caller runs on a machine with no boundary recorded, which admission cannot reach, so
+// a nil boundary is answered rather than dereferenced — and answered false, since with
+// no boundary the recorded entries are the whole of what this machine consented.
 func (r *Repos) consentsRepository(spellings []string, boundary *globalRootEntry) bool {
 	if entryIDForRoot(r.table.Projects, spellings) != "" {
 		return true
 	}
 	if len(spellings) == 0 {
+		return false
+	}
+	// No boundary recorded: the entry test above is the whole answer. Admission never
+	// reaches this — RegisterUnderGlobalRoot refuses a nil boundary before the second
+	// arm is entered — and the classification caller ADR-0047 §1 admits does, on
+	// precisely the machine the diagnostic exists for: a plain `wake init`, no
+	// boundary, and a worktree of the repository that init consented.
+	if boundary == nil {
 		return false
 	}
 	for _, spelling := range spellings {
