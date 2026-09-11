@@ -33,6 +33,16 @@ called out under Changed.
   them. A machine that has not scanned reads the breakdown as `not observed`
   rather than `0`, which is not the same answer. Classification registers nothing
   and consents nothing — the directories are counted, never collected from.
+- `doctor` reports `pending subagent runs` — how many subagent runs the last scan
+  anchored and could not resolve because their sessions were still open, carried to
+  the next scan rather than dropped. It is a separate line from `pending calls` and
+  counts a different population: a tool call resolves when its result is written, a
+  subagent run when its session closes. Without it a user whose runs are sitting in
+  the carry reads a healthy scan and a confident zero — around 200 runs of one long
+  session went unreported this way before the carry existed. The line is the depth of
+  the carry as of the last scan, not the runs that scan newly deferred, and it never
+  moves the integration state word: the carry empties on a healthy machine, so a
+  state word following it would be reporting a transient.
 - An MCP tool's invocation now records which server provided it. A server's tools
   are named `mcp__<server>__<tool>` by the harness, and the server segment is
   stored as the harness spells it, validated as a bounded token. Before this,
