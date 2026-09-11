@@ -114,10 +114,13 @@ func TestDoctorReportsRefusedSubagentRunsWithoutBlindingTheState(t *testing.T) {
 	}
 }
 
-// A subagent run the scan anchored and could not resolve is carried to the next scan,
-// not lost, so it gets its own line and deliberately does not move the state word: the
-// carry empties on a healthy machine, and a state word following a transient is not a
-// diagnosis (health.Diagnose, ADR-0015).
+// A subagent run the scan could not resolve is carried to the next scan, not lost, so it
+// gets its own line and deliberately does not move the state word: nothing was lost, and
+// that reason carries the exclusion on its own (health.Diagnose, ADR-0015). It is not
+// excluded for being transient — it is not one. A run leaves the carry only when a scan
+// observes its session close, so this counter sits above zero on a machine collecting
+// normally (activation's TestThePendingCarryReadmitsARunItAlreadyResolved), which is one
+// more reason to keep it out of the arm rather than a reason to fold it in.
 func TestDoctorReportsPendingSubagentRunsWithoutBlindingTheState(t *testing.T) {
 	paths := isolate(t)
 	if err := health.New(paths.HealthFile).RecordScan(health.Scan{

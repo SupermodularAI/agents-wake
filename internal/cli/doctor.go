@@ -124,10 +124,12 @@ func writeReasons(out io.Writer, lines []counterLine, observed bool) error {
 // is beside `refused subagent runs` because both describe subagent runs, and directly
 // above `pending calls` because both describe something not final yet — and it is a
 // third line rather than part of either, because a run and a call resolve at different
-// boundaries: a call at its result, a run at its session's close. It is the depth of the
-// carry the last scan left, not the runs that scan newly deferred. It prints whatever the
-// state word says, and health.Diagnose is where the argument for that lives — this
-// function holds no decision (ADR-0001, plan §6.2).
+// boundaries: a call at its result, a run at its session's close. It is the unresolved
+// set the last scan's closing walk held, not the runs that scan newly deferred and not a
+// count of work waiting to be collected — health.Scan.PendingSubagentRuns states what it
+// does and does not mean. It prints whatever the state word says, and health.Diagnose is
+// where the argument for that lives — this function holds no decision (ADR-0001,
+// plan §6.2).
 //
 // The stale-record count and the store-rebuild word are two lines for the same reason:
 // the count says how many records the store holds that this build cannot read, and the

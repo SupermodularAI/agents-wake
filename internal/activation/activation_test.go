@@ -1633,9 +1633,9 @@ func TestScanReportsTheUnresolvedSubagentRunsTheCarryHolds(t *testing.T) {
 	}
 
 	// A scan has now observed the session close, so the run resolved and left the
-	// unresolved set. That — a scan seeing the close — is what empties the set; the
-	// counter does not fall back to zero on its own, which the pruned-transcript test
-	// below pins.
+	// unresolved set. A scan seeing the close is the only thing that takes a run out of
+	// it: the counter does not fall on its own, and a run that left can be readmitted —
+	// the two tests below pin both halves.
 	if got := scanOf(t, paths).PendingSubagentRuns; got != 0 {
 		t.Errorf("PendingSubagentRuns = %d after the session closed, want 0", got)
 	}
@@ -1644,9 +1644,9 @@ func TestScanReportsTheUnresolvedSubagentRunsTheCarryHolds(t *testing.T) {
 // A run whose transcripts the harness pruned before any scan observed its session
 // close stays in the carry, and this pins that: SessionState.Closed reports false for
 // a session it never observed, so the restored run is never judged and never leaves
-// the pending set. The counter therefore does not reach zero by itself — it reaches
-// zero when a scan observes the session close, which is a different statement and the
-// one the doc comments around this counter now make.
+// the pending set. The counter therefore does not fall by itself — a run leaves the set
+// only when a scan observes its session close, which is a different statement and the
+// one the doc comments around this counter make.
 //
 // It is the same fixture as the test above, with one step added: the harness's own
 // cleanupPeriodDays removes the project's transcripts between the two scans.
