@@ -131,6 +131,17 @@ type Diagnosis struct {
 // never finished (ADR-0015). Both are honest, and neither is a source nobody could
 // read.
 //
+// A pending subagent run is not in it either, and it is the same argument one level up.
+// A run whose session was still open when the walk closed is carried to the next scan,
+// not lost: it is a number that is not final yet in exactly the sense an unterminated
+// call is (ADR-0015), and the carry is what makes the next scan able to resolve it. It
+// is also weaker than the standing facts above, which is the second, independent reason
+// — unlike a refused subagent run or a refused boundary registration, this counter can
+// reach zero on a healthy machine, because a machine with no open session has an empty
+// carry. So it fails the arm's test twice over: nothing was lost, and a state word
+// following it would be reporting a transient. doctor prints it on its own line whatever
+// the state word says.
+//
 // Neither boundary counter is in it, and the refused one is the interesting case.
 //
 // A directory the recorded global root encloses whose repository could not be

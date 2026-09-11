@@ -365,6 +365,51 @@ func TestReadRejectsAVersion8Report(t *testing.T) {
 	}
 }
 
+// A version-9 file carries no pending-subagent-run count. Read as this format it would
+// report 0 — "no subagent run is waiting to resolve" — for a measurement nobody took,
+// and a user whose runs are sitting in the carry would see a healthy scan and a
+// confident zero. That is the failure every bump since 2 has avoided.
+func TestReadRejectsAVersion9Report(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "health.json")
+	version9 := `{"version":9,"scan":{"at":"2026-09-11T10:00:00Z","transcripts":1422,"skipped":1041,` +
+		`"skipped_not_a_repository":1,"skipped_unconsented_repository":2,` +
+		`"skipped_unregistered_worktree":3,"skipped_outside_collection_window":4,` +
+		`"skipped_unclassified":5,"skipped_nothing_terminal":6,"skipped_classified":true,` +
+		`"scope":1},"hooks":{"at":"2026-09-11T10:00:00Z","installed":2}}`
+	if err := os.WriteFile(path, []byte(version9), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	if _, err := New(path).Read(); err == nil {
+		t.Fatal("Read() error = nil, want a refusal for the version-9 format")
+	}
+}
+
+// The carry's depth travels to disk under its own key, or the counter is only true in
+// memory: a missing or duplicated JSON tag would drop it on the round trip, or alias it
+// onto PendingCalls, while every in-process assertion still passed. The two are written
+// with different values here for exactly that reason.
+func TestAScanCarriesItsPendingSubagentRunCount(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "health.json")
+	want := Scan{
+		At:                  time.Now().UTC().Truncate(time.Second),
+		PendingSubagentRuns: 7,
+		PendingCalls:        2,
+	}
+	store := New(path)
+	if err := store.RecordScan(want); err != nil {
+		t.Fatalf("RecordScan() error = %v", err)
+	}
+
+	got, err := store.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if got.Scan != want {
+		t.Errorf("Scan round-tripped as %+v, want %+v", got.Scan, want)
+	}
+}
+
 // The breakdown travels to disk with the counter it explains, or the pairing is only
 // true in memory: a JSON tag that never made it onto a field would drop that reason on
 // the round trip while every in-process assertion still passed.

@@ -207,6 +207,7 @@ func TestDiagnoseOnlyEverReturnsAKnownState(t *testing.T) {
 		{Scan: Scan{At: scannedAt, EventsWritten: 1, BoundarySkipped: 2}},
 		{Scan: Scan{At: scannedAt, EventsWritten: 1, BoundaryRefused: 2}},
 		{Scan: Scan{At: scannedAt, EventsWritten: 1, RefusedSubagentRuns: 2}},
+		{Scan: Scan{At: scannedAt, EventsWritten: 1, PendingSubagentRuns: 2}},
 	}
 	failures := []error{nil, errors.New("refused")}
 
@@ -257,6 +258,40 @@ func TestDiagnoseDoesNotLetARefusedSubagentRunBlindTheIntegrationState(t *testin
 	got := Diagnose(Report{Scan: Scan{At: scannedAt, Transcripts: 2, EventsWritten: 4, RefusedSubagentRuns: 1}}, nil, nil)
 	if got.State != StateCollecting {
 		t.Errorf("State = %q, want %q", got.State, StateCollecting)
+	}
+}
+
+// A subagent run the scan anchored and could not resolve is not lost collection: its
+// session was still open when the walk closed, so the run is carried to the next scan
+// and the carry is what lets that scan resolve it — a number that is not final yet, in
+// exactly the sense an unterminated call is (ADR-0015). It is also weaker than the
+// standing facts around it, and that is the second, independent reason: unlike a
+// refused subagent run this counter reaches zero on a healthy machine, because a
+// machine with no open session has an empty carry, so a state word following it would
+// be reporting a transient.
+//
+// The second case is the one that proves the exclusion — the first could be carried by
+// its events-written value alone.
+func TestDiagnoseDoesNotLetAPendingSubagentRunBlindTheIntegrationState(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		scan Scan
+		want State
+	}{
+		{"alongside events written", Scan{Transcripts: 2, EventsWritten: 4, PendingSubagentRuns: 5}, StateCollecting},
+		{"with nothing written", Scan{Transcripts: 1, PendingSubagentRuns: 5}, StateCollectsZero},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			c.scan.At = scannedAt
+
+			got := Diagnose(Report{Scan: c.scan}, nil, nil)
+			if got.State == StateCollectsNothing {
+				t.Error("a pending subagent run was reported as lost collection")
+			}
+			if got.State != c.want {
+				t.Errorf("State = %q, want %q", got.State, c.want)
+			}
+		})
 	}
 }
 

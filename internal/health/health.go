@@ -92,7 +92,15 @@ import (
 // repository was skipped" for a scan that never asked, which is the failure the bump to
 // 2 avoided. Same remedy, and the same cost — one scan's diagnostics, on a file that is
 // derived and non-precious (ADR-0014).
-const reportVersion = 9
+//
+// Bumped to 10 when the scan gained the pending-subagent-run counter (DG-115): a
+// version-9 file carries no such count, and read as this format it would report 0 —
+// "no subagent run is waiting to resolve" — for a measurement nobody took. That is the
+// failure the bump to 2 avoided, and it is the one this counter exists to close: a user
+// whose runs are sitting in the carry would see a healthy scan and a confident zero.
+// Same remedy, and the same cost — one scan's diagnostics, on a file that is derived
+// and non-precious (ADR-0014).
+const reportVersion = 10
 
 // reportFileMode is the mode the counter file is written with. It holds no path and
 // no label, but it is state about this user's machine and the rest of the local
@@ -207,6 +215,27 @@ type Scan struct {
 	// release will ever name them. So it is deliberately not one of Diagnose's "collects
 	// nothing" reasons: a state word driven by this counter could never change again.
 	RefusedSubagentRuns int `json:"refused_subagent_runs"`
+	// PendingSubagentRuns counts subagent runs the last scan anchored and could not
+	// resolve: their sessions were still open when the walk closed, so the runs are
+	// carried to the next scan rather than judged now. Not lost collection and not an
+	// invocation count — a number that is not final yet, exactly as PendingCalls is
+	// (ADR-0015). It is deliberately not one of Diagnose's "collects nothing" reasons.
+	//
+	// It is a separate counter from PendingCalls and never folded into it. An
+	// unterminated tool call resolves when its result is written; a subagent run
+	// resolves when its session closes (ADR-0036 §2, ADR-0023). Two boundaries, two
+	// populations, and one integer summing unlike populations is what hides the one
+	// that matters (ADR-0047 §1).
+	//
+	// It counts pending *runs* only, never the carried children beside them: a child is
+	// a derived record awaiting a parent, not an unobserved invocation, and summing the
+	// two would be the same conflation one line up.
+	//
+	// Like every counter here it is the depth of the carry as of the last scan, not the
+	// work that scan newly did: the carry includes runs earlier scans anchored, and with
+	// no incremental cursor (T020, T102) every scan re-reads the whole history. Reading
+	// it as "this scan deferred N runs" would overstate it.
+	PendingSubagentRuns int `json:"pending_subagent_runs"`
 	// PendingCalls counts tool calls the last scan found unterminated whose session is
 	// still inside the staleness window: a number that is not final yet, not collection
 	// that was lost (ADR-0015). It is deliberately not one of Diagnose's
