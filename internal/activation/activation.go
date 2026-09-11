@@ -618,6 +618,19 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 	// folding it into that arm would put every machine that runs subagents permanently
 	// into "collects nothing" while thousands of records are written (health.Diagnose).
 	scan.RefusedSubagentRuns = final.RefusedSubagentRuns
+	// The depth of the carry this scan leaves behind: runs it anchored and could not
+	// resolve because their sessions are still open. Read off the same Pending() call
+	// storePending already uses — one read, post-Close, never a second one.
+	//
+	// len(runs) only. The children beside them are an unlike population — a derived
+	// record awaiting a parent, not an unobserved invocation — and one integer summing
+	// the two would hide whichever of them matters (ADR-0047 §1).
+	//
+	// Assigned, not added, like the four counters around it: only the closure boundary
+	// knows what stayed unresolved, so there is no per-source half to add to. A walk that
+	// returned early above never reached here and the counter reads 0, which is what
+	// every close-derived counter beside it already does.
+	scan.PendingSubagentRuns = len(runs)
 	// Two different facts, deliberately two counters. Pending is a call whose session
 	// may still be running — transient, and not a fault. Interrupted is a call whose
 	// session went quiet past the threshold, so the invocation is now in the store

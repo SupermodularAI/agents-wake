@@ -1566,6 +1566,67 @@ func TestTriggerResolvesASubagentRunAnEarlierImportBuffered(t *testing.T) {
 	}
 }
 
+// The carry has a depth, and until this counter existed nothing reported it: a user
+// whose subagent runs were sitting in the carry read a healthy scan and a confident
+// zero, and found the gap only in the backend. This is the same fixture as the test
+// above — copied rather than shared, because that test is the merged regression for the
+// carry itself and is not to be touched — read through the counter instead of through
+// the spool.
+func TestScanReportsTheDepthOfThePendingCarry(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	claudeDir := filepath.Join(t.TempDir(), "claude")
+	writeFixture(t, filepath.Join(claudeDir, "settings.json"), `{}`)
+	stamp := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	parent := []string{
+		`{"uuid":"parent-1","sessionId":"session-1","cwd":"` + root + `","timestamp":"` + stamp + `","entrypoint":"cli","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-parent","name":"Bash"}]}}`,
+		`{"uuid":"parent-2","sessionId":"session-1","cwd":"` + root + `","timestamp":"` + stamp + `","entrypoint":"cli","message":{"content":[{"type":"tool_result","tool_use_id":"call-parent","is_error":false}]}}`,
+	}
+	writeFixture(t, filepath.Join(claudeDir, "projects", "project", "session.jsonl"), strings.Join(parent, "\n"))
+	subagent := []string{
+		`{"uuid":"agent-1","agentId":"agent-1","sessionId":"session-1","cwd":"` + root + `","timestamp":"` + stamp + `","entrypoint":"cli","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-agent","name":"Bash"}]}}`,
+		`{"uuid":"agent-2","agentId":"agent-1","attributionAgent":"sdlc-run","sessionId":"session-1","cwd":"` + root + `","timestamp":"` + stamp + `","entrypoint":"cli","message":{"model":"sonnet","content":[{"type":"tool_result","tool_use_id":"call-agent","is_error":false}]}}`,
+	}
+	writeFixture(t, filepath.Join(claudeDir, "projects", "project", "session", "subagents", "agent-1.jsonl"), strings.Join(subagent, "\n"))
+	paths := testPaths(t)
+
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), false); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	if _, err := Ingest(paths, claudeDir); err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+
+	// The import anchored the run and could not resolve it — the session is still
+	// open — so the carry is one deep and the counter says so.
+	scan := scanOf(t, paths)
+	if scan.PendingSubagentRuns != 1 {
+		t.Errorf("PendingSubagentRuns = %d after the import, want 1", scan.PendingSubagentRuns)
+	}
+	// The distinctness proof at the source: every tool_use in this fixture is paired
+	// with its tool_result, so no call is unterminated. One scan, one moment, and the
+	// two counters read differently because they count different populations.
+	if scan.PendingCalls != 0 {
+		t.Errorf("PendingCalls = %d after the import, want 0 — no call in this fixture is unterminated", scan.PendingCalls)
+	}
+
+	if _, err := config.Set(paths, "scan.stale_call_timeout", "30m"); err != nil {
+		t.Fatalf("Set() error = %v", err)
+	}
+	if _, err := Trigger(paths, claudeDir); err != nil {
+		t.Fatalf("Trigger() error = %v", err)
+	}
+
+	// The session has closed and the run resolved, so the carry is empty. That the
+	// counter falls back to zero on a healthy machine is the second, independent
+	// reason it stays out of doctor's "collects nothing" arm.
+	if got := scanOf(t, paths).PendingSubagentRuns; got != 0 {
+		t.Errorf("PendingSubagentRuns = %d after the session closed, want 0", got)
+	}
+}
+
 // spoolSubagentRecords reads the subagent records the spool holds.
 func spoolSubagentRecords(t *testing.T, paths config.Paths) []record.Record {
 	t.Helper()
