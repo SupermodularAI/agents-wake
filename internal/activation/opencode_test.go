@@ -1,6 +1,7 @@
 package activation
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -499,5 +500,116 @@ func TestTheScanRecordsWhichHarnessesItRead(t *testing.T) {
 	}
 	if len(observed) != 2 || !observed["claude-code"] || !observed["opencode"] {
 		t.Fatalf("harness observations = %v, want both read", snapshot.Harnesses)
+	}
+}
+
+// unscannablePartRow is a tool part whose start instant is a JSON string where the
+// walk projects a number. It is well-formed JSON opencode could plausibly write
+// after retyping a field, and it is exactly the shape row.Scan refuses — the
+// format drift plan §12 says must fail visibly per harness rather than quietly
+// stop the walk.
+func unscannablePartRow(id string) string {
+	data := fmt.Sprintf(`{"type":"tool","tool":"bash","callID":"bash:1","state":{"status":"completed",`+
+		`"time":{"start":"not-a-number","end":%d}}}`, openCodeInstant.UnixMilli()+250)
+	return fmt.Sprintf(`insert into part values (%s, 'msg_1', 'ses_abc', %d, %d, %s)`,
+		sqlQuote(id), openCodeInstant.UnixMilli(), openCodeInstant.UnixMilli(), sqlQuote(data))
+}
+
+// unscannableSessionRow is a session whose token count is text where the walk
+// projects a number, on the same terms.
+func unscannableSessionRow(id string) string {
+	return fmt.Sprintf(`insert into session values (%s, '/nowhere', '1.18.30', 'lots', 13, 17, 19, 23, 0.42, %d)`,
+		sqlQuote(id), openCodeInstant.UnixMilli())
+}
+
+// TestAPageOfUnscannablePartsDoesNotStallTheWalk pins the paging key's only job:
+// it steps past a row this build cannot decode. A whole page of such rows used to
+// leave the key where it was, so the identical query came back with the identical
+// rows until the scan budget ran out — and every healthy row after that page was
+// orphaned on every future scan, because this walk keeps no cursor and starts over
+// each time.
+func TestAPageOfUnscannablePartsDoesNotStallTheWalk(t *testing.T) {
+	paths := testPaths(t)
+	root := t.TempDir()
+	repos := consentedRepos(t, paths, root)
+
+	rows := make([]string, 0, sqlitex.MaxRowsPerPage+1)
+	for i := range sqlitex.MaxRowsPerPage {
+		rows = append(rows, unscannablePartRow(fmt.Sprintf("prt_%04d", i)))
+	}
+	rows = append(rows, toolPartRow(fmt.Sprintf("prt_%04d", sqlitex.MaxRowsPerPage), "bash", "completed"))
+	storePath := openCodeFixture(t, root, rows...)
+
+	written, counters, err := runOpenCode(t, repos, storePath, filepath.Join(t.TempDir(), "events.ndjson"))
+	if err != nil {
+		t.Fatalf("ingestOpenCode() error = %v", err)
+	}
+	if written != 1 || counters.Parts != 1 {
+		t.Fatalf("written = %d, parts = %d, want 1 and 1: the healthy row sits after the unscannable page",
+			written, counters.Parts)
+	}
+	if counters.ParseErrors != sqlitex.MaxRowsPerPage {
+		t.Fatalf("parseErrors = %d, want %d: the unscannable page is read once, not until the budget runs out",
+			counters.ParseErrors, sqlitex.MaxRowsPerPage)
+	}
+}
+
+// TestAPageOfUnscannableSessionsDoesNotStallTheWalk is the same rule for the other
+// pager. A session that never registers is a part refused for want of consent, so
+// a stalled session page silently empties the whole harness.
+func TestAPageOfUnscannableSessionsDoesNotStallTheWalk(t *testing.T) {
+	paths := testPaths(t)
+	root := t.TempDir()
+	repos := consentedRepos(t, paths, root)
+
+	// ids sort before the fixture's own 'ses_abc', so the first page is entirely
+	// unscannable and the consented session is only reachable past it.
+	rows := make([]string, 0, sqlitex.MaxRowsPerPage+1)
+	for i := range sqlitex.MaxRowsPerPage {
+		rows = append(rows, unscannableSessionRow(fmt.Sprintf("ses_%04d", i)))
+	}
+	rows = append(rows, toolPartRow("prt_1", "bash", "completed"))
+	storePath := openCodeFixture(t, root, rows...)
+
+	written, counters, err := runOpenCode(t, repos, storePath, filepath.Join(t.TempDir(), "events.ndjson"))
+	if err != nil {
+		t.Fatalf("ingestOpenCode() error = %v", err)
+	}
+	if written != 1 || counters.Sessions != 1 {
+		t.Fatalf("written = %d, sessions = %d, want 1 and 1: the consented session sits after the unscannable page",
+			written, counters.Sessions)
+	}
+	if counters.ParseErrors != sqlitex.MaxRowsPerPage {
+		t.Fatalf("parseErrors = %d, want %d: the unscannable page is read once, not until the budget runs out",
+			counters.ParseErrors, sqlitex.MaxRowsPerPage)
+	}
+}
+
+// TestAPageThatNeverAdvancesEndsTheWalk covers the guard under the key: whatever
+// the reason a full page leaves the key untouched, re-issuing the identical query
+// would read the same rows forever, so the walk stops and reports blindness
+// instead of spending 250,000 reads on it.
+func TestAPageThatNeverAdvancesEndsTheWalk(t *testing.T) {
+	root := t.TempDir()
+	rows := make([]string, 0, sqlitex.MaxRowsPerPage)
+	for i := range sqlitex.MaxRowsPerPage {
+		rows = append(rows, unscannableSessionRow(fmt.Sprintf("ses_%04d", i)))
+	}
+	db, err := sqlitex.Open(openCodeFixture(t, root, rows...))
+	if err != nil {
+		t.Fatalf("sqlitex.Open() error = %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	visited := 0
+	err = page(db, sessionQuery, func(sqlitex.Row) string {
+		visited++
+		return ""
+	})
+	if !errors.Is(err, errPageStalled) {
+		t.Fatalf("page() error = %v, want errPageStalled", err)
+	}
+	if visited != sqlitex.MaxRowsPerPage {
+		t.Fatalf("visited = %d rows, want %d: the stalled page is read once", visited, sqlitex.MaxRowsPerPage)
 	}
 }

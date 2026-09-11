@@ -126,78 +126,103 @@ func ingestOpenCode(repos *config.Repos, storePath string, servers opencode.Serv
 	return result.Written, counters, nil
 }
 
-// pageSessions registers every session the store holds, paging by primary key
-// until a short page arrives.
+// errPageStalled means a full page left the paging key exactly where it was, so
+// the next query would return the same rows again. It names no row, no column and
+// no path — an error message is exactly where the promise that nothing leaves the
+// machine leaks (plan §4.2).
+var errPageStalled = errors.New("paging key did not advance")
+
+// page walks one table by primary key until a short page arrives, handing every
+// row to visit.
 //
-// A row that will not scan increments ParseErrors and is skipped, never fatal: one
-// malformed row is not a reason to collect nothing from the rest.
-func pageSessions(db *sqlitex.DB, walk *ingest.OpenCodeScan, counters *openCodeCounters) error {
+// visit returns the key it read — the row's own primary key — whether or not the
+// row was usable, and that is what keeps the walk moving: a page whose rows all
+// fail to decode still steps past them, so the healthy rows behind it are reached
+// and the scan budget is not spent re-reading one page. Advancing only on usable
+// rows would re-issue the identical query until MaxRowsPerScan ran out, which on a
+// harness that retyped a column is every row in the table, on every future scan.
+//
+// A full page that leaves the key untouched anyway ends the walk as blindness
+// rather than looping: the caller counts it Unreadable, which is the difference
+// between "collects nothing" and "collects zero" that doctor must be able to draw
+// (plan §3.3, §12).
+func page(db *sqlitex.DB, query string, visit func(sqlitex.Row) string) error {
 	last := ""
 	for {
-		read, err := db.Page(sessionQuery, []any{last}, sqlitex.MaxRowsPerPage, func(row sqlitex.Row) error {
-			session, usable := scanSession(row, counters)
-			if usable {
-				last = session.ID
-				counters.Sessions++
-				walk.Session(session)
+		started := last
+		read, err := db.Page(query, []any{last}, sqlitex.MaxRowsPerPage, func(row sqlitex.Row) error {
+			// Rows arrive in key order, so the largest key read is the page's last
+			// row; taking the maximum rather than the latest keeps that true even
+			// if a row yields no key at all.
+			if key := visit(row); key > last {
+				last = key
 			}
 			return nil
 		})
-		if errors.Is(err, sqlitex.ErrRowCap) {
+		switch {
+		case errors.Is(err, sqlitex.ErrRowCap):
 			// Partial collection, not a failure: the next scan re-derives what this
 			// one did not reach, because every id comes from its source event.
 			return nil
-		}
-		if err != nil {
+		case err != nil:
 			return err
-		}
-		if read < sqlitex.MaxRowsPerPage {
+		case read < sqlitex.MaxRowsPerPage:
 			return nil
+		case last == started:
+			return errPageStalled
 		}
 	}
 }
 
+// pageSessions registers every session the store holds.
+//
+// A row that will not scan increments ParseErrors and is skipped, never fatal: one
+// malformed row is not a reason to collect nothing from the rest.
+func pageSessions(db *sqlitex.DB, walk *ingest.OpenCodeScan, counters *openCodeCounters) error {
+	return page(db, sessionQuery, func(row sqlitex.Row) string {
+		session, key, usable := scanSession(row, counters)
+		if usable {
+			counters.Sessions++
+			walk.Session(session)
+		}
+		return key
+	})
+}
+
 // pageParts offers every tool part the store holds, on the same terms.
 func pageParts(db *sqlitex.DB, walk *ingest.OpenCodeScan, counters *openCodeCounters) error {
-	last := ""
-	for {
-		read, err := db.Page(partQuery, []any{last}, sqlitex.MaxRowsPerPage, func(row sqlitex.Row) error {
-			part, usable := scanPart(row, counters)
-			if usable {
-				last = part.ID
-				counters.Parts++
-				walk.Part(part)
-			}
-			return nil
-		})
-		if errors.Is(err, sqlitex.ErrRowCap) {
-			return nil
+	return page(db, partQuery, func(row sqlitex.Row) string {
+		part, key, usable := scanPart(row, counters)
+		if usable {
+			counters.Parts++
+			walk.Part(part)
 		}
-		if err != nil {
-			return err
-		}
-		if read < sqlitex.MaxRowsPerPage {
-			return nil
-		}
-	}
+		return key
+	})
 }
 
 // scanSession and scanPart read one row, or count it as a parse error and report
 // it unusable. A row this build cannot decode is skipped and never fatal: one
 // malformed row is not a reason to collect nothing from the rest, and the count is
 // what keeps the skip visible rather than silent (plan §3.3, §12).
-func scanSession(row sqlitex.Row, counters *openCodeCounters) (opencode.Session, bool) {
+//
+// Both return the row's primary key beside the value, and return it on the
+// refusing path too: row.Scan assigns destinations in order and the key is the
+// first of them, so it is read before any later column can refuse, and the pager
+// needs it to step past this row. Nothing else survives the refusal — the value
+// returned with it is the zero one.
+func scanSession(row sqlitex.Row, counters *openCodeCounters) (opencode.Session, string, bool) {
 	session := opencode.Session{}
 	if err := row.Scan(&session.ID, &session.Directory, &session.Version,
 		&session.TokensInput, &session.TokensOutput, &session.TokensReasoning,
 		&session.TokensCacheRead, &session.TokensCacheWrite, &session.UpdatedMS); err != nil {
 		counters.ParseErrors++
-		return opencode.Session{}, false
+		return opencode.Session{}, session.ID, false
 	}
-	return session, true
+	return session, session.ID, true
 }
 
-func scanPart(row sqlitex.Row, counters *openCodeCounters) (opencode.ToolPart, bool) {
+func scanPart(row sqlitex.Row, counters *openCodeCounters) (opencode.ToolPart, string, bool) {
 	part := opencode.ToolPart{}
 	// The end instant is the one projected column that is legitimately absent: a
 	// part the harness has not finished has no end, and nil here is what makes
@@ -206,10 +231,10 @@ func scanPart(row sqlitex.Row, counters *openCodeCounters) (opencode.ToolPart, b
 	if err := row.Scan(&part.ID, &part.SessionID, &part.UpdatedMS,
 		&part.Tool, &part.Status, &part.StartMS, &end); err != nil {
 		counters.ParseErrors++
-		return opencode.ToolPart{}, false
+		return opencode.ToolPart{}, part.ID, false
 	}
 	if end != nil {
 		part.EndMS, part.HasEnd = *end, true
 	}
-	return part, true
+	return part, part.ID, true
 }
