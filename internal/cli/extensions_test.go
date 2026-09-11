@@ -10,11 +10,12 @@ import (
 // exists for: it would print a doctor section twice and spawn two detached flushes per
 // scan, and neither is loud enough to notice without an assertion.
 //
-// Two sections since DG-75 — the collection boundary's and delivery's — and the number
-// is spelled out rather than derived, so a feature adding a third has to say so here.
+// Three sections since DG-119 — the collection boundary's, the per-harness one and
+// delivery's — and the number is spelled out rather than derived, so a feature adding
+// a fourth has to say so here.
 func TestEachSeamIsRegisteredExactlyOnce(t *testing.T) {
-	if len(diagnosisSections) != 2 {
-		t.Errorf("registered %d diagnosis sections, want exactly 2", len(diagnosisSections))
+	if len(diagnosisSections) != 3 {
+		t.Errorf("registered %d diagnosis sections, want exactly 3", len(diagnosisSections))
 	}
 	if len(afterScan) != 1 {
 		t.Errorf("registered %d post-scan hooks, want exactly 1", len(afterScan))
@@ -30,7 +31,8 @@ func TestEachSeamIsRegisteredExactlyOnce(t *testing.T) {
 // The whole of stdout means the boundary section too, which is why this case is the one
 // that has to change when a section is added. Section order is registration order,
 // which follows the order the toolchain hands this package's files to the compiler —
-// today, sorted, so doctor_boundary.go precedes doctor_remote.go. That is a toolchain
+// today, sorted, so doctor_boundary.go precedes doctor_harness.go precedes
+// doctor_remote.go. That is a toolchain
 // detail rather than a language guarantee, which is exactly why the order is pinned by
 // this snapshot: a build that ordered them differently fails here rather than shipping
 // a doctor whose sections moved.
@@ -85,6 +87,20 @@ func TestDoctorOutputOnAFreshInstall(t *testing.T) {
 		"integration: never scanned\n" +
 		"global boundary: not set\n" +
 		"global boundary repositories: 0\n" +
+		"claude code: not observed\n" +
+		"claude code sources: not observed\n" +
+		"claude code unreadable sources: not observed\n" +
+		"claude code parse errors: not observed\n" +
+		"claude code refused calls: not observed\n" +
+		"claude code unknown outcomes: not observed\n" +
+		"claude code events written: not observed\n" +
+		"opencode: not observed\n" +
+		"opencode sources: not observed\n" +
+		"opencode unreadable sources: not observed\n" +
+		"opencode parse errors: not observed\n" +
+		"opencode refused calls: not observed\n" +
+		"opencode unknown outcomes: not observed\n" +
+		"opencode events written: not observed\n" +
 		"remote endpoint: not configured\n" +
 		"remote credential: not configured\n" +
 		"remote delivery: off\n" +
