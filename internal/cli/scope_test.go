@@ -12,6 +12,7 @@ import (
 
 	"github.com/SupermodularAI/agents-wake/internal/config"
 	"github.com/SupermodularAI/agents-wake/internal/inventory"
+	"github.com/SupermodularAI/agents-wake/internal/record"
 )
 
 func TestResolveDiscoveryScopeWithholdsProjectDiscoveryOutsideAConsentedRepository(t *testing.T) {
@@ -92,4 +93,44 @@ func scopeFixture(t *testing.T, directory string) (config.Paths, *bytes.Buffer, 
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(notices)
 	return paths, notices, cmd
+}
+
+// The discovery report and serve republish the snapshot from must cover every
+// harness. A Claude-Code-only one silently drops the other harness's declared
+// primitives: its servers render as unmatched on every row, and one it declares
+// but never invokes vanishes from the unused list — the one list that exists to
+// name unused things.
+func TestDiscoverAllReposCoversEveryHarness(t *testing.T) {
+	paths := isolate(t)
+	configDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(configDir, "opencode"), 0o700); err != nil {
+		t.Fatalf("creating the config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "opencode", "opencode.jsonc"),
+		[]byte(`{"mcp":{"atlassian":{},"notion":{}}}`), 0o600); err != nil {
+		t.Fatalf("writing the opencode config: %v", err)
+	}
+	t.Setenv(config.EnvXDGConfigHome, configDir)
+	t.Setenv(config.EnvOpenCodeConfig, "")
+
+	discovery, err := discoverAllRepos(paths, t.TempDir())
+	if err != nil {
+		t.Fatalf("discoverAllRepos() error = %v", err)
+	}
+	servers := map[record.Identifier]bool{}
+	for _, primitive := range discovery.Primitives {
+		if primitive.Harness == "opencode" && primitive.Kind == record.KindMCPServer {
+			servers[primitive.Name] = true
+		}
+	}
+	if !servers["atlassian"] || !servers["notion"] {
+		t.Fatalf("discovery = %v, want opencode's declared servers", discovery.Primitives)
+	}
+	observed := map[record.Identifier]bool{}
+	for _, harness := range discovery.Observed {
+		observed[harness.Harness] = harness.Observed
+	}
+	if !observed["claude-code"] || !observed["opencode"] {
+		t.Fatalf("observations = %v, want both harnesses read", discovery.Observed)
+	}
 }
