@@ -5,6 +5,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/adapter"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 )
 
@@ -21,10 +22,10 @@ import (
 // future cursor would make the carry due, and this comment is where that is
 // recorded.
 type Scan struct {
-	resolve Resolver
+	resolve adapter.Resolver
 	servers Servers
-	stale   Staleness
-	idle    Idleness
+	stale   adapter.Staleness
+	idle    adapter.Idleness
 
 	sessions map[string]Session
 	// buffered holds every part with no terminal status yet, in arrival order.
@@ -38,10 +39,15 @@ type Scan struct {
 	result  Result
 }
 
+// The reader satisfies the contract every reader owes its caller (ADR-0013). The
+// assertion is here rather than in a test so a change to either side stops the
+// build rather than one package's tests.
+var _ adapter.Scan = (*Scan)(nil)
+
 // NewScan starts one walk. Every capability it needs about the machine — the
 // consent answer, the configured servers, both thresholds — arrives here as a
 // value, because derivation may not read the filesystem (ADR-0019 §1).
-func NewScan(resolve Resolver, servers Servers, stale Staleness, idle Idleness) *Scan {
+func NewScan(resolve adapter.Resolver, servers Servers, stale adapter.Staleness, idle adapter.Idleness) *Scan {
 	return &Scan{
 		resolve:     resolve,
 		servers:     servers,

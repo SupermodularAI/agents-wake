@@ -3,6 +3,7 @@ package claudecode
 import (
 	"strings"
 
+	"github.com/SupermodularAI/agents-wake/internal/adapter"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 )
 
@@ -199,7 +200,7 @@ const (
 // The whole record is built before anything is returned, so every gate has run before a
 // caller can emit it — the discipline attributedSkillCandidate states and the reason a
 // candidate that exists has already passed every check (ADR-0007).
-func (entry transcriptEntry) typedInvocation(resolve Resolver, names record.Namer, installed Installed) (record.Record, tagStatus) {
+func (entry transcriptEntry) typedInvocation(resolve adapter.Resolver, names record.Namer, installed Installed) (record.Record, tagStatus) {
 	if entry.IsSidechain {
 		return record.Record{}, tagAbsent
 	}

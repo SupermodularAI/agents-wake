@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/adapter"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 )
 
@@ -21,8 +22,8 @@ const sessionIdleTimeout = 30 * time.Minute
 // session whose last activity is callInstant. finished is well past the threshold;
 // live is well inside it.
 var (
-	finished = Idleness{Timeout: sessionIdleTimeout, Now: callInstant.Add(2 * time.Hour)}
-	live     = Idleness{Timeout: sessionIdleTimeout, Now: callInstant.Add(10 * time.Minute)}
+	finished = adapter.Idleness{Timeout: sessionIdleTimeout, Now: callInstant.Add(2 * time.Hour)}
+	live     = adapter.Idleness{Timeout: sessionIdleTimeout, Now: callInstant.Add(10 * time.Minute)}
 )
 
 // realUsage is the usage block a real Claude Code transcript carries, kept
@@ -86,7 +87,7 @@ func onlySessionEnd(t *testing.T, result Result) record.Record {
 func TestReadDerivesOneSessionEndForAFinishedSession(t *testing.T) {
 	input := assistantLine("entry-1", "session-1", "2026-08-13T12:00:00Z", "msg_1", realUsage)
 
-	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, Staleness{}, finished)
+	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, adapter.Staleness{}, finished)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -131,7 +132,7 @@ func TestReadDerivesOneSessionEndForAFinishedSession(t *testing.T) {
 
 func TestReadDerivesNoSessionEndForAnOpenSession(t *testing.T) {
 	input := assistantLine("entry-1", "session-1", "2026-08-13T12:00:00Z", "msg_1", realUsage)
-	cases := map[string]Idleness{
+	cases := map[string]adapter.Idleness{
 		"well inside the window": live,
 		// Strictly greater than the threshold, matching closed()'s rule: a session
 		// silent for exactly the threshold is still open, which errs toward not writing
@@ -141,7 +142,7 @@ func TestReadDerivesNoSessionEndForAnOpenSession(t *testing.T) {
 
 	for name, idle := range cases {
 		t.Run(name, func(t *testing.T) {
-			result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, Staleness{}, idle)
+			result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, adapter.Staleness{}, idle)
 			if err != nil {
 				t.Fatalf("Read() error = %v", err)
 			}
@@ -158,7 +159,7 @@ func TestReadDerivesNoSessionEndForAnOpenSession(t *testing.T) {
 // ADR-0004 deduplicates the correction away.
 func TestReadDerivesNoSessionEndWithoutAThreshold(t *testing.T) {
 	input := assistantLine("entry-1", "session-1", "2026-08-13T12:00:00Z", "msg_1", realUsage)
-	cases := map[string]Idleness{
+	cases := map[string]adapter.Idleness{
 		"zero value":     {},
 		"no clock":       {Timeout: sessionIdleTimeout},
 		"no threshold":   {Now: callInstant.Add(2 * time.Hour)},
@@ -167,7 +168,7 @@ func TestReadDerivesNoSessionEndWithoutAThreshold(t *testing.T) {
 
 	for name, idle := range cases {
 		t.Run(name, func(t *testing.T) {
-			result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, Staleness{}, idle)
+			result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, adapter.Staleness{}, idle)
 			if err != nil {
 				t.Fatalf("Read() error = %v", err)
 			}
@@ -187,7 +188,7 @@ func TestReadDerivesASessionEndForASessionWithNoInvocations(t *testing.T) {
 		assistantLine("entry-2", "session-1", "2026-08-13T12:00:05Z", "msg_1", realUsage),
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, Staleness{}, finished)
+	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, adapter.Staleness{}, finished)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -211,7 +212,7 @@ func TestSessionEndTimestampIsLastConsentedActivity(t *testing.T) {
 		assistantLine("entry-3", "session-1", "2026-08-13T12:02:00Z", "msg_3", "null"),
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, Staleness{}, finished)
+	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, adapter.Staleness{}, finished)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -316,7 +317,7 @@ func TestReadCountsToolCallsAndBuiltinToolCallsForASession(t *testing.T) {
 		toolCallLines("b1", "session-b", "2026-08-13T12:00:04Z", "call-4", "Bash", `{}`),
 	}, "\n")
 
-	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, Staleness{}, finished)
+	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, adapter.Staleness{}, finished)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -359,7 +360,7 @@ func TestReadCountsAShapeAFallbackAsAToolCall(t *testing.T) {
 // scan.stale_call_timeout has not elapsed is simply not in it. There is no
 // waiting, no backfill and no reconciliation pass.
 func TestReadExcludesAPendingCallFromTheAggregate(t *testing.T) {
-	result, err := Read(strings.NewReader(unterminatedCall), resolver, names, installedPrimitives, Staleness{}, finished)
+	result, err := Read(strings.NewReader(unterminatedCall), resolver, names, installedPrimitives, adapter.Staleness{}, finished)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -519,14 +520,14 @@ func TestReadDerivesNoSessionEndOutsideConsent(t *testing.T) {
 	forwardOnly := func(cwd string, at time.Time) (record.Hash, bool) {
 		return repo, cwd == consentedPath && !at.Before(callInstant.Add(time.Hour))
 	}
-	cases := map[string]Resolver{
+	cases := map[string]adapter.Resolver{
 		"an unconsented directory": deny,
 		"before the boundary":      forwardOnly,
 	}
 
 	for name, resolve := range cases {
 		t.Run(name, func(t *testing.T) {
-			result, err := Read(strings.NewReader(input), resolve, names, installedPrimitives, Staleness{}, finished)
+			result, err := Read(strings.NewReader(input), resolve, names, installedPrimitives, adapter.Staleness{}, finished)
 			if err != nil {
 				t.Fatalf("Read() error = %v", err)
 			}
@@ -549,8 +550,8 @@ func TestSessionEndUsesOnlyConsentedActivity(t *testing.T) {
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/elsewhere","timestamp":"2026-08-13T13:50:00Z","entrypoint":"cli","message":{"model":"sonnet","id":"msg_2","usage":` + realUsage + `,"content":[]}}`,
 	}, "\n")
 
-	stillWriting := Idleness{Timeout: sessionIdleTimeout, Now: callInstant.Add(2 * time.Hour)}
-	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, Staleness{}, stillWriting)
+	stillWriting := adapter.Idleness{Timeout: sessionIdleTimeout, Now: callInstant.Add(2 * time.Hour)}
+	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, adapter.Staleness{}, stillWriting)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -558,7 +559,7 @@ func TestSessionEndUsesOnlyConsentedActivity(t *testing.T) {
 		t.Fatalf("session_end records = %d, want 0 while the session is still writing", len(ends))
 	}
 
-	longQuiet := Idleness{Timeout: sessionIdleTimeout, Now: callInstant.Add(4 * time.Hour)}
+	longQuiet := adapter.Idleness{Timeout: sessionIdleTimeout, Now: callInstant.Add(4 * time.Hour)}
 	event := onlySessionEnd(t, mustRead(t, input, longQuiet))
 	if !event.Timestamp.Equal(callInstant) {
 		t.Errorf("Timestamp = %v, want the last consented activity %v", event.Timestamp, callInstant)
@@ -599,7 +600,7 @@ func TestReadDerivesNoSessionEndWhenALineWasUnreadable(t *testing.T) {
 func TestReadDerivesNoSessionEndWithNoMappableEntrypoint(t *testing.T) {
 	input := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","entrypoint":"sdk-ts","message":{"model":"sonnet","id":"msg_1","usage":` + realUsage + `,"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}`
 
-	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, Staleness{}, finished)
+	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, adapter.Staleness{}, finished)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -708,8 +709,8 @@ func TestSessionStateFinishedSessionsIsNotClosed(t *testing.T) {
 
 	// Silent for an hour: past session.idle_timeout's 30m, well inside
 	// scan.stale_call_timeout's 24h.
-	stale := Staleness{Timeout: 24 * time.Hour, Now: callInstant.Add(time.Hour)}
-	idle := Idleness{Timeout: sessionIdleTimeout, Now: callInstant.Add(time.Hour)}
+	stale := adapter.Staleness{Timeout: 24 * time.Hour, Now: callInstant.Add(time.Hour)}
+	idle := adapter.Idleness{Timeout: sessionIdleTimeout, Now: callInstant.Add(time.Hour)}
 
 	if sessions.Closed("session-1", stale) {
 		t.Error("Closed() = true under a 24h staleness threshold")
@@ -735,7 +736,7 @@ func TestSessionStateNeverFinishesABlindSession(t *testing.T) {
 	sessions.Observe(0, "session-clear", callInstant, 100)
 	sessions.MarkBlind("session-blind")
 
-	idle := Idleness{Timeout: sessionIdleTimeout, Now: callInstant.Add(time.Hour)}
+	idle := adapter.Idleness{Timeout: sessionIdleTimeout, Now: callInstant.Add(time.Hour)}
 
 	got := sessions.finishedSessions(idle)
 	if len(got) != 1 || got[0] != "session-clear" {
@@ -743,11 +744,11 @@ func TestSessionStateNeverFinishesABlindSession(t *testing.T) {
 	}
 }
 
-// mustRead is the session-grain entry point into Read: a real Idleness, no
+// mustRead is the session-grain entry point into Read: a real adapter.Idleness, no
 // staleness rule unless a test asks for one.
-func mustRead(t *testing.T, input string, idle Idleness) Result {
+func mustRead(t *testing.T, input string, idle adapter.Idleness) Result {
 	t.Helper()
-	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, Staleness{}, idle)
+	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, adapter.Staleness{}, idle)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}
@@ -818,7 +819,7 @@ func TestSessionEndDatesItselfFromATrailingUserTurn(t *testing.T) {
 func TestSessionEndCarriesNoDuration(t *testing.T) {
 	input := assistantLine("entry-1", "session-1", "2026-08-13T12:00:00Z", "msg_1", realUsage)
 
-	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, Staleness{}, finished)
+	result, err := Read(strings.NewReader(input), resolver, names, installedPrimitives, adapter.Staleness{}, finished)
 	if err != nil {
 		t.Fatalf("Read() error = %v", err)
 	}

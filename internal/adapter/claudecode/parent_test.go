@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/adapter"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 )
 
@@ -211,7 +212,7 @@ func TestResolveDeferredChildrenWaitsForTheSession(t *testing.T) {
 	now := time.Date(2026, time.August, 26, 12, 0, 0, 0, time.UTC)
 	sessions := &SessionState{}
 	sessions.Observe(0, "session-open", now, 0)
-	stale := Staleness{Timeout: time.Hour, Now: now}
+	stale := adapter.Staleness{Timeout: time.Hour, Now: now}
 
 	deferred := []deferredChild{{
 		event:  parentChild("session-open", "", "child-id"),
@@ -226,7 +227,7 @@ func TestResolveDeferredChildrenOrdersByTimestampThenEventID(t *testing.T) {
 	now := time.Date(2026, time.August, 26, 12, 0, 0, 0, time.UTC)
 	sessions := &SessionState{}
 	sessions.Observe(0, "session-1", now.Add(-2*time.Hour), 0)
-	stale := Staleness{Timeout: time.Hour, Now: now}
+	stale := adapter.Staleness{Timeout: time.Hour, Now: now}
 
 	early := parentChild("session-1", "", "bbbb")
 	early.Timestamp = now.Add(-3 * time.Hour)
@@ -274,7 +275,7 @@ func TestSessionParentIsTheSessionEndsEventID(t *testing.T) {
 // and is never hand-written (CLAUDE.md § Off-limits paths), and what these tests need
 // is not a real transcript but a specific parentage shape.
 //
-// Every one of them passes a closing Staleness, because ADR-0035 resolves a deferred
+// Every one of them passes a closing adapter.Staleness, because ADR-0035 resolves a deferred
 // child at session close — a test that wants such a record emitted has to say the
 // session ended.
 
@@ -322,12 +323,12 @@ func attributedToolCall(uuid, session, at, callID, tool, attributionSkill string
 	}, "\n")
 }
 
-// closing is a Staleness and an Idleness under which every fixture in this file —
+// closing is a adapter.Staleness and an adapter.Idleness under which every fixture in this file —
 // all stamped at or just after callInstant — has gone quiet, so a deferred child and
 // a session_end are both resolved.
 var (
-	closingStale = Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
-	closingIdle  = Idleness{Timeout: sessionIdleTimeout, Now: callInstant.Add(8 * time.Hour)}
+	closingStale = adapter.Staleness{Timeout: time.Hour, Now: callInstant.Add(8 * time.Hour)}
+	closingIdle  = adapter.Idleness{Timeout: sessionIdleTimeout, Now: callInstant.Add(8 * time.Hour)}
 )
 
 // byKind returns the records of one kind, so a test can name the record it means
@@ -794,12 +795,12 @@ func TestAHostileAgentIDIsNotACaseOneParent(t *testing.T) {
 // incremental cursor, and SourceFloor already refuses to pass an open session.
 func TestADeferredChildOfAnOpenSessionIsNotEmitted(t *testing.T) {
 	source := attributedToolCall("call-entry", "session-1", "2026-08-13T12:00:00Z", "call-1", "Bash", "pr-review")
-	open := Staleness{Timeout: time.Hour, Now: callInstant.Add(10 * time.Minute)}
+	open := adapter.Staleness{Timeout: time.Hour, Now: callInstant.Add(10 * time.Minute)}
 
 	// Driven directly rather than through twoSources, so the source floor can be
 	// asked for: a walk has no single floor, so Result leaves CursorFloor zero and
 	// SessionState.SourceFloor is the per-source answer (ADR-0023 §5).
-	scan := NewScan(resolver, names, installedPrimitives, open, Idleness{})
+	scan := NewScan(resolver, names, installedPrimitives, open, adapter.Idleness{})
 	read, err := scan.Read(strings.NewReader(source))
 	if err != nil {
 		t.Fatalf("Scan.Read() error = %v", err)
@@ -846,9 +847,9 @@ func TestScanCreditsASourceWhoseOnlyContributionWasADeferredChild(t *testing.T) 
 // buffered. closingStale/closingIdle close both at once, which is the one
 // configuration in which a deferred child's absence from the session grain's totals
 // is invisible.
-func splitGates() (Staleness, Idleness) {
+func splitGates() (adapter.Staleness, adapter.Idleness) {
 	now := callInstant.Add(2 * time.Hour)
-	return Staleness{Timeout: 24 * time.Hour, Now: now}, Idleness{Timeout: 30 * time.Minute, Now: now}
+	return adapter.Staleness{Timeout: 24 * time.Hour, Now: now}, adapter.Idleness{Timeout: 30 * time.Minute, Now: now}
 }
 
 // toolCallTotals reads the two counters a session_end carries, failing rather than

@@ -14,6 +14,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/adapter"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 )
 
@@ -192,17 +193,29 @@ type Result struct {
 	SkippedSourceOrdinals []int
 }
 
-// Resolver maps one observed event — a recorded working directory and the instant it
-// happened — to a consented repository hash.
-//
-// It returns false when the event is outside consent, which has two dimensions and
-// one answer: the directory was never consented, or the event predates the instant
-// collection began for its repository (ADR-0024, ADR-0025). The reader passes the
-// event's own timestamp and never learns the boundary — consent stays the caller's
-// to answer, so no adapter scan can widen it in either dimension.
-//
-// The reader never accesses the filesystem while resolving a transcript entry.
-type Resolver func(cwd string, at time.Time) (record.Hash, bool)
+// Harness is the slug every record this reader derives carries. Exported so a
+// caller folding per-harness diagnostics can name it without holding a Scan.
+func Harness() record.Identifier { return harness }
+
+// init declares this build's Claude Code reader to the registry, so nothing has
+// to hardcode a list of the harnesses this binary reads (ADR-0013).
+func init() { adapter.Register(harness) }
+
+// Common is the counter vocabulary this reader shares with every other
+// (adapter.Result). The counters it leaves behind — malformed lines, refused
+// subagent runs, skipped typed invocations, ambiguous skill runs, the cursor
+// floor and the source ordinals — stay on this type, because a reader with no
+// transcripts to malform would report a permanent zero for them.
+func (r Result) Common() adapter.Result {
+	return adapter.Result{
+		Records:         r.Records,
+		Pending:         r.Pending,
+		Interrupted:     r.Interrupted,
+		Refused:         r.Refused,
+		SkippedSources:  r.SkippedSources,
+		OutOfOrderPairs: r.OutOfOrderPairs,
+	}
+}
 
 // Read streams one Claude Code transcript. Only events accepted by resolve can
 // become records, so an adapter scan cannot widen project consent.
@@ -235,7 +248,7 @@ type Resolver func(cwd string, at time.Time) (record.Hash, bool)
 // that may share a session id must use Scan instead: resolving each file on its own
 // closes a session another file shows running and reports one session_end per file
 // rather than one per session, permanently (ADR-0036 §Consequences).
-func Read(reader io.Reader, resolve Resolver, names record.Namer, installed Installed, stale Staleness, idle Idleness) (Result, error) {
+func Read(reader io.Reader, resolve adapter.Resolver, names record.Namer, installed Installed, stale adapter.Staleness, idle adapter.Idleness) (Result, error) {
 	scan := NewScan(resolve, names, installed, stale, idle)
 	first, err := scan.Read(reader)
 	if err != nil {
@@ -305,7 +318,7 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, installed Inst
 // source it came from. What the function decides is unchanged: the closed gate, the
 // order, the matched-drop and the extra accounting are the same as before ADR-0036
 // widened the buffer from one file to one walk (ADR-0036 §4).
-func resolveSessionSkills(buffer map[skillRun]skillCandidate, invoked, typed map[skillRun]struct{}, sessions *SessionState, stale Staleness) ([]derivation, int) {
+func resolveSessionSkills(buffer map[skillRun]skillCandidate, invoked, typed map[skillRun]struct{}, sessions *SessionState, stale adapter.Staleness) ([]derivation, int) {
 	resolved := make([]skillRun, 0, len(buffer))
 	for key := range buffer {
 		if sessions.Closed(key.session, stale) {
@@ -355,7 +368,7 @@ func resolveSessionSkills(buffer map[skillRun]skillCandidate, invoked, typed map
 // total now that the buffer is keyed by (session, block id): a block id alone is
 // unique per call inside one file but not across a walk. That is ADR-0004
 // determinism under a wider key, not a change to what this function decides.
-func resolveStaleCalls(pending map[callKey]call, sessions *SessionState, stale Staleness) []derivation {
+func resolveStaleCalls(pending map[callKey]call, sessions *SessionState, stale adapter.Staleness) []derivation {
 	resolved := make([]callKey, 0, len(pending))
 	for key, buffered := range pending {
 		if sessions.Closed(buffered.sessionID, stale) {
@@ -827,7 +840,7 @@ const (
 	callRefused
 )
 
-func (entry transcriptEntry) call(source int, block contentBlock, resolve Resolver, names record.Namer) (call, callStatus) {
+func (entry transcriptEntry) call(source int, block contentBlock, resolve adapter.Resolver, names record.Namer) (call, callStatus) {
 	if subagentInvocation(block.Name) {
 		// Skipped, not refused: this block was never Wake's to collect, so counting it
 		// as lost collection would report a permanent fault for a rule working as
@@ -940,7 +953,7 @@ func (entry transcriptEntry) call(source int, block contentBlock, resolve Resolv
 // so the collapse has to happen here rather than at write time. attributionAgent's
 // own role on this path is via_agent attribution on the calls a subagent makes (see
 // call).
-func (entry transcriptEntry) attributedSkillCandidate(resolve Resolver, names record.Namer) (record.Record, callStatus) {
+func (entry transcriptEntry) attributedSkillCandidate(resolve adapter.Resolver, names record.Namer) (record.Record, callStatus) {
 	if entry.Message.StopReason != "end_turn" || entry.AttributionSkill == "" || entry.IsSidechain {
 		return record.Record{}, callSkipped
 	}

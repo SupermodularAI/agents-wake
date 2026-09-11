@@ -5,19 +5,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/adapter"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 )
 
 // finished drives a scan whose only content is one session, past the idle
 // threshold.
-func finished(idle Idleness) Result {
-	scan := NewScan(consents, NewServers(nil), Staleness{}, idle)
+func finished(idle adapter.Idleness) Result {
+	scan := NewScan(consents, NewServers(nil), adapter.Staleness{}, idle)
 	scan.Session(session("ses_abc"))
 	return scan.Close()
 }
 
 func TestAFinishedSessionDerivesOneSessionEnd(t *testing.T) {
-	result := finished(Idleness{Timeout: time.Hour, Now: past})
+	result := finished(adapter.Idleness{Timeout: time.Hour, Now: past})
 	if len(result.Records) != 1 {
 		t.Fatalf("records = %d, want 1", len(result.Records))
 	}
@@ -34,7 +35,7 @@ func TestAFinishedSessionDerivesOneSessionEnd(t *testing.T) {
 }
 
 func TestASessionEndCarriesTheFiveTokenTotals(t *testing.T) {
-	got := finished(Idleness{Timeout: time.Hour, Now: past}).Records[0]
+	got := finished(adapter.Idleness{Timeout: time.Hour, Now: past}).Records[0]
 	totals := map[string]*int64{
 		"input": got.InputTokens, "output": got.OutputTokens, "thinking": got.ThinkingTokens,
 		"cache read": got.CacheReadTokens, "cache creation": got.CacheCreationTokens,
@@ -55,7 +56,7 @@ func TestNoTokenTotalIsEstimated(t *testing.T) {
 	// Distinctive primes in, exact equality out: these come from opencode's own
 	// integers and never from bytes ÷ 4, so no renderer can blend an estimate into
 	// them (plan §2.6).
-	got := finished(Idleness{Timeout: time.Hour, Now: past}).Records[0]
+	got := finished(adapter.Idleness{Timeout: time.Hour, Now: past}).Records[0]
 	for _, pair := range []struct {
 		name string
 		got  *int64
@@ -76,7 +77,7 @@ func TestNoTokenTotalIsEstimated(t *testing.T) {
 func TestASessionEndHasNoCostField(t *testing.T) {
 	// session.cost is deferred, and the deferral is structural: no field holds it,
 	// so no key can appear on the wire or on disk.
-	got := finished(Idleness{Timeout: time.Hour, Now: past}).Records[0]
+	got := finished(adapter.Idleness{Timeout: time.Hour, Now: past}).Records[0]
 	line, err := record.Marshal(got)
 	if err != nil {
 		t.Fatalf("marshalling: %v", err)
@@ -91,7 +92,7 @@ func TestASessionEndHasNoCostField(t *testing.T) {
 }
 
 func TestZeroIdlenessDerivesNoSessionEnd(t *testing.T) {
-	if result := finished(Idleness{}); len(result.Records) != 0 {
+	if result := finished(adapter.Idleness{}); len(result.Records) != 0 {
 		t.Fatalf("records = %d, want none: a session_end on a guessed threshold is permanent", len(result.Records))
 	}
 }
@@ -100,13 +101,13 @@ func TestAnActiveSessionIsNotFinished(t *testing.T) {
 	// Strictly greater than the threshold, matching the first adapter's rule: a
 	// session silent for exactly the threshold is still open.
 	exactly := fixtureTime.Add(time.Hour)
-	if result := finished(Idleness{Timeout: time.Hour, Now: exactly}); len(result.Records) != 0 {
+	if result := finished(adapter.Idleness{Timeout: time.Hour, Now: exactly}); len(result.Records) != 0 {
 		t.Fatalf("records = %d, want none at exactly the threshold", len(result.Records))
 	}
 }
 
 func TestAnUnconsentedSessionDerivesNoSessionEnd(t *testing.T) {
-	scan := NewScan(declines, NewServers(nil), Staleness{}, Idleness{Timeout: time.Hour, Now: past})
+	scan := NewScan(declines, NewServers(nil), adapter.Staleness{}, adapter.Idleness{Timeout: time.Hour, Now: past})
 	scan.Session(session("ses_abc"))
 	result := scan.Close()
 	if len(result.Records) != 0 {
@@ -116,7 +117,7 @@ func TestAnUnconsentedSessionDerivesNoSessionEnd(t *testing.T) {
 
 func TestSessionEndsAreDerivedInAStableOrder(t *testing.T) {
 	run := func() []record.Hash {
-		scan := NewScan(consents, NewServers(nil), Staleness{}, Idleness{Timeout: time.Hour, Now: past})
+		scan := NewScan(consents, NewServers(nil), adapter.Staleness{}, adapter.Idleness{Timeout: time.Hour, Now: past})
 		for _, id := range []string{"ses_c", "ses_a", "ses_b"} {
 			scan.Session(session(id))
 		}

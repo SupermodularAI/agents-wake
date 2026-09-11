@@ -6,6 +6,7 @@ package ingest
 import (
 	"io"
 
+	"github.com/SupermodularAI/agents-wake/internal/adapter"
 	"github.com/SupermodularAI/agents-wake/internal/adapter/claudecode"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 	"github.com/SupermodularAI/agents-wake/internal/store"
@@ -130,7 +131,7 @@ type Result struct {
 // reading a set of transcripts that may share a session id must drive a
 // ClaudeCodeScan instead, or each file's resolution will judge that session from a
 // partial view (ADR-0036 §Consequences).
-func ClaudeCode(reader io.Reader, resolve claudecode.Resolver, names record.Namer, installed claudecode.Installed, stale claudecode.Staleness, idle claudecode.Idleness, destination *store.Store) (Result, error) {
+func ClaudeCode(reader io.Reader, resolve adapter.Resolver, names record.Namer, installed claudecode.Installed, stale adapter.Staleness, idle adapter.Idleness, destination *store.Store) (Result, error) {
 	derived, err := claudecode.Read(reader, resolve, names, installed, stale, idle)
 	if err != nil {
 		return Result{}, err
@@ -159,8 +160,8 @@ type ClaudeCodeScan struct {
 // together from one boundary (ADR-0020), the installed-primitive set is injected as
 // data because derivation may not read the filesystem (ADR-0036 §3, ADR-0019 §1), and
 // both thresholds arrive as values because this package does not read config.
-func NewClaudeCodeScan(resolve claudecode.Resolver, names record.Namer, installed claudecode.Installed,
-	stale claudecode.Staleness, idle claudecode.Idleness, destination *store.Store) *ClaudeCodeScan {
+func NewClaudeCodeScan(resolve adapter.Resolver, names record.Namer, installed claudecode.Installed,
+	stale adapter.Staleness, idle adapter.Idleness, destination *store.Store) *ClaudeCodeScan {
 	return &ClaudeCodeScan{
 		scan:        claudecode.NewScan(resolve, names, installed, stale, idle),
 		destination: destination,

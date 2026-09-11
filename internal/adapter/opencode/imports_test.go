@@ -22,6 +22,7 @@ import (
 // this map fails outright.
 var frozenPackageImports = map[string][]string{
 	"reader.go": {
+		"github.com/SupermodularAI/agents-wake/internal/adapter",
 		"github.com/SupermodularAI/agents-wake/internal/record",
 		"time",
 	},
@@ -34,11 +35,13 @@ var frozenPackageImports = map[string][]string{
 	},
 	"scan.go": {
 		"cmp",
+		"github.com/SupermodularAI/agents-wake/internal/adapter",
 		"github.com/SupermodularAI/agents-wake/internal/record",
 		"slices",
 		"time",
 	},
 	"session.go": {
+		"github.com/SupermodularAI/agents-wake/internal/adapter",
 		"github.com/SupermodularAI/agents-wake/internal/record",
 		"slices",
 		"time",

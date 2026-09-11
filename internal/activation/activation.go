@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/adapter"
 	"github.com/SupermodularAI/agents-wake/internal/adapter/claudecode"
 	"github.com/SupermodularAI/agents-wake/internal/config"
 	"github.com/SupermodularAI/agents-wake/internal/health"
@@ -356,19 +357,19 @@ func Uninstall(paths config.Paths, claudeDir string, purge bool) (bool, error) {
 // disabled rather than guessing a threshold. Both records are permanent once
 // written — ADR-0015 rejects upsert and ADR-0004 deduplicates the correction away —
 // so a scan that cannot read its own threshold defers instead.
-func thresholds(paths config.Paths) (claudecode.Staleness, claudecode.Idleness) {
+func thresholds(paths config.Paths) (adapter.Staleness, adapter.Idleness) {
 	settings, err := config.Load(paths)
 	if err != nil {
-		return claudecode.Staleness{}, claudecode.Idleness{}
+		return adapter.Staleness{}, adapter.Idleness{}
 	}
 	now := time.Now().UTC()
-	stale := claudecode.Staleness{}
+	stale := adapter.Staleness{}
 	if timeout, usable, err := settings.Duration("scan.stale_call_timeout"); err == nil && usable {
-		stale = claudecode.Staleness{Timeout: timeout, Now: now}
+		stale = adapter.Staleness{Timeout: timeout, Now: now}
 	}
-	idle := claudecode.Idleness{}
+	idle := adapter.Idleness{}
 	if timeout, usable, err := settings.Duration("session.idle_timeout"); err == nil && usable {
-		idle = claudecode.Idleness{Timeout: timeout, Now: now}
+		idle = adapter.Idleness{Timeout: timeout, Now: now}
 	}
 	return stale, idle
 }
@@ -434,7 +435,7 @@ func (s collectionScope) health() health.Scope {
 // because that population is a reason of its own and folding it into any other would
 // leave the breakdown unable to sum to the count it explains. It is nil-safe, like
 // discover.
-func resolverFor(repos *config.Repos, scope collectionScope, discover *boundaryDiscovery, notes *skippedNotes) claudecode.Resolver {
+func resolverFor(repos *config.Repos, scope collectionScope, discover *boundaryDiscovery, notes *skippedNotes) adapter.Resolver {
 	return func(cwd string, at time.Time) (record.Hash, bool) {
 		identity, err := repos.Identify(cwd)
 		if err != nil || !identity.Matched {
@@ -490,7 +491,7 @@ var importHistory = ingestHistory
 //
 // paths carries the carry's home: the pending file lives under the data root beside
 // the spool, and loadPending/storePending resolve it from there.
-func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Store, installed claudecode.Installed, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope, discover *boundaryDiscovery, paths config.Paths) (int, health.Scan, skippedByDirectory, error) {
+func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Store, installed claudecode.Installed, stale adapter.Staleness, idle adapter.Idleness, scope collectionScope, discover *boundaryDiscovery, paths config.Paths) (int, health.Scan, skippedByDirectory, error) {
 	written := 0
 	scan := health.Scan{At: time.Now().UTC(), RefusedProjects: repos.DroppedEntries()}
 	notes := &skippedNotes{}

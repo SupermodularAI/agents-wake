@@ -5,6 +5,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/adapter"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 )
 
@@ -107,7 +108,7 @@ type subagentRun struct {
 //
 // Reading an agentId and a cwd to answer those questions is not persisting either.
 func observeSubagentRun(runs map[record.Identifier]*subagentRun, source int, entry transcriptEntry,
-	resolve Resolver, names record.Namer) {
+	resolve adapter.Resolver, names record.Namer) {
 	agentID, err := record.BoundedToken(entry.AgentID)
 	if err != nil {
 		return
@@ -258,7 +259,7 @@ func (r *subagentRun) observeTerminal(entry transcriptEntry, timestamp time.Time
 // Nothing this function decides changes: same closed gate, same order, same refusal
 // rule, same records.
 func resolveSubagentRuns(runs map[record.Identifier]*subagentRun, sessions *SessionState,
-	stale Staleness) ([]derivation, []int, map[record.Identifier]record.Hash) {
+	stale adapter.Staleness) ([]derivation, []int, map[record.Identifier]record.Hash) {
 	resolved := make([]record.Identifier, 0, len(runs))
 	for agentID, run := range runs {
 		if run.anchored && sessions.Closed(run.anchor.sessionID, stale) {

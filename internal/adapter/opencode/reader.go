@@ -10,6 +10,7 @@ package opencode
 import (
 	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/adapter"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 )
 
@@ -24,43 +25,13 @@ const harness = record.Identifier("opencode")
 // any case. The one composed id this package builds is the session grain's, in
 // session.go.
 
-// Resolver maps one observed event — a working directory the harness recorded and
-// the instant it happened — to a consented repository hash.
-//
-// It returns false when the event is outside consent, which has two dimensions and
-// one answer: the directory was never consented, or the event predates the instant
-// collection began for its repository (ADR-0024, ADR-0025). The reader passes the
-// event's own timestamp and never learns the boundary, so no adapter can widen
-// consent in either dimension.
-type Resolver func(cwd string, at time.Time) (record.Hash, bool)
+// Harness is the slug every record this reader derives carries. Exported so a
+// caller folding per-harness diagnostics can name it without holding a Scan.
+func Harness() record.Identifier { return harness }
 
-// Staleness carries ADR-0015's rule into one scan: how long an unterminated
-// invocation may go unresolved before it is emitted as interrupted, and the
-// instant to compare against.
-//
-// The zero value disables the rule, which is what a caller that cannot read its
-// threshold must do: ADR-0015 rejects upsert and ADR-0004 deduplicates, so an
-// interrupted record emitted too early is permanent and uncorrectable, while one
-// emitted too late is still correct when it arrives.
-type Staleness struct {
-	Timeout time.Duration
-	Now     time.Time
-}
-
-// Enabled reports whether this scan may give up on anything at all.
-func (s Staleness) Enabled() bool { return s.Timeout > 0 && !s.Now.IsZero() }
-
-// Idleness carries ADR-0034's rule: how long a session id may be silent before it
-// is believed finished. A second type beside Staleness rather than a field on it,
-// because they answer different questions — see the first adapter's session_end.go
-// for why they are never one.
-type Idleness struct {
-	Timeout time.Duration
-	Now     time.Time
-}
-
-// Enabled reports whether this scan may believe any session finished.
-func (i Idleness) Enabled() bool { return i.Timeout > 0 && !i.Now.IsZero() }
+// init declares this build's opencode reader to the registry, so nothing has to
+// hardcode a list of the harnesses this binary reads (ADR-0013).
+func init() { adapter.Register(harness) }
 
 // Result is one walk's derived records plus its collection health counters.
 type Result struct {
@@ -89,6 +60,21 @@ type Result struct {
 	// The record is written with a nil duration rather than a clamped 0: a clamped
 	// 0 would be a measurement, and nothing measured it (ADR-0027).
 	OutOfOrderPairs int
+}
+
+// Common is the counter vocabulary this reader shares with every other
+// (adapter.Result). UnknownOutcomes stays on this type: it is the format-drift
+// signal for a harness whose statuses are a closed set, and the first adapter has
+// no such set to drift.
+func (r Result) Common() adapter.Result {
+	return adapter.Result{
+		Records:         r.Records,
+		Pending:         r.Pending,
+		Interrupted:     r.Interrupted,
+		Refused:         r.Refused,
+		SkippedSources:  r.SkippedSources,
+		OutOfOrderPairs: r.OutOfOrderPairs,
+	}
 }
 
 // derivation is one attempt at a record: what it produced, and whether a

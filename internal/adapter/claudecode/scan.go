@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 
+	"github.com/SupermodularAI/agents-wake/internal/adapter"
 	"github.com/SupermodularAI/agents-wake/internal/jsonl"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 )
@@ -33,11 +34,11 @@ import (
 //
 // It is single-goroutine state and carries no lock: one walk is one caller.
 type Scan struct {
-	resolve   Resolver
+	resolve   adapter.Resolver
 	names     record.Namer
 	installed Installed
-	stale     Staleness
-	idle      Idleness
+	stale     adapter.Staleness
+	idle      adapter.Idleness
 
 	sessions *SessionState
 	// pending, earlyResults, skillsInvoked, skillCandidates and grains are the
@@ -121,7 +122,7 @@ func (t sourceTally) productive() bool {
 //
 // The caller drives the walk. Scan never opens, stats or names a file — it is
 // handed one reader at a time and assigns each an ordinal in the order it arrives.
-func NewScan(resolve Resolver, names record.Namer, installed Installed, stale Staleness, idle Idleness) *Scan {
+func NewScan(resolve adapter.Resolver, names record.Namer, installed Installed, stale adapter.Staleness, idle adapter.Idleness) *Scan {
 	return &Scan{
 		resolve:         resolve,
 		names:           names,
@@ -401,7 +402,7 @@ func (s *Scan) Read(reader io.Reader) (Result, error) {
 	// unreadable line anywhere would disable the staleness rule and session_end
 	// derivation for every session on the machine. The cost of the per-session taint is
 	// a call that stays Pending and a cursor floor that does not move — a slower scan,
-	// never wrong data, the direction Staleness's zero value already takes.
+	// never wrong data, the direction adapter.Staleness's zero value already takes.
 	//
 	// The gate is unreadable and not Malformed. Every real transcript carries lines
 	// Malformed counts that hide nothing — per-session bookkeeping (ai-title,
@@ -456,6 +457,24 @@ func (s *Scan) Read(reader io.Reader) (Result, error) {
 // Close is called once, at the end of the walk. Calling it again resolves nothing
 // further — the buffers it drained stay drained — and reports the same source
 // tallies.
+// Harness is the slug every record this scan derives carries, so a caller folding
+// per-harness diagnostics never has to hold it beside the reader (ADR-0013).
+func (s *Scan) Harness() record.Identifier { return harness }
+
+// Buffered is how many calls this scan is holding unterminated: ADR-0015 forbids
+// emitting them and forbids advancing a cursor past them, so a caller has to be
+// able to see the number.
+//
+// Tool calls only. The skill candidates, subagent runs and deferred children this
+// walk also holds are awaiting resolution rather than awaiting a result, and one
+// integer summing unlike populations hides whichever of them matters (ADR-0047 §1).
+func (s *Scan) Buffered() int { return len(s.pending) }
+
+// The reader satisfies the contract every reader owes its caller (ADR-0013). The
+// assertion is here rather than in a test so a change to either side stops the
+// build rather than one package's tests.
+var _ adapter.Scan = (*Scan)(nil)
+
 func (s *Scan) Close() Result {
 	result := Result{}
 	// Today's order for the groups that existed before: interrupted calls, then

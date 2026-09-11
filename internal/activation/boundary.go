@@ -4,6 +4,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/adapter"
 	"github.com/SupermodularAI/agents-wake/internal/adapter/claudecode"
 	"github.com/SupermodularAI/agents-wake/internal/config"
 	"github.com/SupermodularAI/agents-wake/internal/health"
@@ -155,7 +156,7 @@ func registerDiscovered(repos *config.Repos, dirs []string, from time.Time) (reg
 // first's. The scope is set at the same point and for a related reason: it describes
 // the scan rather than the source a walk read, and there is exactly one place that
 // still knows it once the walks have returned.
-func scanWithBoundary(paths config.Paths, repos *config.Repos, claudeDir string, events *store.Store, installed claudecode.Installed, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope) (int, health.Scan, error) {
+func scanWithBoundary(paths config.Paths, repos *config.Repos, claudeDir string, events *store.Store, installed claudecode.Installed, stale adapter.Staleness, idle adapter.Idleness, scope collectionScope) (int, health.Scan, error) {
 	found, rebuilt, err := rebuildStaleSpool(events, scope)
 	if err != nil {
 		// A spool this build cannot read and could not replace. At is stamped so the
@@ -228,7 +229,7 @@ func rebuildStaleSpool(events *store.Store, scope collectionScope) (found int, r
 	return found, true, nil
 }
 
-func scanBoundaryWalks(paths config.Paths, repos *config.Repos, claudeDir string, events *store.Store, installed claudecode.Installed, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope) (int, health.Scan, error) {
+func scanBoundaryWalks(paths config.Paths, repos *config.Repos, claudeDir string, events *store.Store, installed claudecode.Installed, stale adapter.Staleness, idle adapter.Idleness, scope collectionScope) (int, health.Scan, error) {
 	discovery := newBoundaryDiscovery(repos)
 	written, scan, skipped, err := importHistory(repos, claudeDir, events, installed, stale, idle, scope, discovery, paths)
 	if err != nil {

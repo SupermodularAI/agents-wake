@@ -4,6 +4,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/adapter"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 )
 
@@ -70,7 +71,7 @@ func (s *Scan) resolveFinishedSessions() {
 // A session whose directory is outside consent derives nothing at all, and that
 // is not a refusal: it is an honest zero, judged by the caller's resolver like
 // every invocation row.
-func sessionEnd(from Session, resolve Resolver) derivation {
+func sessionEnd(from Session, resolve adapter.Resolver) derivation {
 	at := time.UnixMilli(from.UpdatedMS).UTC()
 	repo, consented := resolve(from.Directory, at)
 	if !consented {

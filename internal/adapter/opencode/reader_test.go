@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/adapter"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 )
 
@@ -50,8 +51,8 @@ func toolPart(id, tool, status string) ToolPart {
 
 // walk drives one scan over one session and the parts given, with consent
 // granted, nothing configured as an MCP server, and both thresholds disabled.
-func walk(resolve Resolver, servers Servers, parts ...ToolPart) Result {
-	scan := NewScan(resolve, servers, Staleness{}, Idleness{})
+func walk(resolve adapter.Resolver, servers Servers, parts ...ToolPart) Result {
+	scan := NewScan(resolve, servers, adapter.Staleness{}, adapter.Idleness{})
 	scan.Session(session("ses_abc"))
 	for _, part := range parts {
 		scan.Part(part)
@@ -100,7 +101,7 @@ func TestDistinctPartsNeverShareAnEventID(t *testing.T) {
 	// provider call ids all read "bash:1" and whose part ids differ. Deriving from
 	// callID would fold three invocations into one record and no number would ever
 	// say so (ADR-0004).
-	scan := NewScan(consents, NewServers(nil), Staleness{}, Idleness{})
+	scan := NewScan(consents, NewServers(nil), adapter.Staleness{}, adapter.Idleness{})
 	for _, id := range []string{"ses_1", "ses_2", "ses_3"} {
 		registered := session(id)
 		scan.Session(registered)
@@ -123,7 +124,7 @@ func TestDistinctPartsNeverShareAnEventID(t *testing.T) {
 	}
 
 	t.Run("over a generated corpus", func(t *testing.T) {
-		corpus := NewScan(consents, NewServers(nil), Staleness{}, Idleness{})
+		corpus := NewScan(consents, NewServers(nil), adapter.Staleness{}, adapter.Idleness{})
 		corpus.Session(session("ses_abc"))
 		for index := range 5000 {
 			corpus.Part(toolPart(fmt.Sprintf("prt_%04d", index), "bash", "completed"))
@@ -229,7 +230,7 @@ func TestAnUnnameableToolIsRefusedAndDropped(t *testing.T) {
 func TestASessionIDOutsideTheTokenDomainIsRefused(t *testing.T) {
 	part := toolPart("prt_abc", "bash", "completed")
 	part.SessionID = "ses/abc"
-	scan := NewScan(consents, NewServers(nil), Staleness{}, Idleness{})
+	scan := NewScan(consents, NewServers(nil), adapter.Staleness{}, adapter.Idleness{})
 	registered := session("ses/abc")
 	scan.Session(registered)
 	scan.Part(part)
@@ -258,7 +259,7 @@ func TestEveryDerivedRecordValidates(t *testing.T) {
 		toolPart("prt_2", "atlassian_search", "error"),
 		toolPart("prt_3", "notion_fetch", "completed"),
 	}
-	scan := NewScan(consents, servers("atlassian", "notion"), Staleness{Timeout: time.Minute, Now: time.Date(2026, 3, 2, 12, 0, 0, 0, time.UTC)}, Idleness{Timeout: time.Minute, Now: time.Date(2026, 3, 2, 12, 0, 0, 0, time.UTC)})
+	scan := NewScan(consents, servers("atlassian", "notion"), adapter.Staleness{Timeout: time.Minute, Now: time.Date(2026, 3, 2, 12, 0, 0, 0, time.UTC)}, adapter.Idleness{Timeout: time.Minute, Now: time.Date(2026, 3, 2, 12, 0, 0, 0, time.UTC)})
 	scan.Session(session("ses_abc"))
 	for _, part := range parts {
 		scan.Part(part)

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/adapter"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 )
 
@@ -75,7 +76,7 @@ func hostilePart(payload string) ToolPart {
 func TestHostilePayloadsNeverReachARecord(t *testing.T) {
 	for _, payload := range payloads {
 		t.Run(payload.name, func(t *testing.T) {
-			scan := NewScan(consents, servers("atlassian", payload.value), Staleness{Timeout: time.Minute, Now: past}, Idleness{Timeout: time.Minute, Now: past})
+			scan := NewScan(consents, servers("atlassian", payload.value), adapter.Staleness{Timeout: time.Minute, Now: past}, adapter.Idleness{Timeout: time.Minute, Now: past})
 			from := hostileSession(payload.value)
 			scan.Session(from)
 			scan.Part(hostilePart(payload.value))
@@ -134,7 +135,7 @@ func TestNoRecordCarriesAFreeTextField(t *testing.T) {
 	// empty or passes the record package's own validator for its domain. The record
 	// type is the allowlist, and this is that claim asserted rather than assumed.
 	for _, payload := range payloads {
-		scan := NewScan(consents, NewServers(nil), Staleness{Timeout: time.Minute, Now: past}, Idleness{Timeout: time.Minute, Now: past})
+		scan := NewScan(consents, NewServers(nil), adapter.Staleness{Timeout: time.Minute, Now: past}, adapter.Idleness{Timeout: time.Minute, Now: past})
 		scan.Session(hostileSession(payload.value))
 		scan.Part(hostilePart(payload.value))
 		for _, derived := range scan.Close().Records {
@@ -155,7 +156,7 @@ func TestAnEnormousTokenTotalDoesNotOverflow(t *testing.T) {
 	from := session("ses_abc")
 	from.TokensInput = math.MaxInt64
 	from.TokensOutput = math.MaxInt64
-	scan := NewScan(consents, NewServers(nil), Staleness{}, Idleness{Timeout: time.Hour, Now: past})
+	scan := NewScan(consents, NewServers(nil), adapter.Staleness{}, adapter.Idleness{Timeout: time.Hour, Now: past})
 	scan.Session(from)
 	result := scan.Close()
 	if len(result.Records) != 1 {
@@ -171,7 +172,7 @@ func TestANegativeTokenTotalIsDroppedRatherThanWritten(t *testing.T) {
 	// counted, never clamped into a number that would read as real.
 	from := session("ses_abc")
 	from.TokensInput = -1
-	scan := NewScan(consents, NewServers(nil), Staleness{}, Idleness{Timeout: time.Hour, Now: past})
+	scan := NewScan(consents, NewServers(nil), adapter.Staleness{}, adapter.Idleness{Timeout: time.Hour, Now: past})
 	scan.Session(from)
 	result := scan.Close()
 	if len(result.Records) != 0 {
@@ -190,7 +191,7 @@ func TestAnUnrepresentableInstantIsRefused(t *testing.T) {
 		part := toolPart("prt_abc", "bash", "completed")
 		part.StartMS = instant
 		part.HasEnd = false
-		scan := NewScan(consents, NewServers(nil), Staleness{}, Idleness{})
+		scan := NewScan(consents, NewServers(nil), adapter.Staleness{}, adapter.Idleness{})
 		scan.Session(session("ses_abc"))
 		scan.Part(part)
 		result := scan.Close()

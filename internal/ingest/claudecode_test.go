@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/adapter"
 	"github.com/SupermodularAI/agents-wake/internal/adapter/claudecode"
 	"github.com/SupermodularAI/agents-wake/internal/inventory"
 	"github.com/SupermodularAI/agents-wake/internal/record"
@@ -40,7 +41,7 @@ var transcriptInstant = time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
 // fixtures has gone quiet past the threshold. ADR-0023 makes session close the
 // terminal boundary for an attributed skill run's fallback record, so a test that
 // wants one written has to say the session ended.
-var closingStaleness = claudecode.Staleness{Timeout: time.Hour, Now: transcriptInstant.Add(8 * time.Hour)}
+var closingStaleness = adapter.Staleness{Timeout: time.Hour, Now: transcriptInstant.Add(8 * time.Hour)}
 
 // spoolLines counts the records in the spool at path. A missing spool is zero: a scan
 // that wrote nothing never creates the file.
@@ -123,11 +124,11 @@ func TestClaudeCodeIsIdempotent(t *testing.T) {
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
 	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
 
-	first, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, claudecode.Staleness{}, claudecode.Idleness{}, destination)
+	first, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, adapter.Staleness{}, adapter.Idleness{}, destination)
 	if err != nil {
 		t.Fatalf("first ClaudeCode() error = %v", err)
 	}
-	second, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, claudecode.Staleness{}, claudecode.Idleness{}, destination)
+	second, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, adapter.Staleness{}, adapter.Idleness{}, destination)
 	if err != nil {
 		t.Fatalf("second ClaudeCode() error = %v", err)
 	}
@@ -146,7 +147,7 @@ func TestClaudeCodePersistsBothToolCallsFromOneSourceEntry(t *testing.T) {
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
 	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
 
-	first, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, claudecode.Staleness{}, claudecode.Idleness{}, destination)
+	first, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, adapter.Staleness{}, adapter.Idleness{}, destination)
 	if err != nil {
 		t.Fatalf("first ClaudeCode() error = %v", err)
 	}
@@ -158,7 +159,7 @@ func TestClaudeCodePersistsBothToolCallsFromOneSourceEntry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
-	second, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, claudecode.Staleness{}, claudecode.Idleness{}, destination)
+	second, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, adapter.Staleness{}, adapter.Idleness{}, destination)
 	if err != nil {
 		t.Fatalf("second ClaudeCode() error = %v", err)
 	}
@@ -194,7 +195,7 @@ func TestClaudeCodeCountsARefusedCallWithoutWritingIt(t *testing.T) {
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
 	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
 
-	result, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, claudecode.Staleness{}, claudecode.Idleness{}, destination)
+	result, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, adapter.Staleness{}, adapter.Idleness{}, destination)
 	if err != nil {
 		t.Fatalf("ClaudeCode() error = %v", err)
 	}
@@ -227,7 +228,7 @@ func TestClaudeCodePersistsNoPathShapedValue(t *testing.T) {
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
 	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
 
-	result, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, claudecode.Staleness{}, claudecode.Idleness{}, destination)
+	result, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, adapter.Staleness{}, adapter.Idleness{}, destination)
 	if err != nil {
 		t.Fatalf("ClaudeCode() error = %v", err)
 	}
@@ -274,7 +275,7 @@ func TestClaudeCodeReportsOneSkillRunAsOneInvocation(t *testing.T) {
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
 	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
 
-	result, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, closingStaleness, claudecode.Idleness{}, destination)
+	result, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, closingStaleness, adapter.Idleness{}, destination)
 	if err != nil {
 		t.Fatalf("ClaudeCode() error = %v", err)
 	}
@@ -313,7 +314,7 @@ func TestClaudeCodeReportsAShapeASkillRunAsOneInvocation(t *testing.T) {
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
 	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
 
-	first, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, closingStaleness, claudecode.Idleness{}, destination)
+	first, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, closingStaleness, adapter.Idleness{}, destination)
 	if err != nil {
 		t.Fatalf("first ClaudeCode() error = %v", err)
 	}
@@ -340,7 +341,7 @@ func TestClaudeCodeReportsAShapeASkillRunAsOneInvocation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
-	second, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, closingStaleness, claudecode.Idleness{}, destination)
+	second, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, closingStaleness, adapter.Idleness{}, destination)
 	if err != nil {
 		t.Fatalf("second ClaudeCode() error = %v", err)
 	}
@@ -367,7 +368,7 @@ func TestClaudeCodeNeverReportsASidechainTurnAsASkillInvocation(t *testing.T) {
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
 	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
 
-	result, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, closingStaleness, claudecode.Idleness{}, destination)
+	result, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, closingStaleness, adapter.Idleness{}, destination)
 	if err != nil {
 		t.Fatalf("ClaudeCode() error = %v", err)
 	}
@@ -396,7 +397,7 @@ func TestClaudeCodeReportsTheAmbiguityCounterWithoutASecondInvocation(t *testing
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
 	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
 
-	result, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, closingStaleness, claudecode.Idleness{}, destination)
+	result, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, closingStaleness, adapter.Idleness{}, destination)
 	if err != nil {
 		t.Fatalf("ClaudeCode() error = %v", err)
 	}
@@ -426,12 +427,12 @@ func TestClaudeCodeWritesAnInterruptedCallExactlyOnce(t *testing.T) {
 	destination := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
 	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
-	stale := claudecode.Staleness{
+	stale := adapter.Staleness{
 		Timeout: time.Hour,
 		Now:     time.Date(2026, 8, 13, 14, 0, 0, 0, time.UTC),
 	}
 
-	first, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, stale, claudecode.Idleness{}, destination)
+	first, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, stale, adapter.Idleness{}, destination)
 	if err != nil {
 		t.Fatalf("first ClaudeCode() error = %v", err)
 	}
@@ -439,7 +440,7 @@ func TestClaudeCodeWritesAnInterruptedCallExactlyOnce(t *testing.T) {
 		t.Fatalf("first ClaudeCode() = %+v", first)
 	}
 
-	second, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, stale, claudecode.Idleness{}, destination)
+	second, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, stale, adapter.Idleness{}, destination)
 	if err != nil {
 		t.Fatalf("second ClaudeCode() error = %v", err)
 	}
@@ -465,7 +466,7 @@ var sessionInstant = time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
 
 // sessionFixture opens a spool and a resolver consenting to /repo, which is what
 // every session-grain test below needs and nothing more.
-func sessionFixture(t *testing.T) (string, *store.Store, claudecode.Resolver) {
+func sessionFixture(t *testing.T) (string, *store.Store, adapter.Resolver) {
 	t.Helper()
 	spool := filepath.Join(t.TempDir(), "events.ndjson")
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
@@ -499,9 +500,9 @@ func TestClaudeCodeWritesOneSessionEndAcrossTwoScans(t *testing.T) {
 		`{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`,
 	}, "\n")
 	spool, destination, resolve := sessionFixture(t)
-	idle := claudecode.Idleness{Timeout: 30 * time.Minute, Now: sessionInstant.Add(2 * time.Hour)}
+	idle := adapter.Idleness{Timeout: 30 * time.Minute, Now: sessionInstant.Add(2 * time.Hour)}
 
-	first, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, claudecode.Staleness{}, idle, destination)
+	first, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, adapter.Staleness{}, idle, destination)
 	if err != nil {
 		t.Fatalf("first ClaudeCode() error = %v", err)
 	}
@@ -513,7 +514,7 @@ func TestClaudeCodeWritesOneSessionEndAcrossTwoScans(t *testing.T) {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
 
-	second, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, claudecode.Staleness{}, idle, destination)
+	second, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, adapter.Staleness{}, idle, destination)
 	if err != nil {
 		t.Fatalf("second ClaudeCode() error = %v", err)
 	}
@@ -549,8 +550,8 @@ func TestClaudeCodeNeverCorrectsAWrittenSessionEnd(t *testing.T) {
 	// Scan 1: the session is finished under a 30m idle threshold, and the call is
 	// nowhere near stale under a 24h one.
 	first, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives,
-		claudecode.Staleness{Timeout: 24 * time.Hour, Now: sessionInstant.Add(time.Hour)},
-		claudecode.Idleness{Timeout: 30 * time.Minute, Now: sessionInstant.Add(time.Hour)},
+		adapter.Staleness{Timeout: 24 * time.Hour, Now: sessionInstant.Add(time.Hour)},
+		adapter.Idleness{Timeout: 30 * time.Minute, Now: sessionInstant.Add(time.Hour)},
 		destination)
 	if err != nil {
 		t.Fatalf("first ClaudeCode() error = %v", err)
@@ -567,8 +568,8 @@ func TestClaudeCodeNeverCorrectsAWrittenSessionEnd(t *testing.T) {
 	// Scan 2: the call is now stale too, so it resolves as interrupted and the
 	// re-derived session_end would carry tool_calls 1.
 	second, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives,
-		claudecode.Staleness{Timeout: 24 * time.Hour, Now: sessionInstant.Add(48 * time.Hour)},
-		claudecode.Idleness{Timeout: 30 * time.Minute, Now: sessionInstant.Add(48 * time.Hour)},
+		adapter.Staleness{Timeout: 24 * time.Hour, Now: sessionInstant.Add(48 * time.Hour)},
+		adapter.Idleness{Timeout: 30 * time.Minute, Now: sessionInstant.Add(48 * time.Hour)},
 		destination)
 	if err != nil {
 		t.Fatalf("second ClaudeCode() error = %v", err)
@@ -621,8 +622,8 @@ func TestClaudeCodeWritesNoSecondSessionEndAfterResumedActivity(t *testing.T) {
 	}, "\n")
 	spool, destination, resolve := sessionFixture(t)
 
-	if _, err := ClaudeCode(strings.NewReader(quiet), resolve, names, installedPrimitives, claudecode.Staleness{},
-		claudecode.Idleness{Timeout: 30 * time.Minute, Now: sessionInstant.Add(2 * time.Hour)},
+	if _, err := ClaudeCode(strings.NewReader(quiet), resolve, names, installedPrimitives, adapter.Staleness{},
+		adapter.Idleness{Timeout: 30 * time.Minute, Now: sessionInstant.Add(2 * time.Hour)},
 		destination); err != nil {
 		t.Fatalf("first ClaudeCode() error = %v", err)
 	}
@@ -633,8 +634,8 @@ func TestClaudeCodeWritesNoSecondSessionEndAfterResumedActivity(t *testing.T) {
 	written := ends[0]
 
 	// Finished again, on a clock past the resumed activity.
-	second, err := ClaudeCode(strings.NewReader(resumed), resolve, names, installedPrimitives, claudecode.Staleness{},
-		claudecode.Idleness{Timeout: 30 * time.Minute, Now: sessionInstant.Add(8 * time.Hour)},
+	second, err := ClaudeCode(strings.NewReader(resumed), resolve, names, installedPrimitives, adapter.Staleness{},
+		adapter.Idleness{Timeout: 30 * time.Minute, Now: sessionInstant.Add(8 * time.Hour)},
 		destination)
 	if err != nil {
 		t.Fatalf("second ClaudeCode() error = %v", err)
@@ -674,10 +675,10 @@ func splitSessionSources() (parent, subagent string) {
 
 // walkSources drives one ClaudeCodeScan over sources in the given order against a
 // fresh spool, and returns the spool path and the Close result.
-func walkSources(t *testing.T, idle claudecode.Idleness, sources ...string) (string, Result) {
+func walkSources(t *testing.T, idle adapter.Idleness, sources ...string) (string, Result) {
 	t.Helper()
 	spool, destination, resolve := sessionFixture(t)
-	scan := NewClaudeCodeScan(resolve, names, installedPrimitives, claudecode.Staleness{}, idle, destination)
+	scan := NewClaudeCodeScan(resolve, names, installedPrimitives, adapter.Staleness{}, idle, destination)
 	for index, source := range sources {
 		if _, err := scan.Read(strings.NewReader(source)); err != nil {
 			t.Fatalf("Read(source %d) error = %v", index, err)
@@ -712,7 +713,7 @@ func TestClaudeCodeScanReportsOneSubagentRunAsOneInvocation(t *testing.T) {
 	}, "\n")
 
 	_, destination, resolve := sessionFixture(t)
-	scan := NewClaudeCodeScan(resolve, names, installedPrimitives, closingStaleness, claudecode.Idleness{}, destination)
+	scan := NewClaudeCodeScan(resolve, names, installedPrimitives, closingStaleness, adapter.Idleness{}, destination)
 	written := 0
 	for index, source := range []string{parent, subagent} {
 		result, err := scan.Read(strings.NewReader(source))
@@ -739,7 +740,7 @@ func TestClaudeCodeScanReportsOneSubagentRunAsOneInvocation(t *testing.T) {
 // one record for the session, with totals covering both of its transcripts.
 func TestClaudeCodeScanWritesOneSessionEndAcrossTwoTranscripts(t *testing.T) {
 	parent, subagent := splitSessionSources()
-	idle := claudecode.Idleness{Timeout: 30 * time.Minute, Now: sessionInstant.Add(2 * time.Hour)}
+	idle := adapter.Idleness{Timeout: 30 * time.Minute, Now: sessionInstant.Add(2 * time.Hour)}
 
 	spool, _ := walkSources(t, idle, parent, subagent)
 
@@ -767,7 +768,7 @@ func TestClaudeCodeScanWritesOneSessionEndAcrossTwoTranscripts(t *testing.T) {
 // order it is given.
 func TestClaudeCodeScanIsIndependentOfSourceOrder(t *testing.T) {
 	parent, subagent := splitSessionSources()
-	idle := claudecode.Idleness{Timeout: 30 * time.Minute, Now: sessionInstant.Add(2 * time.Hour)}
+	idle := adapter.Idleness{Timeout: 30 * time.Minute, Now: sessionInstant.Add(2 * time.Hour)}
 
 	forwardSpool, forward := walkSources(t, idle, parent, subagent)
 	reverseSpool, reverse := walkSources(t, idle, subagent, parent)
@@ -787,7 +788,7 @@ func TestClaudeCodeScanIsIndependentOfSourceOrder(t *testing.T) {
 	}
 	destination := store.New(forwardSpool)
 	_, _, resolve := sessionFixture(t)
-	again := NewClaudeCodeScan(resolve, names, installedPrimitives, claudecode.Staleness{}, idle, destination)
+	again := NewClaudeCodeScan(resolve, names, installedPrimitives, adapter.Staleness{}, idle, destination)
 	written := 0
 	duplicate := 0
 	for _, source := range []string{parent, subagent} {
@@ -846,7 +847,7 @@ func TestClaudeCodeScanReportsASourceThatProducedNothing(t *testing.T) {
 	// nothing, refused nothing. The clean zero doctor calls skipped.
 	unconsented := `{"uuid":"other-1","sessionId":"session-2","cwd":"/elsewhere","timestamp":"2026-08-13T12:00:00Z","entrypoint":"cli","message":{"model":"sonnet","id":"msg_2","content":[{"type":"tool_use","id":"call-2","name":"Bash"}]}}`
 
-	_, final := walkSources(t, claudecode.Idleness{}, collecting, unconsented)
+	_, final := walkSources(t, adapter.Idleness{}, collecting, unconsented)
 
 	if final.SkippedSources != 1 {
 		t.Fatalf("SkippedSources = %d, want 1: one of the two sources produced nothing", final.SkippedSources)
@@ -866,7 +867,7 @@ func TestClaudeCodePersistsATypedInvocationAndCountsASkippedOne(t *testing.T) {
 	repo := record.Hash("0123456789abcdef0123456789abcdef")
 	resolve := func(cwd string, _ time.Time) (record.Hash, bool) { return repo, cwd == "/repo" }
 
-	result, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, closingStaleness, claudecode.Idleness{}, destination)
+	result, err := ClaudeCode(strings.NewReader(input), resolve, names, installedPrimitives, closingStaleness, adapter.Idleness{}, destination)
 	if err != nil {
 		t.Fatalf("ClaudeCode() error = %v", err)
 	}
@@ -886,7 +887,7 @@ func TestCloseForwardsTheSkippedSourceOrdinals(t *testing.T) {
 {"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","entrypoint":"cli","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`
 	unconsented := `{"uuid":"other-1","sessionId":"session-2","cwd":"/elsewhere","timestamp":"2026-08-13T12:00:00Z","entrypoint":"cli","message":{"model":"sonnet","id":"msg_2","content":[{"type":"tool_use","id":"call-2","name":"Bash"}]}}`
 
-	_, final := walkSources(t, claudecode.Idleness{}, collecting, unconsented)
+	_, final := walkSources(t, adapter.Idleness{}, collecting, unconsented)
 
 	if final.SkippedSources != 1 {
 		t.Fatalf("SkippedSources = %d, want 1", final.SkippedSources)

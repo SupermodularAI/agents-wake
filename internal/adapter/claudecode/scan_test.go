@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/adapter"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 )
 
@@ -20,7 +21,7 @@ import (
 // single-source ones. A fixture under testdata/ is a captured transcript and is
 // never hand-written (AGENTS.md § Off-limits paths), and what these tests need is
 // not a real transcript but two of them sharing one session id.
-func twoSources(t *testing.T, stale Staleness, idle Idleness, sources ...string) ([]record.Record, Result) {
+func twoSources(t *testing.T, stale adapter.Staleness, idle adapter.Idleness, sources ...string) ([]record.Record, Result) {
 	t.Helper()
 	scan := NewScan(resolver, names, installedPrimitives, stale, idle)
 	records := []record.Record{}
@@ -77,7 +78,7 @@ func splitSession() (parent, subagent string) {
 func TestScanDerivesOneSessionEndAcrossEverySourceOfOneSession(t *testing.T) {
 	parent, subagent := splitSession()
 
-	records, result := twoSources(t, Staleness{}, finished, parent, subagent)
+	records, result := twoSources(t, adapter.Staleness{}, finished, parent, subagent)
 
 	ends := sessionEnds(records)
 	if len(ends) != 1 {
@@ -96,7 +97,7 @@ func TestScanDoesNotCloseASessionLiveInAnotherSource(t *testing.T) {
 	old := assistantLine("agent-1", "session-1", "2026-08-13T12:00:00Z", "msg_agent", realUsage)
 	recent := assistantLine("parent-1", "session-1", "2026-08-13T13:50:00Z", "msg_parent", realUsage)
 
-	records, result := twoSources(t, Staleness{}, finished, old, recent)
+	records, result := twoSources(t, adapter.Staleness{}, finished, old, recent)
 
 	if ends := sessionEnds(records); len(ends) != 0 {
 		t.Fatalf("session_end records = %d, want 0: the parent source shows the session active (result = %+v)", len(ends), result)
@@ -107,11 +108,11 @@ func TestScanDoesNotCloseASessionLiveInAnotherSource(t *testing.T) {
 // determination, and it must see the union too — a call in a quiet subagent file
 // belongs to a session another file shows running.
 func TestScanDoesNotInterruptACallLiveInAnotherSource(t *testing.T) {
-	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(2 * time.Hour)}
+	stale := adapter.Staleness{Timeout: time.Hour, Now: callInstant.Add(2 * time.Hour)}
 	old := openCall("agent-1", "session-1", "2026-08-13T12:00:00Z", "call-agent")
 	recent := assistantLine("parent-1", "session-1", "2026-08-13T13:30:00Z", "msg_parent", realUsage)
 
-	records, result := twoSources(t, stale, Idleness{}, old, recent)
+	records, result := twoSources(t, stale, adapter.Idleness{}, old, recent)
 
 	if result.Interrupted != 0 {
 		t.Errorf("Interrupted = %d, want 0: the session is live in the other source", result.Interrupted)
@@ -130,7 +131,7 @@ func TestScanDoesNotInterruptACallLiveInAnotherSource(t *testing.T) {
 // skill in another are one run. The fallback must be dropped, in either order —
 // the shape the bundle measured 321 times on a real machine.
 func TestScanDropsAShapeAFallbackMatchedInAnotherSource(t *testing.T) {
-	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(4 * time.Hour)}
+	stale := adapter.Staleness{Timeout: time.Hour, Now: callInstant.Add(4 * time.Hour)}
 	toolUse := skillCall("parent-1", "session-1", "2026-08-13T12:00:00Z", "call-1", "pr-review")
 	endTurn := attributedRun("agent-1", "session-1", "2026-08-13T12:00:05Z", "pr-review")
 
@@ -139,7 +140,7 @@ func TestScanDropsAShapeAFallbackMatchedInAnotherSource(t *testing.T) {
 		"end_turn first": {endTurn, toolUse},
 	} {
 		t.Run(name, func(t *testing.T) {
-			records, result := twoSources(t, stale, Idleness{}, order...)
+			records, result := twoSources(t, stale, adapter.Idleness{}, order...)
 
 			for _, event := range records {
 				if event.Kind == record.KindSkill && event.Invoker == record.InvokerUser {
@@ -165,8 +166,8 @@ func TestScanDropsAShapeAFallbackMatchedInAnotherSource(t *testing.T) {
 func TestScanDerivesTheSameRecordsInEitherSourceOrder(t *testing.T) {
 	parent, subagent := splitSession()
 
-	forward, _ := twoSources(t, Staleness{}, finished, parent, subagent)
-	reverse, _ := twoSources(t, Staleness{}, finished, subagent, parent)
+	forward, _ := twoSources(t, adapter.Staleness{}, finished, parent, subagent)
+	reverse, _ := twoSources(t, adapter.Staleness{}, finished, subagent, parent)
 
 	if len(forward) != len(reverse) {
 		t.Fatalf("record counts differ: %d forward, %d reversed", len(forward), len(reverse))
@@ -190,11 +191,11 @@ func byEventID(records []record.Record) {
 // AC 5: a source whose own lines all look quiet keeps its cursor floor while
 // another source shows the session running (ADR-0023 §5 through ADR-0036).
 func TestScanHoldsASourceFloorForASessionOpenInAnotherSource(t *testing.T) {
-	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(2 * time.Hour)}
+	stale := adapter.Staleness{Timeout: time.Hour, Now: callInstant.Add(2 * time.Hour)}
 	quiet := assistantLine("agent-1", "session-1", "2026-08-13T12:00:00Z", "msg_agent", realUsage)
 	recent := assistantLine("parent-1", "session-1", "2026-08-13T13:30:00Z", "msg_parent", realUsage)
 
-	scan := NewScan(resolver, names, installedPrimitives, stale, Idleness{})
+	scan := NewScan(resolver, names, installedPrimitives, stale, adapter.Idleness{})
 	for index, source := range []string{quiet, recent} {
 		if _, err := scan.Read(strings.NewReader(source)); err != nil {
 			t.Fatalf("Scan.Read(source %d) error = %v", index, err)
@@ -213,7 +214,7 @@ func TestScanHoldsASourceFloorForASessionOpenInAnotherSource(t *testing.T) {
 // Constraint 11: one source's unreadable line must not stop the staleness rule
 // for a session that source never carried.
 func TestScanBlindnessIsPerSessionNotPerWalk(t *testing.T) {
-	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(4 * time.Hour)}
+	stale := adapter.Staleness{Timeout: time.Hour, Now: callInstant.Add(4 * time.Hour)}
 	// A syntax error, so inspectable reports false and the line could have been
 	// anything — including the tool_result that terminated the call below it.
 	blind := strings.Join([]string{
@@ -222,7 +223,7 @@ func TestScanBlindnessIsPerSessionNotPerWalk(t *testing.T) {
 	}, "\n")
 	clear := openCall("other-1", "session-2", "2026-08-13T12:00:00Z", "call-other")
 
-	records, result := twoSources(t, stale, Idleness{}, blind, clear)
+	records, result := twoSources(t, stale, adapter.Idleness{}, blind, clear)
 
 	if result.Interrupted != 1 || result.Pending != 1 {
 		t.Fatalf("Interrupted = %d, Pending = %d, want 1 and 1 (result = %+v)", result.Interrupted, result.Pending, result)
@@ -257,7 +258,7 @@ func (s *truncatedSource) Read(buffer []byte) (int, error) {
 // buffered call, and both the interrupted record and the session_end are permanent
 // (ADR-0015 rejects upsert, ADR-0004 deduplicates the correction away).
 func TestScanResolvesNoSessionOfASourceThatFailedPartWay(t *testing.T) {
-	stale := Staleness{Timeout: time.Hour, Now: callInstant.Add(4 * time.Hour)}
+	stale := adapter.Staleness{Timeout: time.Hour, Now: callInstant.Add(4 * time.Hour)}
 	// Newline-terminated, so both lines are delivered before the failure: what is
 	// unread is whatever the harness wrote after them.
 	partial := strings.Join([]string{
@@ -301,7 +302,7 @@ func TestScanRetainsNoPathOrTranscriptValue(t *testing.T) {
 			assistantLine("parent-3", "session-1", "2026-08-13T12:00:02Z", "msg_parent", realUsage),
 		}, "\n")
 
-		records, _ := twoSources(t, Staleness{Timeout: time.Hour, Now: callInstant.Add(4 * time.Hour)}, finished, source)
+		records, _ := twoSources(t, adapter.Staleness{Timeout: time.Hour, Now: callInstant.Add(4 * time.Hour)}, finished, source)
 
 		for _, event := range records {
 			encoded, err := record.Marshal(event)
@@ -336,14 +337,14 @@ func TestScanDerivesOneRecordPerTypedOccurrenceAcrossSources(t *testing.T) {
 		typedTurnIn("entry-3", "session-1", "2026-08-13T12:00:02Z", "pr-review", false),
 	}, "\n")
 
-	forward, forwardResult := twoSources(t, closedSession, Idleness{}, first, second)
+	forward, forwardResult := twoSources(t, closedSession, adapter.Idleness{}, first, second)
 	if len(forward) != 3 {
 		t.Fatalf("records = %d, want 3: %+v", len(forward), forward)
 	}
 	if forwardResult.SkippedTypedInvocations != 0 || forwardResult.AmbiguousSkillRuns != 0 {
 		t.Errorf("Close() = %+v", forwardResult)
 	}
-	reversed, _ := twoSources(t, closedSession, Idleness{}, second, first)
+	reversed, _ := twoSources(t, closedSession, adapter.Idleness{}, second, first)
 
 	byID := func(events []record.Record) []record.Record {
 		sorted := slices.Clone(events)
@@ -364,7 +365,7 @@ func TestScanIgnoresASidechainCopyOfATypedInvocation(t *testing.T) {
 	parent := typedTurnIn("entry-1", "session-1", "2026-08-13T12:00:00Z", "pr-review", false)
 	subagent := typedTurnIn("entry-2", "session-1", "2026-08-13T12:00:01Z", "pr-review", true)
 
-	records, result := twoSources(t, closedSession, Idleness{}, parent, subagent)
+	records, result := twoSources(t, closedSession, adapter.Idleness{}, parent, subagent)
 	if len(records) != 1 {
 		t.Fatalf("records = %d, want 1: %+v", len(records), records)
 	}
@@ -391,7 +392,7 @@ func TestCloseNamesTheOrdinalsOfTheSourcesItSkipped(t *testing.T) {
 	}
 	collecting := toolCallLines("kept-1", "session-kept", "2026-08-13T12:00:00Z", "kept-call", "Bash", "{}")
 
-	_, final := twoSources(t, Staleness{}, Idleness{}, elsewhere("skip-a"), collecting, elsewhere("skip-b"))
+	_, final := twoSources(t, adapter.Staleness{}, adapter.Idleness{}, elsewhere("skip-a"), collecting, elsewhere("skip-b"))
 
 	if final.SkippedSources != 2 {
 		t.Fatalf("SkippedSources = %d, want 2", final.SkippedSources)

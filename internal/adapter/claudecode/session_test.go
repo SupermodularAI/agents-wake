@@ -3,6 +3,8 @@ package claudecode
 import (
 	"testing"
 	"time"
+
+	"github.com/SupermodularAI/agents-wake/internal/adapter"
 )
 
 var sessionEpoch = time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
@@ -11,7 +13,7 @@ func TestSessionStateClosesASessionPastTheThreshold(t *testing.T) {
 	state := &SessionState{}
 	state.Observe(0, "session-quiet", sessionEpoch, 0)
 
-	if !state.Closed("session-quiet", Staleness{Timeout: time.Hour, Now: sessionEpoch.Add(2 * time.Hour)}) {
+	if !state.Closed("session-quiet", adapter.Staleness{Timeout: time.Hour, Now: sessionEpoch.Add(2 * time.Hour)}) {
 		t.Fatal("Closed() = false, want true for a session silent past the threshold")
 	}
 }
@@ -20,12 +22,12 @@ func TestSessionStateKeepsASessionOpenInsideTheThreshold(t *testing.T) {
 	state := &SessionState{}
 	state.Observe(0, "session-live", sessionEpoch, 0)
 
-	if state.Closed("session-live", Staleness{Timeout: time.Hour, Now: sessionEpoch.Add(30 * time.Minute)}) {
+	if state.Closed("session-live", adapter.Staleness{Timeout: time.Hour, Now: sessionEpoch.Add(30 * time.Minute)}) {
 		t.Error("Closed() = true inside the threshold, want false")
 	}
 	// Exactly the threshold is still open: the comparison errs toward buffering,
 	// because an interrupted record cannot be taken back (ADR-0015, ADR-0004).
-	if state.Closed("session-live", Staleness{Timeout: time.Hour, Now: sessionEpoch.Add(time.Hour)}) {
+	if state.Closed("session-live", adapter.Staleness{Timeout: time.Hour, Now: sessionEpoch.Add(time.Hour)}) {
 		t.Error("Closed() = true at exactly the threshold, want false")
 	}
 }
@@ -34,7 +36,7 @@ func TestSessionStateNeverClosesAnUnobservedSession(t *testing.T) {
 	state := &SessionState{}
 	state.Observe(0, "session-seen", sessionEpoch, 0)
 
-	if state.Closed("session-nobody-saw", Staleness{Timeout: time.Hour, Now: sessionEpoch.Add(99 * time.Hour)}) {
+	if state.Closed("session-nobody-saw", adapter.Staleness{Timeout: time.Hour, Now: sessionEpoch.Add(99 * time.Hour)}) {
 		t.Fatal("Closed() = true for an unobserved session, want false: absence of evidence that a session is alive is not evidence it ended")
 	}
 }
@@ -43,7 +45,7 @@ func TestSessionStateNeverClosesWithoutAThreshold(t *testing.T) {
 	state := &SessionState{}
 	state.Observe(0, "session-quiet", sessionEpoch, 0)
 
-	for name, stale := range map[string]Staleness{
+	for name, stale := range map[string]adapter.Staleness{
 		"zero value":     {},
 		"no clock":       {Timeout: time.Hour},
 		"no timeout":     {Now: sessionEpoch.Add(99 * time.Hour)},
@@ -69,7 +71,7 @@ func TestSessionStateKeepsTheLatestActivityRegardlessOfLineOrder(t *testing.T) {
 	state.Observe(0, "session-unordered", sessionEpoch.Add(2*time.Hour), 200)
 	state.Observe(0, "session-unordered", sessionEpoch, 0)
 
-	if state.Closed("session-unordered", Staleness{Timeout: 2 * time.Hour, Now: sessionEpoch.Add(3 * time.Hour)}) {
+	if state.Closed("session-unordered", adapter.Staleness{Timeout: 2 * time.Hour, Now: sessionEpoch.Add(3 * time.Hour)}) {
 		t.Fatal("Closed() = true, want false: the later observation is the session's last activity whichever order it arrived in")
 	}
 }
@@ -80,7 +82,7 @@ func TestSessionStateCursorFloorIsTheEarliestOpenSessionOffset(t *testing.T) {
 	state.Observe(0, "session-open", sessionEpoch.Add(10*time.Hour), 120)
 	state.Observe(0, "session-open", sessionEpoch.Add(11*time.Hour), 400)
 
-	stale := Staleness{Timeout: time.Hour, Now: sessionEpoch.Add(11 * time.Hour)}
+	stale := adapter.Staleness{Timeout: time.Hour, Now: sessionEpoch.Add(11 * time.Hour)}
 
 	if open := state.OpenSessions(stale); open != 1 {
 		t.Errorf("open sessions = %d, want 1", open)
@@ -99,7 +101,7 @@ func TestSessionStateCursorFloorIsUnsetWhenEverySessionClosed(t *testing.T) {
 	state.Observe(0, "session-one", sessionEpoch, 40)
 	state.Observe(0, "session-two", sessionEpoch.Add(time.Minute), 900)
 
-	stale := Staleness{Timeout: time.Hour, Now: sessionEpoch.Add(9 * time.Hour)}
+	stale := adapter.Staleness{Timeout: time.Hour, Now: sessionEpoch.Add(9 * time.Hour)}
 
 	if open := state.OpenSessions(stale); open != 0 {
 		t.Errorf("OpenSessions() = %d, want 0 when nothing is open", open)
@@ -118,7 +120,7 @@ func TestSessionStateKeepsOffsetsPerSource(t *testing.T) {
 	state.Observe(0, "session-split", sessionEpoch, 500)
 	state.Observe(1, "session-split", sessionEpoch, 10)
 
-	stale := Staleness{Timeout: time.Hour, Now: sessionEpoch.Add(time.Minute)}
+	stale := adapter.Staleness{Timeout: time.Hour, Now: sessionEpoch.Add(time.Minute)}
 
 	if open, offset := state.SourceFloor(0, stale); !open || offset != 500 {
 		t.Errorf("SourceFloor(0) = (%t, %d), want (true, 500): source 0's own earliest line", open, offset)
@@ -139,7 +141,7 @@ func TestSessionStateHoldsASourceFloorForASessionOpenElsewhere(t *testing.T) {
 	state.Observe(0, "session-split", sessionEpoch, 64)
 	state.Observe(1, "session-split", sessionEpoch.Add(10*time.Hour), 900)
 
-	stale := Staleness{Timeout: time.Hour, Now: sessionEpoch.Add(10 * time.Hour)}
+	stale := adapter.Staleness{Timeout: time.Hour, Now: sessionEpoch.Add(10 * time.Hour)}
 
 	if state.Closed("session-split", stale) {
 		t.Fatal("Closed() = true, want false: source 1 shows the session active")
@@ -154,7 +156,7 @@ func TestSessionStateNeverClosesABlindSession(t *testing.T) {
 	state.Observe(0, "session-blind", sessionEpoch, 32)
 	state.MarkBlind("session-blind")
 
-	stale := Staleness{Timeout: time.Hour, Now: sessionEpoch.Add(99 * time.Hour)}
+	stale := adapter.Staleness{Timeout: time.Hour, Now: sessionEpoch.Add(99 * time.Hour)}
 
 	if state.Closed("session-blind", stale) {
 		t.Error("Closed() = true for a blind session, want false")
@@ -175,7 +177,7 @@ func TestSessionStateBlindnessIsPerSession(t *testing.T) {
 	state.Observe(0, "session-clear", sessionEpoch, 100)
 	state.MarkBlind("session-blind")
 
-	stale := Staleness{Timeout: time.Hour, Now: sessionEpoch.Add(99 * time.Hour)}
+	stale := adapter.Staleness{Timeout: time.Hour, Now: sessionEpoch.Add(99 * time.Hour)}
 
 	if state.Closed("session-blind", stale) {
 		t.Error("Closed(\"session-blind\") = true, want false")
@@ -189,7 +191,7 @@ func TestSessionStateNeverMarksAnUnobservedSessionBlind(t *testing.T) {
 	state := &SessionState{}
 	state.MarkBlind("session-nobody-saw")
 
-	stale := Staleness{Timeout: time.Hour, Now: sessionEpoch.Add(99 * time.Hour)}
+	stale := adapter.Staleness{Timeout: time.Hour, Now: sessionEpoch.Add(99 * time.Hour)}
 
 	if open := state.OpenSessions(stale); open != 0 {
 		t.Fatalf("OpenSessions() = %d, want 0: marking an unobserved session blind must not observe it", open)
@@ -203,7 +205,7 @@ func TestSessionStateNeverMarksAnUnobservedSessionBlind(t *testing.T) {
 // exactly these three methods rather than deriving a second staleness rule.
 func TestSessionCloseIsDecidableWithoutTheIngestPath(t *testing.T) {
 	state := &SessionState{}
-	stale := Staleness{Timeout: 30 * time.Minute, Now: sessionEpoch.Add(time.Hour)}
+	stale := adapter.Staleness{Timeout: 30 * time.Minute, Now: sessionEpoch.Add(time.Hour)}
 
 	state.Observe(0, "session-gone", sessionEpoch, 0)
 	state.Observe(0, "session-here", sessionEpoch.Add(59*time.Minute), 64)

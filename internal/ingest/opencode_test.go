@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/adapter"
 	"github.com/SupermodularAI/agents-wake/internal/adapter/opencode"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 	"github.com/SupermodularAI/agents-wake/internal/store"
@@ -44,7 +45,7 @@ func openCodePart(id, tool, status string) opencode.ToolPart {
 // driveOpenCode runs one walk over the parts given against the store at spool.
 func driveOpenCode(t *testing.T, spool string, parts ...opencode.ToolPart) OpenCodeResult {
 	t.Helper()
-	scan := NewOpenCodeScan(openCodeConsents, opencode.NewServers(nil), opencode.Staleness{}, opencode.Idleness{}, store.New(spool))
+	scan := NewOpenCodeScan(openCodeConsents, opencode.NewServers(nil), adapter.Staleness{}, adapter.Idleness{}, store.New(spool))
 	scan.Session(openCodeSession("ses_abc"))
 	for _, part := range parts {
 		scan.Part(part)
@@ -115,7 +116,7 @@ func TestOpenCodeScanCountsARefusedRecord(t *testing.T) {
 
 func TestOpenCodeScanReportsTheReaderCounters(t *testing.T) {
 	spool := filepath.Join(t.TempDir(), "events.ndjson")
-	scan := NewOpenCodeScan(openCodeConsents, opencode.NewServers(nil), opencode.Staleness{}, opencode.Idleness{}, store.New(spool))
+	scan := NewOpenCodeScan(openCodeConsents, opencode.NewServers(nil), adapter.Staleness{}, adapter.Idleness{}, store.New(spool))
 	scan.Session(openCodeSession("ses_abc"))
 	scan.Part(openCodePart("prt_1", "bash", "running"))
 	scan.Part(openCodePart("prt_2", "bash", "cancelled"))
@@ -133,7 +134,7 @@ func TestOpenCodeScanReportsTheReaderCounters(t *testing.T) {
 
 func TestAnEmptyOpenCodeWalkCreatesNoSpool(t *testing.T) {
 	spool := filepath.Join(t.TempDir(), "events.ndjson")
-	scan := NewOpenCodeScan(openCodeConsents, opencode.NewServers(nil), opencode.Staleness{}, opencode.Idleness{}, store.New(spool))
+	scan := NewOpenCodeScan(openCodeConsents, opencode.NewServers(nil), adapter.Staleness{}, adapter.Idleness{}, store.New(spool))
 	if _, err := scan.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
 	}
