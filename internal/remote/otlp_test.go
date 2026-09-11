@@ -1491,7 +1491,8 @@ func goldenBatch() []record.Record {
 
 // TestEncodeIsDeterministic pins the property the spool's replay safety rests
 // on: the same records always produce the same bytes, so a re-send is a
-// duplicate a receiver can drop rather than a second, differently-shaped event.
+// duplicate a reader of the receiver's store can collapse rather than a second,
+// differently-shaped event.
 //
 // It holds because attributes are built as a slice in fixed source order. Ranging
 // a map anywhere in the encoder would break it, and would break it
