@@ -147,7 +147,13 @@ func (t *termPrompter) Secret(prompt string) (string, error) {
 // notAnHTTPEndpoint is what a rejected URL is told, and it is a fixed literal:
 // the value that was typed is never quoted back, because a URL is exactly where
 // a credential hides (ADR-0029, ADR-0031).
-const notAnHTTPEndpoint = "that is not an absolute http:// or https:// URL; try again."
+//
+// One literal for both refusals config.EndpointHost collapses into an empty
+// host — not a URL this build stores at all, and an http:// URL to a host that
+// is not loopback — because the value that would tell them apart is the value
+// that may not be shown. It states the whole rule instead, so either way the
+// answer is actionable.
+const notAnHTTPEndpoint = "that is not an endpoint this build stores: it must be an absolute https:// URL, or an http:// URL to a loopback host; try again."
 
 // promptEndpointAndCredential walks a person through `remote set`, in the order
 // the two answers are needed: where records go, confirmed, and then what
@@ -185,7 +191,9 @@ func promptEndpointAndCredential(prompt prompter, w io.Writer, given string) (en
 //
 // An empty host is the refusal that keeps this from confirming a destination the
 // store would reject: config.EndpointHost yields one only for an absolute
-// http:// or https:// URL.
+// https:// URL, or an http:// URL to a loopback host. Sharing that one predicate
+// with the write path is what stops the confirmation from confirming a
+// destination the store would then refuse.
 func confirmEndpoint(prompt prompter, w io.Writer, given string) (string, error) {
 	endpoint := strings.TrimSpace(given)
 	for {
