@@ -23,11 +23,32 @@ import (
 // consented by an edit that added no entry and broke no other rule.
 const globalRootMACDomain = "wake/global-root/v1"
 
-// ErrOutsideGlobalRoot refuses a directory the recorded boundary does not strictly
-// enclose, which includes the boundary itself and every directory on a machine with
-// no boundary recorded. It names the requirement and never the directory, which is
+// ErrOutsideGlobalRoot refuses a registration whose discovered root left the bound the
+// admission test rests on: the boundary, for a directory the boundary strictly
+// encloses, and the worktree the probe named, for a linked worktree of a consented
+// repository (ADR-0044 §1). Every directory on a machine with no boundary recorded is
+// outside it too. It names the requirement and never the directory, which is
 // repository content (plan §4.2).
-var ErrOutsideGlobalRoot = errors.New("a directory outside the recorded collection boundary is never registered")
+//
+// It is not the answer for a directory the boundary does not enclose. Since ADR-0044
+// widened the candidate set to every unmatched working directory, that question is the
+// second arm's and its answer is ErrNotAnAdmittedWorktree — a scan counts the two
+// differently, because only one of them describes collection that was lost.
+var ErrOutsideGlobalRoot = errors.New("a discovered repository root outside what the recorded consent covers is never registered")
+
+// ErrNotAnAdmittedWorktree refuses a directory outside the recorded boundary that the
+// admission test's second arm does not admit: one that is not a linked worktree at
+// all, or one whose repository this machine has not consented (ADR-0044 §1). It names
+// the requirement and never the directory (plan §4.2).
+//
+// It is separate from ErrOutsideGlobalRoot because the two are different facts and a
+// scan counts them differently. This one describes a directory nobody consented, and
+// since ADR-0044 made every unmatched working directory a candidate it is the ordinary
+// answer for the many that are not worktrees — counting it as a refusal would report
+// lost collection on every machine that has ever run a session outside its boundary.
+// ErrOutsideGlobalRoot describes a directory the recorded consent does cover, and that
+// one is lost collection (health.Scan.BoundaryRefused, plan §3.3, §12).
+var ErrNotAnAdmittedWorktree = errors.New("a directory outside the collection boundary is registered only as a linked worktree of a consented repository")
 
 // ErrDiscoveredDirectoryGone refuses a discovered directory that is no longer there.
 // It is separate from ErrOutsideGlobalRoot because the two are different facts and a
@@ -224,6 +245,46 @@ func (r *Repos) WithinGlobalRoot(cwd string) bool {
 	return strictlyEncloses(boundary.Root, cleaned, boundary.CaseInsensitive)
 }
 
+// OfferableUnderGlobalRoot reports whether a working directory no recorded entry
+// matched is one the walk should offer to RegisterUnderGlobalRoot after it finishes.
+//
+// This is the *candidate* test, not the admission test, and the two are deliberately
+// different since ADR-0044. Admission has two arms (ADR-0044 §1): the boundary path
+// test, and — only after it fails — a linked worktree whose repository is consented.
+// Where a linked worktree lives is a property of whichever tool manages them, so no
+// path test can tell one from any other directory; with a boundary recorded every
+// unmatched directory is therefore a candidate, and RegisterUnderGlobalRoot decides.
+//
+// Observing is still not registering (ADR-0032 §5). This is a pure string operation
+// over the snapshot — no os.Stat, no EvalSymlinks, no git — because it runs on the
+// derivation path, once per working directory a scan finds no recorded entry for
+// (ADR-0019 §1, ADR-0044 §4). The git question is asked after the walk, once, in
+// RegisterUnderGlobalRoot.
+//
+// With no boundary recorded the answer is always false, so a scan on a machine that
+// never ran `init --global` walks once and pays for nothing.
+//
+// On a machine that did, the cost of the widening is real and repeated, and it is
+// accepted rather than overlooked: a directory this offers that is not a worktree
+// records nothing, so every distinct historical working directory outside the boundary
+// pays one bounded probe on every scan rather than once. It stays within what
+// ADR-0044 §2 allows — at most one probe per directory per attempt — and it is paid in
+// the detached child rather than in the hook the user waits on (plan §4.1.1).
+// Remembering the refusals to avoid re-probing would mean recording state about
+// directories nobody consented. ADR-0047 §1 settles what to do about that population
+// without recording anything: classification may look where registration may not, and
+// it still remembers nothing — so this gate is unchanged and registration keeps paying
+// one probe per attempt.
+func (r *Repos) OfferableUnderGlobalRoot(cwd string) bool {
+	// The boundary arm, kept explicit rather than folded away: it is the arm
+	// ADR-0044's Consequences require a future change to name, and it keeps
+	// WithinGlobalRoot the one place the enclosure rule is spelled.
+	if r.WithinGlobalRoot(cwd) {
+		return true
+	}
+	return r.table.GlobalRoot != nil
+}
+
 // SetGlobalRoot records the machine-wide collection boundary, replacing any earlier
 // one.
 //
@@ -312,7 +373,10 @@ func (r *Repos) RegisterUnderGlobalRoot(dir string, from time.Time) (string, err
 		return "", fmt.Errorf("a discovered directory %w", err)
 	}
 	if !strictlyEncloses(boundary.Root, cleaned, boundary.CaseInsensitive) {
-		return "", ErrOutsideGlobalRoot
+		// The second arm (ADR-0044 §1), reached only after the path test above has
+		// failed — so a directory inside the boundary never pays for it, and a
+		// directory outside it pays one bounded probe (ADR-0044 §2).
+		return r.registerLinkedWorktree(cleaned, boundary, from)
 	}
 
 	root, err := DiscoverRootForRegistration(cleaned, boundary.Root)
@@ -362,6 +426,137 @@ func (r *Repos) RegisterUnderGlobalRoot(dir string, from time.Time) (string, err
 	// inside the boundary is one later scans have to match without discovering it
 	// again.
 	return r.Register(discovered, filepath.Base(discovered), from)
+}
+
+// registerLinkedWorktree is the admission test's second arm: a directory the boundary
+// does not enclose is admitted when it is a linked worktree whose repository is itself
+// a consented entry or inside the boundary (ADR-0044 §1). It registers under its own
+// identity, carrying the belongs_to relation ADR-0040 defined — Register does both, so
+// projects.json gains no field and DG-104's machinery is reused unchanged.
+//
+// What replaces the boundary as the bound is stronger, not weaker: a consent decision
+// the user already made. The ceiling narrows what git may answer; the checks after git
+// answers are what the guarantee rests on, exactly as on the first arm.
+//
+// Every failure names the requirement and never the directory (plan §4.2), and there
+// are two of them because a scan counts them differently. Until consent is decided the
+// answer is ErrNotAnAdmittedWorktree: nothing here was consented, so nothing is lost by
+// turning it away, and this is the ordinary answer for the many directories a widened
+// candidate set offers that are not worktrees. After consent is decided the answer is
+// ErrOutsideGlobalRoot, the same sentinel the first arm's post-discovery check raises
+// and for the same reason — the repository is one the user consented, the sessions in
+// its worktree were readable, and a refusal from here is collection that was lost.
+//
+// ErrDiscoveredDirectoryGone is deliberately not raised here. A worktree directory that
+// is gone fails the probe before consent is ever decided, since git cannot answer about
+// a directory that is not there, so it is turned away as not admitted rather than
+// counted as an honest zero — and a directory outside the boundary that cannot be read
+// was never going to be collected.
+func (r *Repos) registerLinkedWorktree(cleaned string, boundary *globalRootEntry, from time.Time) (string, error) {
+	// One bounded probe, and the only one a directory that is not a linked worktree
+	// pays for the question (ADR-0044 §2).
+	topLevel, parentSpellings := discoverLinkedWorktreeForRegistration(cleaned)
+	if topLevel == "" {
+		return "", ErrNotAnAdmittedWorktree
+	}
+	// Checked after git answers, against the recorded table — never trusted from
+	// git's environment (ADR-0044 §2). This is where consent is decided, and it is the
+	// line the two sentinels fall on: everything above answers about a directory
+	// nobody consented, everything below about a repository the user did.
+	if !r.consentsRepository(parentSpellings, boundary) {
+		return "", ErrNotAnAdmittedWorktree
+	}
+	// The ceiling ADR-0044 §2 requires: the walk may not go above the worktree's own
+	// top level. GIT_CEILING_DIRECTORIES names directories git will not chdir up
+	// *into*, so naming the top level itself would stop the walk one directory short
+	// and a registration from a subdirectory of the worktree would find nothing; the
+	// top level's parent is how "this far and no further" is spelled.
+	root, err := DiscoverRootForRegistration(cleaned, filepath.Dir(topLevel))
+	if err != nil {
+		return "", ErrOutsideGlobalRoot
+	}
+	discovered, err := lexicalClean(root)
+	if err != nil {
+		return "", ErrOutsideGlobalRoot
+	}
+	canonical, err := canonicalRoot(discovered)
+	if err != nil {
+		return "", ErrOutsideGlobalRoot
+	}
+	canonicalTop, err := canonicalRoot(topLevel)
+	if err != nil {
+		return "", ErrOutsideGlobalRoot
+	}
+	// The check the guarantee rests on, and it is about the root rather than about the
+	// probe: what git answered under the ceiling must be the worktree the probe named,
+	// whatever either call's environment was persuaded to say. Canonical on both
+	// sides, so one comparison covers every spelling (ADR-0019 §5 owns symlink
+	// resolution).
+	if canonical != canonicalTop {
+		return "", ErrOutsideGlobalRoot
+	}
+	// A root at or above the boundary would become the recorded root of everything
+	// inside it — the identity collapse the first arm's check exists to prevent, and
+	// what ADR-0044 §2 means by a ceiling that is "not the boundary and not the
+	// filesystem root". Both spellings, because both can reach it.
+	if hasPathPrefix(boundary.Root, discovered, boundary.CaseInsensitive) ||
+		hasPathPrefix(boundary.Root, canonical, boundary.CaseInsensitive) {
+		return "", ErrOutsideGlobalRoot
+	}
+	// The discovered spelling rather than the canonical one, for the reason the first
+	// arm gives: Register records the alias it derives from the difference.
+	return r.Register(discovered, filepath.Base(discovered), from)
+}
+
+// consentsRepository reports whether the repository these spellings name is one this
+// machine has consented: an entry already recorded, or a directory the boundary
+// encloses — ADR-0044 §1's disjunction.
+//
+// The two disjuncts weigh the spellings differently, and deliberately. A recorded
+// entry matches under any of them, because an entry is a consent decision the user
+// made about a repository and the alias is how the same repository is recognised
+// through its other spelling (ADR-0019 §5). The boundary is the inferred disjunct, so
+// it requires every spelling to be inside: git can name a repository through a path
+// lexically inside the boundary while it physically lives outside, and the first arm
+// refuses exactly that repository — checking both the discovered and the canonical
+// spelling against the boundary — because Register records the canonical root and
+// consent is about where the repository is. ADR-0044 §2 replaces the boundary ceiling
+// here with a consent decision the user already made and calls the replacement
+// stronger, not weaker; admitting a parent the first arm would turn away is the one
+// way this arm could be weaker instead. No spellings at all is no consent, rather than
+// the vacuous truth the loop alone would answer.
+//
+// Pure over the snapshot and over the answer git already gave. The snapshot rather
+// than a re-read, exactly as the boundary itself is read above; Register re-reads
+// under the lock, and ADR-0040 §2 decides what happens if the parent is not an entry
+// by then — the relation is refused and the registration is not.
+//
+// ADR-0047 §1 adds a second caller, and it consents nothing either: classification asks
+// this the same question registration does and turns the answer into a counter. That
+// caller runs on a machine with no boundary recorded, which admission cannot reach, so
+// a nil boundary is answered rather than dereferenced — and answered false, since with
+// no boundary the recorded entries are the whole of what this machine consented.
+func (r *Repos) consentsRepository(spellings []string, boundary *globalRootEntry) bool {
+	if entryIDForRoot(r.table.Projects, spellings) != "" {
+		return true
+	}
+	if len(spellings) == 0 {
+		return false
+	}
+	// No boundary recorded: the entry test above is the whole answer. Admission never
+	// reaches this — RegisterUnderGlobalRoot refuses a nil boundary before the second
+	// arm is entered — and the classification caller ADR-0047 §1 admits does, on
+	// precisely the machine the diagnostic exists for: a plain `wake init`, no
+	// boundary, and a worktree of the repository that init consented.
+	if boundary == nil {
+		return false
+	}
+	for _, spelling := range spellings {
+		if !strictlyEncloses(boundary.Root, spelling, boundary.CaseInsensitive) {
+			return false
+		}
+	}
+	return true
 }
 
 // strictlyEncloses reports whether inner is a directory inside outer, and not outer

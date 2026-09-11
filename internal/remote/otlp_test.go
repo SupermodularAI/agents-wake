@@ -248,6 +248,10 @@ func fullRecord() record.Record {
 	// span keeps testing the absent case and this one the present case.
 	r.ParentEventID = record.DeriveEventID("claude-code", "source-event-parent")
 	r.Model = "claude-opus-5"
+	// The widest output shape, not a semantic claim: this fixture is deliberately
+	// wider than any single adapter's real record, so the key-set assertion sees
+	// every conditional key at once.
+	r.MCPServer = "claude-in-chrome"
 	r.Effort = "high"
 	// Deliberately not the cli member: a defaulted or hard-coded "cli" anywhere in
 	// the encoder would pass an assertion built on the commonest value.
@@ -477,10 +481,36 @@ func TestUnknownDurationRendersZeroLengthSpan(t *testing.T) {
 			if end-start != testCase.wantNano {
 				t.Fatalf("end - start = %d ns, want %d", end-start, testCase.wantNano)
 			}
-			if want := r.Timestamp.UTC().UnixNano(); start != want {
-				t.Fatalf("startTimeUnixNano = %d, want %d", start, want)
+			// The record's ts is the span's END: complete stamps a paired record
+			// from the tool_result instant, so ts is when the invocation
+			// finished and the start is derived backwards from it.
+			if want := r.Timestamp.UTC().UnixNano(); end != want {
+				t.Fatalf("endTimeUnixNano = %d, want the record's ts %d", end, want)
 			}
 		})
+	}
+}
+
+// The acceptance criterion in test form. A paired call's ts is the instant its
+// result came back, so the span ends there and reaches back over the duration —
+// rather than starting at its own finish time and running forward, which is what
+// adding the duration to ts drew before.
+func TestAPairedDurationExtendsTheSpanBackwards(t *testing.T) {
+	r := fullRecord()
+	span := encodeOne(t, r)
+
+	start := parseNano(t, span, "startTimeUnixNano")
+	end := parseNano(t, span, "endTimeUnixNano")
+
+	if end <= start {
+		t.Fatalf("endTimeUnixNano = %d, startTimeUnixNano = %d, want end after start", end, start)
+	}
+	if want := r.Timestamp.UTC().UnixNano(); end != want {
+		t.Errorf("endTimeUnixNano = %d, want the record's ts %d", end, want)
+	}
+	// fullRecord carries DurationMS = 1500.
+	if want := end - 1_500_000_000; start != want {
+		t.Errorf("startTimeUnixNano = %d, want ts - duration %d", start, want)
 	}
 }
 
@@ -514,11 +544,21 @@ func TestEncodeDropsUnrepresentableTimestamps(t *testing.T) {
 	overflow := fullRecord()
 	overflow.DurationMS = ptr(int64(math.MaxInt64))
 
+	// The other direction, live only now that durations are populated: a valid
+	// record whose derived start would land a second before the epoch, which
+	// OTLP's unsigned nano fields cannot express at all. Dropped and counted
+	// like every other unrepresentable pair, never wrapped and never emitted
+	// with the duration quietly discarded.
+	underflow := fullRecord()
+	underflow.Timestamp = time.Unix(1, 0).UTC()
+	underflow.DurationMS = ptr(int64(2000))
+
 	for name, r := range map[string]record.Record{
-		"pre-epoch":         preEpoch,
-		"pre-1678 wrap":     preRepresentable,
-		"post-2262 wrap":    postRepresentable,
-		"duration overflow": overflow,
+		"pre-epoch":          preEpoch,
+		"pre-1678 wrap":      preRepresentable,
+		"post-2262 wrap":     postRepresentable,
+		"duration overflow":  overflow,
+		"duration underflow": underflow,
 	} {
 		t.Run(name, func(t *testing.T) {
 			// record.Validate imposes no range on Timestamp, so every row here
@@ -648,6 +688,10 @@ var frozenSpanAttributeKeys = []string{
 	"wake.input_tokens",
 	"wake.invoker",
 	"wake.kind",
+	// Conditional, and belongs in this list only: it is populated only on an MCP
+	// tool's record, so it is absent from every other span and deliberately absent
+	// from frozenAlwaysPresentKeys below.
+	"wake.mcp_server",
 	"wake.model",
 	"wake.name",
 	"wake.outcome",
@@ -1305,6 +1349,7 @@ func assertEveryStringIsAllowlisted(t *testing.T, payload []byte, r record.Recor
 		string(r.SessionID), string(r.Repo), string(r.Package), string(r.PackageVersion),
 		string(r.ViaSkill), string(r.ViaAgent), string(r.Model), string(r.Effort),
 		string(r.Invoker), string(r.Entrypoint), string(r.Kind) + ":" + string(r.Name),
+		string(r.MCPServer),
 		traceID(r), spanID(r), parentSpanID(r), start, end,
 		strconv.FormatUint(uint64(r.SchemaVersion), 10),
 	}
@@ -1446,7 +1491,8 @@ func goldenBatch() []record.Record {
 
 // TestEncodeIsDeterministic pins the property the spool's replay safety rests
 // on: the same records always produce the same bytes, so a re-send is a
-// duplicate a receiver can drop rather than a second, differently-shaped event.
+// duplicate a reader of the receiver's store can collapse rather than a second,
+// differently-shaped event.
 //
 // It holds because attributes are built as a slice in fixed source order. Ranging
 // a map anywhere in the encoder would break it, and would break it
@@ -1664,5 +1710,39 @@ func TestParentSpanIDIsDeterministic(t *testing.T) {
 		if !bytes.Equal(first, next) {
 			t.Fatalf("Encode() run %d differs:\n%s\n%s", i, first, next)
 		}
+	}
+}
+
+// TestMCPServerRidesEveryMCPToolSpan pins ADR-0038 §1: an attribute a receiver
+// groups by has to ride every span the grouping should reach, carrying that span's
+// own value. It is never gated to one span of a trace and never propagated from an
+// anchor, so a parent link changes nothing about whether it is emitted.
+func TestMCPServerRidesEveryMCPToolSpan(t *testing.T) {
+	for _, parented := range []bool{false, true} {
+		call := validRecord()
+		call.Kind = record.KindMCPTool
+		call.Name = "mcp__claude-in-chrome__computer"
+		call.MCPServer = "claude-in-chrome"
+		if parented {
+			call.ParentEventID = record.DeriveEventID("claude-code", "source-event-parent")
+		}
+		attributes := attributesOf(t, encodeOne(t, call), "attributes")
+		value, emitted := attributes["wake.mcp_server"]
+		if !emitted {
+			t.Fatalf("parented=%t: no wake.mcp_server attribute", parented)
+		}
+		if value["stringValue"] != "claude-in-chrome" {
+			t.Errorf("parented=%t: wake.mcp_server = %v, want %q", parented, value["stringValue"], "claude-in-chrome")
+		}
+	}
+}
+
+// A record carrying no server emits no key at all: absence, never an empty string
+// value, because unknown is signalled by absence and never collapses into a
+// definite value (ADR-0005, ADR-0027).
+func TestMCPServerIsAbsentWhereTheRecordCarriesNone(t *testing.T) {
+	attributes := attributesOf(t, encodeOne(t, validRecord()), "attributes")
+	if _, emitted := attributes["wake.mcp_server"]; emitted {
+		t.Errorf("a skill span carried wake.mcp_server: %v", attributeKeys(attributes))
 	}
 }

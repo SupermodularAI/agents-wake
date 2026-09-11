@@ -9,6 +9,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/errorcell"
 	"github.com/SupermodularAI/agents-wake/internal/inventory"
 	"github.com/SupermodularAI/agents-wake/internal/metrics"
 	"github.com/SupermodularAI/agents-wake/internal/record"
@@ -35,6 +36,11 @@ type Options struct {
 	Unused bool
 	Pretty bool
 	Labels repolabel.Labels
+	// Rollup is which repository each repository's activity is counted under, and it
+	// is resolved by internal/cli and handed in for the reason Labels is: this
+	// package reads no config and no file. A nil map is valid — every repository then
+	// stands alone.
+	Rollup metrics.RepoRollup
 }
 
 // Print reads the local event and primitive stores and writes current metrics.
@@ -51,7 +57,7 @@ func Print(writer io.Writer, source *store.Store, primitives *inventory.Store, o
 	if err != nil {
 		return err
 	}
-	return Render(writer, metrics.Aggregate(records), available, options)
+	return Render(writer, metrics.Aggregate(records, options.Rollup), available, options)
 }
 
 // Render writes one readable report. Its content is identical whatever the
@@ -157,12 +163,17 @@ func primitiveUsage(writer io.Writer, available []inventory.Usage, labels repola
 	if _, err := fmt.Fprintln(writer, "\n"+heading(pretty, "USED PRIMITIVES")); err != nil {
 		return err
 	}
-	rows := newTable("PRIMITIVE", "TYPE", "HARNESS", "REPO", "LAST USED", "CALLS", "ERRORS")
+	rows := newTable("PRIMITIVE", "TYPE", "HARNESS", "PROJECT", "LAST USED", "CALLS", "ERRORS")
+	// unmatched tracks whether a printed row needs the footnote below, so the note
+	// is earned by what this table actually shows rather than by a second pass over
+	// rows the reader cannot see.
+	unmatched := false
 	for _, usage := range available {
 		if usage.Invocations == 0 {
 			continue
 		}
-		rows.add(string(usage.Name), kind(usage.Kind), string(usage.Harness), labels.Display(usage.Repo), usage.LastUsed.UTC().Format(time.RFC3339), fmt.Sprintf("%d", usage.Invocations), errorCell(usage))
+		unmatched = unmatched || usage.Unmatched
+		rows.add(string(usage.Name), usage.KindLabel(), string(usage.Harness), labels.DisplayAll(usage.Repos), usage.LastUsed.UTC().Format(time.RFC3339), fmt.Sprintf("%d", usage.Invocations), errorcell.Render(usage.ErrorRate()))
 	}
 	if len(rows.rows) == 0 {
 		_, err := fmt.Fprintln(writer, "No primitive activity observed.")
@@ -171,7 +182,18 @@ func primitiveUsage(writer io.Writer, available []inventory.Usage, labels repola
 	if err := rows.write(writer, pretty); err != nil {
 		return err
 	}
-	_, err := fmt.Fprintln(writer, "Only currently discovered, non-built-in primitives are listed.")
+	if _, err := fmt.Fprintln(writer, "Only currently discovered, non-built-in primitives are listed."); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(writer, "PROJECT is the project each invocation's own working directory resolved to; a linked worktree counts under the repository it belongs to. A primitive invoked in more than one project shows how many, and its CALLS are the total across them."); err != nil {
+		return err
+	}
+	if !unmatched {
+		return nil
+	}
+	// A footnote, not a column: a marker column would be empty on every other row,
+	// which reads as a bug rather than as an absence (plan §4.5).
+	_, err := fmt.Fprintln(writer, "A server marked (unmatched) was invoked but matches no MCP server this pass discovered; its calls are counted here and cannot be attributed to a configured server.")
 	return err
 }
 
@@ -179,7 +201,7 @@ func unusedPrimitives(writer io.Writer, available []inventory.Usage, pretty bool
 	if _, err := fmt.Fprintln(writer, "\n"+heading(pretty, "UNUSED PRIMITIVES")); err != nil {
 		return err
 	}
-	// No REPO column here: an unused primitive has zero invocations, and a
+	// No PROJECT column here: an unused primitive has zero invocations, and a
 	// repository is a property of an invocation (ADR-0002), so there is nothing to
 	// put in the cell. A column of dashes is the empty column plan §4.5 forbids.
 	rows := newTable("PRIMITIVE", "TYPE", "HARNESS")
@@ -187,7 +209,7 @@ func unusedPrimitives(writer io.Writer, available []inventory.Usage, pretty bool
 		if usage.Invocations > 0 {
 			continue
 		}
-		rows.add(string(usage.Name), kind(usage.Kind), string(usage.Harness))
+		rows.add(string(usage.Name), usage.KindLabel(), string(usage.Harness))
 	}
 	if len(rows.rows) == 0 {
 		_, err := fmt.Fprintln(writer, "Every discovered primitive has activity.")
@@ -216,20 +238,4 @@ func capitalize(s string) string {
 		return s
 	}
 	return strings.ToUpper(s[:1]) + s[1:]
-}
-
-// errorCell is a single per-primitive table cell, not the OVERVIEW-wide rate:
-// a count first because that is what a busy reader scans a column for, then
-// the percentage in parentheses for the ones who want the rate too. A
-// primitive with no failures says "0" rather than "0 (0.0%)" — a rate is only
-// interesting once there is one.
-func errorCell(usage inventory.Usage) string {
-	if usage.Failures == 0 {
-		return "0"
-	}
-	ratio := metrics.NewRatio(usage.Failures, usage.Invocations-usage.Unknown, usage.Unknown, usage.Invocations)
-	if percent, ok := ratio.Percent(); ok {
-		return fmt.Sprintf("%d (%.1f%%)", usage.Failures, percent)
-	}
-	return fmt.Sprintf("%d", usage.Failures)
 }

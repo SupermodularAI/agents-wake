@@ -62,7 +62,7 @@ const (
 // Flush cannot catch that on its own: it fires on a position past head, and a
 // re-derived spool is about as long as the one it replaced, so head passes the
 // stale position again and the records below it are skipped permanently. Stamping
-// the schema version is what turns that into a re-send, which is free.
+// the schema version is what turns that into a re-send: a duplicate, not a loss.
 //
 // It is half of that defence and not the whole of it, because it is spent once: the
 // first flush after the bump clears the position and stamps the new version, and the
@@ -99,11 +99,13 @@ func deliveryStatePath(p config.Paths) string {
 // A missing file, an unparseable one, and one from a version this build does not
 // read all mean the same thing here: "delivered through nothing". That is the
 // conservative direction for a cursor, and the asymmetry is the whole argument.
-// Failing backward costs a re-send, which is free — DG-63 derives span_id from
-// the deterministic event_id, so the receiver collapses a duplicate on
-// (trace_id, span_id) and at-least-once delivery is safe by construction
-// (ADR-0018, ADR-0027). Failing forward would skip records permanently, and
-// nothing downstream would ever notice.
+// Failing backward costs a re-send. DG-63 derives span_id from the deterministic
+// event_id, so a re-sent record is the same span and the duplicate is one a reader
+// of the receiver's store can collapse on the event's own identity; at-least-once
+// is the delivery contract (ADR-0004, ADR-0018, ADR-0027) and the receiver is not
+// guaranteed to collapse anything on our behalf. Failing forward would skip records
+// permanently, and nothing downstream would ever notice — which is why the
+// asymmetry still points this way.
 //
 // It is the same argument the rebuild self-heal in Flush makes, and it is the
 // reason neither path clamps.

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -357,4 +358,116 @@ func readPrimitives(t *testing.T, paths config.Paths) string {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
 	return string(raw)
+}
+
+// TestReportCountsAWorktreeUnderTheRepositoryItBelongsTo is DG-104 proved through
+// the real command: one project spread across a main checkout and a linked git
+// worktree reads as one row under the project's name, not two rows under two names.
+// The chain it exercises is the whole of the change — Register records the relation,
+// config.RepoRollup and config.ProjectLabels project it, metrics.Aggregate applies
+// it, and the renderer prints the result — so a break anywhere along it shows two
+// rows or the worktree's own label.
+func TestReportCountsAWorktreeUnderTheRepositoryItBelongsTo(t *testing.T) {
+	requireGitCLI(t)
+	t.Setenv(config.EnvDataDir, t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	main, worktree := initWorktreeCLI(t)
+	writeSkill(t, filepath.Join(main, ".claude", "skills", "shared"))
+
+	paths, err := config.ResolvePaths()
+	if err != nil {
+		t.Fatalf("ResolvePaths() error = %v", err)
+	}
+	mainID := consentLabelled(t, paths, main, "alpha")
+	worktreeID := consentLabelled(t, paths, worktree, "beta")
+	if mainID == worktreeID {
+		t.Fatalf("the worktree registered under the main checkout's id %q; a worktree is its own repository", mainID)
+	}
+
+	ok := record.OutcomeOK
+	events := make([]record.Record, 0, 4)
+	for _, run := range []struct {
+		source  string
+		repo    string
+		session string
+	}{
+		{"main-one", mainID, "session-main"},
+		{"main-two", mainID, "session-main"},
+		{"worktree-one", worktreeID, "session-worktree"},
+		{"worktree-two", worktreeID, "session-worktree"},
+	} {
+		events = append(events, record.Record{
+			SchemaVersion: record.SchemaVersion,
+			EventID:       record.DeriveEventID("claude-code", record.Identifier(run.source)),
+			Timestamp:     time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC),
+			Harness:       "claude-code",
+			SessionID:     record.Identifier(run.session),
+			Repo:          record.Hash(run.repo),
+			Kind:          record.KindSkill,
+			Name:          "shared",
+			Invoker:       record.InvokerModel,
+			Outcome:       &ok,
+		})
+	}
+	if _, appendErr := store.New(filepath.Join(paths.DataDir, "events.ndjson")).Append(events); appendErr != nil {
+		t.Fatalf("Append() error = %v", appendErr)
+	}
+
+	t.Chdir(main)
+	out, err := run(t, "report", "--usage")
+	if err != nil {
+		t.Fatalf("wake report error = %v: %s", err, out)
+	}
+	if !strings.Contains(out, "alpha") {
+		t.Errorf("wake report does not name the repository the worktree belongs to: %s", out)
+	}
+	if strings.Contains(out, "beta") {
+		t.Errorf("wake report still shows the worktree as a project of its own: %s", out)
+	}
+	if strings.Count(out, "shared") != 1 {
+		t.Errorf("wake report shows the skill on %d rows, want one: %s", strings.Count(out, "shared"), out)
+	}
+	if !strings.Contains(out, "4") {
+		t.Errorf("wake report does not show the four invocations summed onto one row: %s", out)
+	}
+}
+
+// requireGitCLI is internal/config's requireGit, at this package's seam: git is
+// required rather than assumed, and the developer's own configuration is
+// neutralised so what `git init` produces cannot depend on the machine.
+func requireGitCLI(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git is not installed: %v", err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+}
+
+// initWorktreeCLI builds a repository with one commit and one linked worktree
+// beside it, symlink-resolved because on darwin t.TempDir() sits behind
+// /var → /private/var and both git and Register report the resolved spelling. The
+// worktree is a sibling and never a child: a worktree inside the main root would be
+// nesting, which Register refuses (ADR-0019 §5).
+func initWorktreeCLI(t *testing.T) (main, worktree string) {
+	t.Helper()
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks() error = %v", err)
+	}
+	main = filepath.Join(base, "main")
+	worktree = filepath.Join(base, "worktree")
+	if mkErr := os.MkdirAll(main, 0o700); mkErr != nil {
+		t.Fatalf("MkdirAll() error = %v", mkErr)
+	}
+	for _, step := range [][]string{
+		{"init", main},
+		{"-C", main, "-c", "user.email=wake@example.invalid", "-c", "user.name=wake", "commit", "--allow-empty", "-m", "init"},
+		{"-C", main, "worktree", "add", worktree},
+	} {
+		if output, gitErr := exec.Command("git", step...).CombinedOutput(); gitErr != nil {
+			t.Fatalf("git %v: %v: %s", step, gitErr, output)
+		}
+	}
+	return main, worktree
 }

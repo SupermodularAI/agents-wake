@@ -70,6 +70,14 @@ type Scan struct {
 	// waits here and is emitted once with its parent already set, never emitted first
 	// and corrected later.
 	deferred []deferredChild
+	// pendingChildren is the half of deferred a Close could not emit, kept apart so
+	// the deferred buffer drains like every other while the survivors stay
+	// carryable: Pending reports them and RestorePending re-defers them on the next
+	// scan. A child lands here only while its session is open — a closed session
+	// resolves or refuses every run it holds, and the precedence then always
+	// answers the child — so the tally a second Close would recount is never one a
+	// session_end was not yet written from.
+	pendingChildren []deferredChild
 	// skills indexes the invocation records this walk derived per (session, skill
 	// name), so case 2 resolves against records that exist rather than against a
 	// second, independent lookup (ADR-0035 §3, §6).
@@ -289,7 +297,16 @@ func (s *Scan) Read(reader io.Reader) (Result, error) {
 					key := callKey{session: pendingCall.sessionID, id: pendingCall.id}
 					if early, terminated := s.earlyResults[key]; terminated {
 						delete(s.earlyResults, key)
-						s.route(&result.Records, pendingCall.complete(early), source, pendingCall.agentID)
+						// Through pairedWith, for the reason resultOf exists: line order may
+						// not change a derived value — now for the pair's duration as well
+						// as for its outcome. A pair whose instants came back inverted
+						// measured nothing, so the duration stays nil and the occurrence is
+						// counted rather than clamped to 0 (ADR-0027).
+						terminator, ordered := pendingCall.pairedWith(early)
+						if !ordered {
+							result.OutOfOrderPairs++
+						}
+						s.route(&result.Records, pendingCall.complete(terminator), source, pendingCall.agentID)
 					} else {
 						s.pending[key] = pendingCall
 					}
@@ -316,7 +333,13 @@ func (s *Scan) Read(reader io.Reader) (Result, error) {
 					continue
 				}
 				delete(s.pending, key)
-				s.route(&result.Records, pendingCall.complete(resultOf(entry, block)), source, pendingCall.agentID)
+				// The forward-order half of the same pairing: same helper, same counter,
+				// so the two orders cannot disagree about whether a duration exists.
+				terminator, ordered := pendingCall.pairedWith(resultOf(entry, block))
+				if !ordered {
+					result.OutOfOrderPairs++
+				}
+				s.route(&result.Records, pendingCall.complete(terminator), source, pendingCall.agentID)
 			}
 		}
 	})
@@ -509,10 +532,25 @@ func (s *Scan) Close() Result {
 	for _, child := range s.deferred {
 		s.tally.observeOne(child.event)
 	}
-	// Drained like every other buffer this pass resolves, so a second Close resolves
-	// nothing further and reports the same totals rather than counting these twice.
-	// Nothing changes between two Closes, so a child this pass left buffered would not
-	// have been emitted by the next one either.
+	// Drained like every other buffer this pass resolves, so a second Close
+	// resolves nothing further and reports the same totals rather than counting
+	// these twice. The un-emitted half is not discarded, though: it moves to
+	// pendingChildren. A child this pass left buffered is one a later scan may
+	// still emit — its session can close after this scan ends, and the entries
+	// it was derived from are not guaranteed to be re-read then (a forward-only
+	// scan never re-reads what predates the recorded boundary), so dropping it
+	// here would lose a record the walk already derived. Pending hands the
+	// survivors to the caller, and RestorePending takes them back.
+	emittedChildren := make(map[record.Hash]struct{}, len(children))
+	for _, derived := range children {
+		emittedChildren[derived.event.EventID] = struct{}{}
+	}
+	s.pendingChildren = s.pendingChildren[:0]
+	for _, child := range s.deferred {
+		if _, done := emittedChildren[child.event.EventID]; !done {
+			s.pendingChildren = append(s.pendingChildren, child)
+		}
+	}
 	s.deferred = nil
 	for _, derived := range children {
 		result.Records = append(result.Records, derived.event)
@@ -532,10 +570,14 @@ func (s *Scan) Close() Result {
 	result.AmbiguousSkillRuns = ambiguous
 	result.Pending = len(s.pending)
 	result.OpenSessions = s.sessions.OpenSessions(s.stale)
-	for _, tally := range s.sources {
-		if !tally.productive() {
-			result.SkippedSources++
+	// Ascending by construction: s.sources is indexed by the ordinal Read claimed, so
+	// ranging it is ranging the ordinals in the order they were assigned.
+	for ordinal, tally := range s.sources {
+		if tally.productive() {
+			continue
 		}
+		result.SkippedSources++
+		result.SkippedSourceOrdinals = append(result.SkippedSourceOrdinals, ordinal)
 	}
 	return result
 }

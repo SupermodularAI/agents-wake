@@ -9,29 +9,218 @@ called out under Changed.
 
 ## [Unreleased]
 
+### Added
+
+- `SECURITY.md`, `CODE_OF_CONDUCT.md`, and this changelog.
+- Secret, vulnerability, and commit-style gates in CI.
+- Invocations carry `duration_ms`. The field was declared on the record type and
+  populated by nothing, so every exported span was zero-length. It is the
+  request-to-result interval — from the `tool_use` instant to the `tool_result`
+  instant — which includes scheduling and any wait for a human to approve a
+  permission prompt, so a permission-gated call reads as slow. It is **not** tool
+  execution time, and the harness's own `toolUseResult.durationMs` is deliberately
+  not consulted or blended: one provenance, always. A call with no terminal result,
+  and a pair whose result instant precedes its call, stay `nil` and are counted —
+  never clamped to `0`, because `0` on the wire means a genuinely instant call.
+- `doctor` splits `skipped transcripts` by reason, with transcripts from an
+  unregistered worktree of a consented repository on their own line. That
+  population was invisible inside one integer that summed three unrelated ones:
+  over 1,422 transcripts on one machine it was 223, and nine days of collection
+  the user had asked for were lost while the scan reported healthy. The other five
+  lines are a directory that is not a repository, a repository nobody consented, a
+  transcript predating its repository's consent instant, one nothing could
+  classify, and one that held nothing terminal; the six sum to the count above
+  them. A machine that has not scanned reads the breakdown as `not observed`
+  rather than `0`, which is not the same answer. Classification registers nothing
+  and consents nothing — the directories are counted, never collected from.
+- `doctor` reports `pending subagent runs` — how many subagent runs the last scan
+  could not resolve and carried to the next one rather than dropping. It is a separate
+  line from `pending calls` and counts a different population: a tool call resolves
+  when its result is written, a subagent run when its session closes. Without it a user
+  whose runs are sitting unresolved in the carry reads a healthy scan and a confident
+  zero — around 200 runs of one long session went unreported this way before the carry
+  existed. The line counts every run the last scan still held unresolved, not the runs
+  that scan newly deferred, and it never moves the integration state word: a carried
+  run is not lost collection. It is the size of the carry's unresolved set and not a
+  count of outstanding work, so read it that way: a run leaves the set only when a scan
+  observes its session close, and nothing else evicts it, so a run whose transcripts
+  the harness has pruned is counted from then on — including one that had already
+  resolved and been written to the store before the pruning. The number does not fall
+  back to zero by itself and grows over a machine's life.
+- An MCP tool's invocation now records which server provided it. A server's tools
+  are named `mcp__<server>__<tool>` by the harness, and the server segment is
+  stored as the harness spells it, validated as a bounded token. Before this,
+  every configured MCP server reported `invocations: 0` forever and read as
+  unused however heavily it was used. A server that is configured but whose key
+  does not match any observed prefix is reported as unmatched rather than
+  rendered as a zero row.
+
 ### Changed
 
-- **Breaking (stored records and wire).** The outcome `denied_policy` is now
-  `denied_by_harness_rule`, and the record schema moves from 6 to 7. The value
-  records the harness's own permission rule refusing a tool, never a governance
+- **Breaking (CLI).** `wake uninstall` and `wake remove --purge` now ask before
+  deleting anything. Both print the exact paths they will remove — `remove --purge`
+  never printed them at all — and then wait for a yes on standard input; any other
+  answer deletes nothing and says so. Where standard input is not a terminal, both
+  refuse with a non-zero exit and change nothing unless `--yes` is given, so a
+  script, cron job or CI step running either command today keeps working only once
+  `--yes` is added. `--yes` skips the question, never the disclosure: the paths are
+  still printed. When there is a question to answer, the paths are printed on the
+  same stream the question is put on — standard error, where every prompt in Wake
+  already goes — so redirecting standard output cannot leave you confirming a
+  deletion whose paths you never saw; with `--yes` there is nothing to answer and
+  they stay on standard output. `wake remove` without `--purge` is unchanged and
+  deliberately not gated — it removes only Wake's hook entry, which `wake init`
+  puts back.
+
+- **Breaking (stored records and wire).** Two changes bump the record schema, which
+  moves from 6 to 8.
+
+  **Version 7** — the outcome `denied_policy` is now `denied_by_harness_rule`. The
+  value records the harness's own permission rule refusing a tool, never a governance
   decision about an approved set — of the 159 such records on the first machine
   Wake was installed on, every one was a builtin Bash call. The old name invited
-  a reader to take it for the latter. A store holding version 6 is refused on
+  a reader to take it for the latter. Anything grouping on the old string — a saved
+  query or a dashboard panel — needs updating.
+
+  **Version 8** — records carry the nullable `mcp_server` dimension described under
+  Added.
+
+  A store holding an earlier version is refused on
   read and re-derived from the harness's own history by the next scan you ask
   for (`wake ingest`) — a hook-fired scan reports the count and leaves the spool
   alone, since it collects inside each repository's boundary and could not put
   the records back (`wake doctor` shows the pending count under "records from an
   earlier schema version"). If you collect only through the hooks `wake init`
-  installs, run `wake ingest` once after upgrading, or the version-6 records
+  installs, run `wake ingest` once after upgrading, or the older records
   stay unreadable and `wake report` shows only what was written since. The
   delivery watermark stamps the schema version and starts over on a bump, so
-  nothing needs migrating by hand. Anything grouping on the old string — a saved
-  query or a dashboard panel — needs updating.
+  nothing needs migrating by hand.
 
-### Added
+- **Breaking (`primitives.json`).** One primitive is now one row. The repository had
+  entered both the aggregate's key and the snapshot's key, so a primitive used in
+  several projects became several rows — on a real machine one skill showed as four
+  rows of 2 / 2 / 1 / 1 where the answer to *how much do I use this* is 6. The
+  repository now rides the row as a set instead of identifying it: counters are
+  summed across projects and the error rate is recomputed over the merged
+  population, never averaged from two rendered rates. `--unused` accordingly means
+  **never used anywhere** — a primitive used in one project and not another has been
+  used. The `PROJECT` cell still names a project where there is exactly one and
+  shows a count where there are several; naming one would report it as the only
+  project the primitive was used in. `primitiveFileVersion` goes 2 to 3 and an
+  older snapshot is refused rather than migrated, so one refresh republishes it from
+  the event spool. Nothing below the snapshot changes: the record contract, its
+  `SchemaVersion` and the OTLP attribute set are untouched, and `wake.repo` still
+  travels per invocation.
 
-- `SECURITY.md`, `CODE_OF_CONDUCT.md`, and this changelog.
-- Secret, vulnerability, and commit-style gates in CI.
+- `wake report` and the dashboard name the repository column **PROJECT** (`Project` in the
+  dashboard; was `REPO`), and the docs now say what that value is: the project each invocation's
+  own working directory resolved to, and for a linked worktree the repository it belongs to. Nothing about the value changes —
+  no stored record, no identity, no delivered attribute; `wake.repo` and `wake.repo_label` carry
+  exactly what they carried, and no re-ingest or `--rebuild` is needed. Only the reading changes:
+  an agent driving work from one project into another checkout has that work counted under the
+  driver. Measured on a real Claude Code corpus on 2026-09-08 (1,273 transcripts, 111,630 entries,
+  19 consented repositories): of the 69 sessions that did resolvable file-changing work, 1 (1.4 %)
+  did all of it in another project and 11 (15.9 %) touched more than one — a partial answer, not a
+  wrong one.
+
+### Fixed
+
+- Delivery no longer re-sends batches the receiver already accepted. The watermark
+  advanced in memory per batch and reached disk once, after the whole flush, so a
+  flush killed partway — a detached child, a host restart — lost every acceptance it
+  was holding and posted all of them again on the next run. A response whose 2xx
+  arrived but whose body then failed to drain was counted as a rejection for the same
+  reason, and re-sent every time. Each accepted batch now persists its own position
+  before the run continues. Delivery stays at-least-once by design: a duplicate
+  carries the same deterministic span id and is collapsible after the fact, while a
+  skipped batch is a silent undercount nothing downstream could ever notice — so where
+  the two trade off, this path still chooses the re-send.
+
+- The `ERRORS` cell says what its percentage was computed over. It printed a bare
+  `1 (100.0%)` beside a `CALLS` column reading 2, inviting a reader to bind the rate
+  to the calls next to it; the real denominator is the calls that were rated at all.
+  It now reads `1 of 1 rated (100.0%)`, from one renderer shared by the terminal
+  report and the dashboard — the two had each kept a copy and the copies had
+  diverged.
+
+- A primitive none of whose calls carried an outcome renders as unrated rather than
+  as `0`. Two correct facts — no failures seen, the calls happened — were forming a
+  false sentence.
+
+- A tool result that omits `is_error` is read as success for the families measured
+  never to spell it. Before, an absent field meant *the source does not say* for
+  every tool alike, so 61 % of Claude Code tool results carried no outcome and the
+  null rate swamped every error rate the product renders. Across sixty transcripts,
+  `is_error: false` is written by Bash alone — 929 occurrences; every other family
+  omits on success and writes `true` on failure. The rule is a closed allowlist of
+  the measured families, never an exception for Bash: a family nobody has measured
+  keeps its absences unknown. No failure signal moves — denials, the interrupted
+  flag and an explicit `true` keep their precedence.
+
+- A subagent run whose own transcript ends in a failure is rated as a failure
+  instead of carrying no outcome. Claude Code writes a structured
+  `isApiErrorMessage` marker on 26 of 917 subagent transcripts, true in 26 of 26.
+  Only the run's terminal entry counts. Success is still never derived — no side
+  observes it — so absence stays unknown.
+
+- A plugin skill no longer appears twice, once bare and once namespaced, with the
+  bare row unreachable by any event — roughly 50 phantom rows in `--unused` on a
+  real machine. A name folds only where it is provably one plugin's and nothing
+  else's; every other case is refused rather than guessed, because folding wrongly
+  merges two primitives' counters.
+
+- A plugin-provided primitive takes its kind from the harness's own declaration,
+  never from the directory it was discovered in. A plugin command that Claude Code
+  lists and invokes as a skill was being counted as a command.
+
+- `wake doctor` says which collection scope produced its `skipped transcripts`
+  count. The same machine, the same transcripts and no consent change reported 1041
+  skipped under the hook-fired scan and 143 under `wake ingest`; both numbers were
+  right and nothing on screen said which question either answered. The counter
+  file's own version goes 7 to 8 — a diagnostics file, unrelated to the record
+  schema — so one scan's diagnostics are refused rather than explained wrongly.
+
+- `wake init --help` no longer advertises a positional it refuses. The usage line
+  read `wake init [path]`, but plain `init` takes no path — only `--global` does.
+  The help now lists the four forms the unchanged validator accepts. Help surface
+  only; no behaviour changed.
+
+- A git worktree no longer splits one project across several rows in `wake report`,
+  the dashboard and `primitives.json`. A worktree is still its own consented
+  repository with its own identity and still needs its own `wake init`; what is new
+  is that the entry records which repository it belongs to, and reports count its
+  invocations under that repository. Delivery follows: `wake.repo_label` and
+  `langfuse.trace.name` carry the parent repository's label, while `wake.repo` keeps
+  the worktree's own hash, so grouping by hash still tells worktrees apart. A
+  worktree consented before this release keeps its own row until you run `wake init`
+  inside it again — nothing is rewritten on read. Spans already delivered keep the
+  labels they were sent with; the correction is not retroactive, and no re-ingest or
+  `--rebuild` is needed for local reports, because no repository hash changed.
+  **Register the parent repository first:** a worktree discovered before its parent
+  is consented registers with no relation and never gains one, so its invocations
+  keep counting under the worktree.
+
+### Security
+
+- The delivery credential is no longer sent in the clear. `wake remote set`
+  accepted any `http://` endpoint, and the credential rides in the `Authorization`
+  header on every batch — so a plain-`http://` destination put a live third-party
+  key on the network on every flush, not once. The endpoint must now be an
+  `https://` URL, unless its host is a loopback address (`localhost`, anything in
+  `127.0.0.0/8`, `::1`), which keeps a self-hosted collector on your own machine
+  working: nothing sent over loopback crosses a network. Loopback is decided from
+  the host as written and no name is resolved, so `foo.localhost` and
+  `localhost.localdomain` are refused — a validator that consulted a resolver would
+  behave differently on two machines, and differently tomorrow.
+
+  The rule applies on read as well as on write, so a machine whose store already
+  holds a cleartext endpoint to a remote host has `remote status`, `remote on`,
+  `remote off`, `remote flush` and `doctor` all refuse and say why. **Nothing is
+  migrated, cleared, rewritten or quietly upgraded to `https://`** — the bytes you
+  wrote stay as you wrote them, and delivery is loudly refused rather than silently
+  disabled. The exit is `wake remote set <https-url>`, which replaces a stored
+  endpoint the rule refuses and keeps whatever on/off state the store held. No
+  refusal ever quotes the URL back.
 
 ## [0.2.0] - 2026-08-28
 

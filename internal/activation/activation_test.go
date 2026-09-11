@@ -96,9 +96,9 @@ func TestInitWithoutFullNeverWalksHarnessHistory(t *testing.T) {
 	original := importHistory
 	t.Cleanup(func() { importHistory = original })
 	walks := 0
-	importHistory = func(repos *config.Repos, claudeDir string, destination *store.Store, installed claudecode.Installed, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope, discover *boundaryDiscovery) (int, health.Scan, error) {
+	importHistory = func(repos *config.Repos, claudeDir string, destination *store.Store, installed claudecode.Installed, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope, discover *boundaryDiscovery, paths config.Paths) (int, health.Scan, skippedByDirectory, error) {
 		walks++
-		return original(repos, claudeDir, destination, installed, stale, idle, scope, discover)
+		return original(repos, claudeDir, destination, installed, stale, idle, scope, discover, paths)
 	}
 
 	written, err := Init(paths, root, claudeDir, testExecutable(t), false)
@@ -1485,4 +1485,272 @@ func TestIngestCountsATypedInvocationTheMachineDoesNotHave(t *testing.T) {
 	if typed != 1 {
 		t.Errorf("typed pr-review records = %d, want 1", typed)
 	}
+}
+
+// A subagent run buffered by a whole-history import while its session is still
+// open must still resolve when that session later closes — the run happened, and
+// no boundary makes it un-happen. Without the carry it cannot: the buffer is
+// scan-local, the import's scan ends with the session open, and every later
+// hook-fired scan re-reads nothing — the run's entries predate the recorded
+// collection boundary, so the trigger's forward-only consent never re-anchors
+// it. The session closes, no number ever carries the run, and doctor has no
+// counter for the loss.
+func TestTriggerResolvesASubagentRunAnEarlierImportBuffered(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	claudeDir := filepath.Join(t.TempDir(), "claude")
+	writeFixture(t, filepath.Join(claudeDir, "settings.json"), `{}`)
+	// Stamped an hour back: before the boundary the plain init records, open
+	// under the import's default threshold, and closed under the one the trigger
+	// runs with below — the exact shape a long dispatch session leaves behind.
+	stamp := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	parent := []string{
+		`{"uuid":"parent-1","sessionId":"session-1","cwd":"` + root + `","timestamp":"` + stamp + `","entrypoint":"cli","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-parent","name":"Bash"}]}}`,
+		`{"uuid":"parent-2","sessionId":"session-1","cwd":"` + root + `","timestamp":"` + stamp + `","entrypoint":"cli","message":{"content":[{"type":"tool_result","tool_use_id":"call-parent","is_error":false}]}}`,
+	}
+	writeFixture(t, filepath.Join(claudeDir, "projects", "project", "session.jsonl"), strings.Join(parent, "\n"))
+	subagent := []string{
+		`{"uuid":"agent-1","agentId":"agent-1","sessionId":"session-1","cwd":"` + root + `","timestamp":"` + stamp + `","entrypoint":"cli","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-agent","name":"Bash"}]}}`,
+		`{"uuid":"agent-2","agentId":"agent-1","attributionAgent":"sdlc-run","sessionId":"session-1","cwd":"` + root + `","timestamp":"` + stamp + `","entrypoint":"cli","message":{"model":"sonnet","content":[{"type":"tool_result","tool_use_id":"call-agent","is_error":false}]}}`,
+	}
+	writeFixture(t, filepath.Join(claudeDir, "projects", "project", "session", "subagents", "agent-1.jsonl"), strings.Join(subagent, "\n"))
+	paths := testPaths(t)
+
+	// A plain init records the boundary now and declines the history — the
+	// promise ADR-0024 makes and the trigger below must keep.
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), false); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	// The user then asks for the history. The import anchors the run; the
+	// session is still open, so nothing resolves yet — that half is correct and
+	// is not what this test fixes.
+	if _, err := Ingest(paths, claudeDir); err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+	if got := spoolSubagentRecords(t, paths); len(got) != 0 {
+		t.Fatalf("the import resolved %d subagent records of an open session, want 0", len(got))
+	}
+
+	// The session closes, and the hook fires. The run must resolve here: it was
+	// anchored by a scan the user asked for, and the boundary is about what a
+	// hook may import uninvited — not about erasing what an import already saw.
+	if _, err := config.Set(paths, "scan.stale_call_timeout", "30m"); err != nil {
+		t.Fatalf("Set() error = %v", err)
+	}
+	if _, err := Trigger(paths, claudeDir); err != nil {
+		t.Fatalf("Trigger() error = %v", err)
+	}
+
+	runs := spoolSubagentRecords(t, paths)
+	if len(runs) != 1 || runs[0].Name != "sdlc-run" {
+		t.Fatalf("subagent records = %+v, want the one sdlc-run the import buffered", runs)
+	}
+
+	// The child the import derived inside the subagent's transcript must surface
+	// with it, parented onto the run — the carry covers both halves of the loss,
+	// not only the run's own record.
+	entries := spoolEntries(t, paths)
+	var child *record.Record
+	for i := range entries {
+		if entries[i].Record.Kind == record.KindBuiltinTool && entries[i].Record.SessionID == "session-1" && entries[i].Record.Name == "Bash" {
+			child = &entries[i].Record
+		}
+	}
+	if child == nil {
+		t.Fatalf("no call record from the subagent transcript; the carry lost the child half")
+	}
+	if child.ParentEventID != runs[0].EventID {
+		t.Errorf("child parent = %q, want the subagent record's %q (ADR-0035 §2 case 1)", child.ParentEventID, runs[0].EventID)
+	}
+}
+
+// writeCarryFixture writes the one-session, one-subagent-run history the three counter
+// tests below read: a parent transcript and a subagent transcript, both stamped an hour
+// back, so the session is open under the import's default staleness threshold and closed
+// under the 30m one those tests set before their second scan.
+//
+// It is a copy of the fixture TestTriggerResolvesASubagentRunAnEarlierImportBuffered
+// builds inline, deliberately not shared with it: that test is the merged regression for
+// the carry mechanism itself and is not to be touched. Shared only between the counter
+// tests here, which read the same history through health.Scan rather than the spool.
+func writeCarryFixture(t *testing.T) (root, claudeDir string) {
+	t.Helper()
+	root = filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	claudeDir = filepath.Join(t.TempDir(), "claude")
+	writeFixture(t, filepath.Join(claudeDir, "settings.json"), `{}`)
+	stamp := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	parent := []string{
+		`{"uuid":"parent-1","sessionId":"session-1","cwd":"` + root + `","timestamp":"` + stamp + `","entrypoint":"cli","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-parent","name":"Bash"}]}}`,
+		`{"uuid":"parent-2","sessionId":"session-1","cwd":"` + root + `","timestamp":"` + stamp + `","entrypoint":"cli","message":{"content":[{"type":"tool_result","tool_use_id":"call-parent","is_error":false}]}}`,
+	}
+	writeFixture(t, filepath.Join(claudeDir, "projects", "project", "session.jsonl"), strings.Join(parent, "\n"))
+	subagent := []string{
+		`{"uuid":"agent-1","agentId":"agent-1","sessionId":"session-1","cwd":"` + root + `","timestamp":"` + stamp + `","entrypoint":"cli","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-agent","name":"Bash"}]}}`,
+		`{"uuid":"agent-2","agentId":"agent-1","attributionAgent":"sdlc-run","sessionId":"session-1","cwd":"` + root + `","timestamp":"` + stamp + `","entrypoint":"cli","message":{"model":"sonnet","content":[{"type":"tool_result","tool_use_id":"call-agent","is_error":false}]}}`,
+	}
+	writeFixture(t, filepath.Join(claudeDir, "projects", "project", "session", "subagents", "agent-1.jsonl"), strings.Join(subagent, "\n"))
+	return root, claudeDir
+}
+
+// The carry holds runs no scan has resolved, and until this counter existed nothing
+// reported them: a user whose subagent runs were sitting there read a healthy scan and a
+// confident zero, and found the gap only in the backend. Read through the counter rather
+// than through the spool, on the same history as the merged regression above.
+func TestScanReportsTheUnresolvedSubagentRunsTheCarryHolds(t *testing.T) {
+	root, claudeDir := writeCarryFixture(t)
+	paths := testPaths(t)
+
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), false); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	if _, err := Ingest(paths, claudeDir); err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+
+	// The import anchored the run and could not resolve it — the session is still
+	// open — so the carry is one deep and the counter says so.
+	scan := scanOf(t, paths)
+	if scan.PendingSubagentRuns != 1 {
+		t.Errorf("PendingSubagentRuns = %d after the import, want 1", scan.PendingSubagentRuns)
+	}
+	// The distinctness proof at the source: every tool_use in this fixture is paired
+	// with its tool_result, so no call is unterminated. One scan, one moment, and the
+	// two counters read differently because they count different populations.
+	if scan.PendingCalls != 0 {
+		t.Errorf("PendingCalls = %d after the import, want 0 — no call in this fixture is unterminated", scan.PendingCalls)
+	}
+
+	if _, err := config.Set(paths, "scan.stale_call_timeout", "30m"); err != nil {
+		t.Fatalf("Set() error = %v", err)
+	}
+	if _, err := Trigger(paths, claudeDir); err != nil {
+		t.Fatalf("Trigger() error = %v", err)
+	}
+
+	// A scan has now observed the session close, so the run resolved and left the
+	// unresolved set. A scan seeing the close is the only thing that takes a run out of
+	// it: the counter does not fall on its own, and a run that left can be readmitted —
+	// the two tests below pin both halves.
+	if got := scanOf(t, paths).PendingSubagentRuns; got != 0 {
+		t.Errorf("PendingSubagentRuns = %d after the session closed, want 0", got)
+	}
+}
+
+// A run whose transcripts the harness pruned before any scan observed its session
+// close stays in the carry, and this pins that: SessionState.Closed reports false for
+// a session it never observed, so the restored run is never judged and never leaves
+// the pending set. The counter therefore does not fall by itself — a run leaves the set
+// only when a scan observes its session close, which is a different statement and the
+// one the doc comments around this counter make.
+//
+// It is the same fixture as the test above, with one step added: the harness's own
+// cleanupPeriodDays removes the project's transcripts between the two scans.
+func TestThePendingCarryHoldsARunWhoseTranscriptsTheHarnessPruned(t *testing.T) {
+	root, claudeDir := writeCarryFixture(t)
+	paths := testPaths(t)
+
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), false); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	if _, err := Ingest(paths, claudeDir); err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+	if scan := scanOf(t, paths); scan.PendingSubagentRuns != 1 {
+		t.Fatalf("PendingSubagentRuns = %d after the import, want 1", scan.PendingSubagentRuns)
+	}
+
+	// The harness prunes the project's transcripts on its own schedule. Nothing is
+	// left for the next scan to observe the session in.
+	if err := os.RemoveAll(filepath.Join(claudeDir, "projects", "project")); err != nil {
+		t.Fatalf("RemoveAll() error = %v", err)
+	}
+	if _, err := Trigger(paths, claudeDir); err != nil {
+		t.Fatalf("Trigger() error = %v", err)
+	}
+
+	if got := scanOf(t, paths).PendingSubagentRuns; got != 1 {
+		t.Errorf("PendingSubagentRuns = %d after the transcripts were pruned, want 1 — a run whose session is never observed closed stays in the carry", got)
+	}
+}
+
+// A run the carry readmits after it has already been collected. This is the case that
+// fixes the counter's meaning: scan 2 observes the session close, resolves the run and
+// writes its record to the store, and the counter falls to 0 — but pending.json's merge
+// is union-only, so the resolved run is still in the file. Once the harness prunes the
+// transcripts, every later scan restores that run, finds no session to judge it by, and
+// counts it again, for good.
+//
+// So a non-zero reading is not a count of work waiting to be collected: it is the size
+// of the unresolved set the carry holds, which on a machine old enough for the harness's
+// own cleanup to have run includes runs whose records are already in the store. The doc
+// comments around this counter say exactly that, and this test is what holds them to it.
+func TestThePendingCarryReadmitsARunItAlreadyResolved(t *testing.T) {
+	root, claudeDir := writeCarryFixture(t)
+	paths := testPaths(t)
+
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), false); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	if _, err := Ingest(paths, claudeDir); err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+
+	// The session closes and a scan observes it, so the run resolves and its record is
+	// written. The counter reads the clean zero that resolution earns.
+	if _, err := config.Set(paths, "scan.stale_call_timeout", "30m"); err != nil {
+		t.Fatalf("Set() error = %v", err)
+	}
+	if _, err := Trigger(paths, claudeDir); err != nil {
+		t.Fatalf("Trigger() error = %v", err)
+	}
+	if got := scanOf(t, paths).PendingSubagentRuns; got != 0 {
+		t.Fatalf("PendingSubagentRuns = %d after the session closed, want 0", got)
+	}
+	if got := spoolSubagentRecords(t, paths); len(got) != 1 {
+		t.Fatalf("subagent records after the session closed = %d, want 1 — the run is collected", len(got))
+	}
+
+	// The harness prunes the closed session's transcripts on its own schedule, after the
+	// run was collected. Nothing is left for a later scan to observe the session in.
+	if err := os.RemoveAll(filepath.Join(claudeDir, "projects", "project")); err != nil {
+		t.Fatalf("RemoveAll() error = %v", err)
+	}
+	if _, err := Trigger(paths, claudeDir); err != nil {
+		t.Fatalf("Trigger() error = %v", err)
+	}
+	if got := scanOf(t, paths).PendingSubagentRuns; got != 1 {
+		t.Errorf("PendingSubagentRuns = %d after the collected run's transcripts were pruned, want 1 — the carry readmits it", got)
+	}
+	// And it does not leave again: the run is now counted on every scan for the life of
+	// the machine, while its record sits in the store.
+	if _, err := Trigger(paths, claudeDir); err != nil {
+		t.Fatalf("Trigger() error = %v", err)
+	}
+	if got := scanOf(t, paths).PendingSubagentRuns; got != 1 {
+		t.Errorf("PendingSubagentRuns = %d on the scan after that, want 1 — nothing evicts a readmitted run", got)
+	}
+	if got := spoolSubagentRecords(t, paths); len(got) != 1 {
+		t.Errorf("subagent records = %d, want the 1 already collected — a readmitted run is counted, not re-derived", len(got))
+	}
+}
+
+// spoolSubagentRecords reads the subagent records the spool holds.
+func spoolSubagentRecords(t *testing.T, paths config.Paths) []record.Record {
+	t.Helper()
+	entries, err := store.New(filepath.Join(paths.DataDir, eventsFile)).Entries(0)
+	if err != nil {
+		t.Fatalf("Entries() error = %v", err)
+	}
+	runs := make([]record.Record, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Record.Kind == record.KindSubagent {
+			runs = append(runs, entry.Record)
+		}
+	}
+	return runs
 }

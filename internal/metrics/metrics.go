@@ -49,23 +49,64 @@ func (r Ratio) Percent() (float64, bool) {
 	return float64(r.numerator) / float64(r.denominator) * 100, true
 }
 
-// PrimitiveUsage is one primitive's observed activity in one repository. Repo
-// is part of the grain, not a label on it: an invocation happened in exactly one
-// repository (ADR-0002), so a primitive used in two of them is two rows, each
-// with its own counts and its own rate denominator (ADR-0006). Repo is the
-// salted id, never a readable name — internal/repolabel is where a renderer
-// turns it into a cell.
+// PrimitiveUsage is one primitive's observed activity, across every repository it
+// was invoked in. An invocation happened in exactly one repository (ADR-0002), but
+// the repository is a dimension of the invocation and never the identity of the
+// primitive (ADR-0042): the row sums over them and its rate is recomputed over the
+// merged population (ADR-0006).
 type PrimitiveUsage struct {
-	Name        record.Identifier
-	Kind        record.Kind
-	Harness     record.Identifier
-	Repo        record.Hash
-	Invoker     record.Invoker
-	ViaAgent    record.Identifier
+	Name    record.Identifier
+	Kind    record.Kind
+	Harness record.Identifier
+	// Repos is the salted ids this row's invocations were counted under — which for
+	// a linked git worktree is the repository it belongs to, not the worktree (see
+	// RepoRollup). Sorted and deduplicated, so no ordering of the input changes the
+	// value. It is a dimension of the row, never its grain (ADR-0002, ADR-0042), and
+	// never a readable label (ADR-0019 §3): internal/repolabel is where a renderer
+	// turns it into a cell. The record's own Repo in the store is untouched, so no
+	// repository hash changes and grouping by wake.repo still separates worktrees.
+	Repos    []record.Hash
+	Invoker  record.Invoker
+	ViaAgent record.Identifier
+	// MCPServer is the server segment the record carried, passed through so the
+	// inventory join can roll an MCP tool's calls onto its server's row. It is a
+	// dimension of this row, never a grain of it — two tools of one server stay two
+	// rows. Empty on every row that is not an MCP tool's.
+	MCPServer   record.Identifier
 	Invocations uint64
 	Sessions    uint64
 	LastUsed    time.Time
 	ErrorRate   Ratio
+}
+
+// RepoRollup maps a repository id to the id of the repository its activity is
+// counted under: a linked git worktree's id maps to the id of the repository it
+// belongs to. Every other id is absent, and an absent id is its own.
+//
+// It is resolved by internal/cli through config.RepoRollup and handed in, for the
+// reason repolabel.Labels is handed in: this package reads no config and no file
+// (ADR-0019 §1). A nil map is valid and means every repository stands alone.
+//
+// It is applied at the counting input and nowhere else. Merging two rows after they
+// have been counted would sum two rates, and a rate summed from rendered ratios has
+// no denominator of its own (ADR-0006); merging at the input recomputes the
+// denominator and the excluded-unknown count over the merged population. Doing it
+// once in this layer is also what makes `wake report`, the dashboard and the static
+// report agree by construction rather than by three matching edits (ADR-0011).
+//
+// It changes what is counted, never what is stored: the record's own Repo is
+// untouched, so no repository hash changes and nothing needs rebuilding (ADR-0004).
+type RepoRollup map[string]string
+
+// Repo returns the repository id a record's activity is counted under. One hop,
+// never transitive, for the reason config.rollupOf gives: the relation is only ever
+// recorded for a worktree whose parent records none of its own, so a chain is a
+// table nothing writes — and chasing one would turn a hand-edited cycle into a hang.
+func (r RepoRollup) Repo(repo record.Hash) record.Hash {
+	if parent, related := r[string(repo)]; related {
+		return record.Hash(parent)
+	}
+	return repo
 }
 
 // Summary is the MVP dashboard's real-data contract.
@@ -103,7 +144,18 @@ func (s Summary) Observed() bool { return s.Invocations > 0 || s.Sessions > 0 }
 // with no primitive use visible at all, the plan §2.7 baseline — and toward nothing
 // else. Its Sessions figure therefore includes sessions no primitive row accounts
 // for, which is the point.
-func Aggregate(records []record.Record) Summary {
+//
+// rollup is applied here, at the counting input, so a linked git worktree's rows are
+// counted under the repository it belongs to and one project reads as one row. It is
+// applied before a primitive is keyed rather than to two finished rows, because a
+// rate merged from two rendered ratios has no denominator of its own (ADR-0006) and
+// an unknown outcome excluded from one of them would be lost (ADR-0005). A nil map
+// leaves every repository standing alone.
+//
+// The repository is carried onto the row as a set rather than into its key, so a
+// primitive used in several repositories is one row whose rate is over the merged
+// population (ADR-0042).
+func Aggregate(records []record.Record, rollup RepoRollup) Summary {
 	summary := Summary{Outcomes: make(map[record.Outcome]uint64)}
 	allSessions := make(map[record.Identifier]struct{})
 	primitives := make(map[primitiveKey]*primitiveAccumulator)
@@ -146,14 +198,19 @@ func Aggregate(records []record.Record) Summary {
 			}
 		}
 
-		key := primitiveKey{name: event.Name, kind: event.Kind, harness: event.Harness, repo: event.Repo, invoker: event.Invoker, viaAgent: event.ViaAgent}
+		// The one place the relation is applied. The session-grain and built-in cases
+		// returned above carry no repository dimension in the summary, so nothing there
+		// needs it.
+		repo := rollup.Repo(event.Repo)
+		key := primitiveKey{name: event.Name, kind: event.Kind, harness: event.Harness, invoker: event.Invoker, viaAgent: event.ViaAgent, mcpServer: event.MCPServer}
 		accumulator := primitives[key]
 		if accumulator == nil {
-			accumulator = &primitiveAccumulator{PrimitiveUsage: PrimitiveUsage{Name: event.Name, Kind: event.Kind, Harness: event.Harness, Repo: event.Repo, Invoker: event.Invoker, ViaAgent: event.ViaAgent}, sessions: map[record.Identifier]struct{}{}}
+			accumulator = &primitiveAccumulator{PrimitiveUsage: PrimitiveUsage{Name: event.Name, Kind: event.Kind, Harness: event.Harness, Invoker: event.Invoker, ViaAgent: event.ViaAgent, MCPServer: event.MCPServer}, sessions: map[record.Identifier]struct{}{}, repos: map[record.Hash]struct{}{}}
 			primitives[key] = accumulator
 		}
 		accumulator.Invocations++
 		accumulator.sessions[event.SessionID] = struct{}{}
+		accumulator.repos[repo] = struct{}{}
 		if event.Timestamp.After(accumulator.LastUsed) {
 			accumulator.LastUsed = event.Timestamp
 		}
@@ -172,27 +229,49 @@ func Aggregate(records []record.Record) Summary {
 	summary.Primitives = make([]PrimitiveUsage, 0, len(primitives))
 	for _, accumulator := range primitives {
 		accumulator.Sessions = uint64(len(accumulator.sessions))
+		accumulator.Repos = sortedRepos(accumulator.repos)
 		accumulator.ErrorRate = NewRatio(accumulator.failures, accumulator.known, accumulator.unknown, accumulator.Invocations)
 		summary.Primitives = append(summary.Primitives, accumulator.PrimitiveUsage)
 	}
 	slices.SortFunc(summary.Primitives, func(left, right PrimitiveUsage) int {
-		return cmp.Or(cmp.Compare(right.Invocations, left.Invocations), cmp.Compare(string(left.Harness), string(right.Harness)), cmp.Compare(string(left.Name), string(right.Name)), cmp.Compare(string(left.Repo), string(right.Repo)), cmp.Compare(string(left.Invoker), string(right.Invoker)), cmp.Compare(string(left.ViaAgent), string(right.ViaAgent)))
+		return cmp.Or(cmp.Compare(right.Invocations, left.Invocations), cmp.Compare(string(left.Harness), string(right.Harness)), cmp.Compare(string(left.Name), string(right.Name)), cmp.Compare(string(left.Invoker), string(right.Invoker)), cmp.Compare(string(left.ViaAgent), string(right.ViaAgent)), cmp.Compare(string(left.MCPServer), string(right.MCPServer)))
 	})
 	return summary
 }
 
+// sortedRepos is the set of repositories a row was counted under, in ascending
+// order rather than first-seen order, so no ordering of the spool can change a
+// row's value.
+func sortedRepos(set map[record.Hash]struct{}) []record.Hash {
+	if len(set) == 0 {
+		return nil
+	}
+	repos := make([]record.Hash, 0, len(set))
+	for repo := range set {
+		repos = append(repos, repo)
+	}
+	slices.SortFunc(repos, func(left, right record.Hash) int { return cmp.Compare(string(left), string(right)) })
+	return repos
+}
+
+// primitiveKey carries no repository: the repository is a property of the
+// invocation, not of the row a primitive gets (ADR-0002, ADR-0042).
 type primitiveKey struct {
 	name     record.Identifier
 	kind     record.Kind
 	harness  record.Identifier
-	repo     record.Hash
 	invoker  record.Invoker
 	viaAgent record.Identifier
+	// mcpServer is functionally determined by name for an MCP tool, so it splits no
+	// real row. It is in the key anyway, so the key spans every field the value
+	// carries and no accumulator can merge two rows that differ.
+	mcpServer record.Identifier
 }
 
 type primitiveAccumulator struct {
 	PrimitiveUsage
 	sessions map[record.Identifier]struct{}
+	repos    map[record.Hash]struct{}
 	known    uint64
 	unknown  uint64
 	failures uint64

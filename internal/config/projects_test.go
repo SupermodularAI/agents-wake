@@ -145,6 +145,11 @@ func TestEntryValidationRejectsWhatItCannotTrust(t *testing.T) {
 		{"a well-formed alias", func(e *projectEntry) { e.Aliases = []string{"/elsewhere/the-repo"} }, true},
 		{"a relative alias", func(e *projectEntry) { e.Aliases = []string{"elsewhere"} }, false},
 		{"an unclean alias", func(e *projectEntry) { e.Aliases = []string{"/a/./b"} }, false},
+		{"a relation to another entry", func(e *projectEntry) { e.BelongsTo = strings.Repeat("cd", idHexLen/2) }, true},
+		{"no relation", func(e *projectEntry) { e.BelongsTo = "" }, true},
+		{"a relation that is not an id", func(e *projectEntry) { e.BelongsTo = "not-hex" }, false},
+		{"a relation of the wrong width", func(e *projectEntry) { e.BelongsTo = strings.Repeat("c", idHexLen-1) }, false},
+		{"an entry that belongs to itself", func(e *projectEntry) { e.BelongsTo = e.ID }, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			e := validEntry()

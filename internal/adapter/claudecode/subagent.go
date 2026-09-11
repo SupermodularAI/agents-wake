@@ -57,6 +57,22 @@ type subagentDeclaration struct {
 	model     record.Identifier
 }
 
+// subagentTerminal is the run's last consented entry, by (timestamp, uuid), and
+// whether that entry carried the harness's own failure marker.
+//
+// It is a max where the other two folds are mins, and for the same reason: nothing in
+// the transcript format promises the entries are ordered, and after ADR-0036 the
+// buffer spans a walk, so a total order over source-supplied values is what makes the
+// result independent of arrival order and byte-identical on a re-scan (ADR-0004).
+//
+// It is a third fold rather than a field on the anchor because the two values are not
+// co-located: the anchor is the run's *first* entry and this is its *last*.
+type subagentTerminal struct {
+	uuid      string
+	timestamp time.Time
+	failed    bool
+}
+
 // subagentRun is one subagent transcript's unresolved state: the two folds, each
 // with a flag saying whether anything has landed in it yet.
 //
@@ -68,6 +84,8 @@ type subagentRun struct {
 	anchored    bool
 	declaration subagentDeclaration
 	declared    bool
+	terminal    subagentTerminal
+	terminated  bool
 }
 
 // observeSubagentRun folds one usable entry into the run its agentId declares, if it
@@ -110,6 +128,7 @@ func observeSubagentRun(runs map[record.Identifier]*subagentRun, source int, ent
 	}
 	run.anchorEntry(entry, timestamp, sessionID, repo, source)
 	run.declare(entry, timestamp, names)
+	run.observeTerminal(entry, timestamp)
 }
 
 // anchorEntry folds one consented entry into this run's anchor: the entrypoint gate,
@@ -181,6 +200,29 @@ func (r *subagentRun) declare(entry transcriptEntry, timestamp time.Time, names 
 	}
 	r.declaration = declaration
 	r.declared = true
+}
+
+// observeTerminal folds one consented entry into this run's terminal state: the max
+// by (timestamp, uuid), carrying whether that entry is the harness's failure marker.
+//
+// No entrypoint gate and no name gate: unlike the anchor this fold states no dimension
+// of its own, so an entry the anchor declines still tells us truthfully whether the run
+// ended in an error. Consent still gates it, because observeSubagentRun returns before
+// this line for an unconsented entry — an unconsented entry contributes nothing, not a
+// timestamp and not a verdict.
+//
+// Only the marker on the *last* entry derives a failure. In 25 of 26 measured cases the
+// marker is the run's last entry; in the remaining one the run carried on for 40 further
+// entries, and a run that demonstrably survived an API error did not fail. Deriving
+// error from a marker anywhere would invent a failure the user cannot reproduce, which
+// is the alternative ADR-0005 rejects, and it would read a non-terminal state where
+// ADR-0015 admits only the terminal one.
+func (r *subagentRun) observeTerminal(entry transcriptEntry, timestamp time.Time) {
+	if r.terminated && cmp.Or(timestamp.Compare(r.terminal.timestamp), cmp.Compare(entry.UUID, r.terminal.uuid)) <= 0 {
+		return
+	}
+	r.terminal = subagentTerminal{uuid: entry.UUID, timestamp: timestamp, failed: entry.IsAPIErrorMessage}
+	r.terminated = true
 }
 
 // resolveSubagentRuns derives the one record for every anchored run whose session has
@@ -258,13 +300,20 @@ func resolveSubagentRuns(runs map[record.Identifier]*subagentRun, sessions *Sess
 // invocation grain. Name and Model come from the declaration fold; every other
 // dimension from the anchor.
 //
-// Outcome is nil. The completion boundary lives on the invoking side and ADR-0036 §5
-// declines that correlation outright, so there is nothing to read a verdict from —
-// and a nullable outcome is honest where a synthesized one would not be (ADR-0005:
-// adapters must never guess). DurationMS is nil for the same reason and one more: no
-// record this adapter emits populates it, nil means "the harness reported nothing",
-// and ADR-0004's no-upsert store makes it permanent, so the conservative direction is
-// the one a later schema bump can still add.
+// Outcome is nil unless the run's own transcript ends in the harness's failure marker,
+// in which case it is error. The completion boundary still lives on the invoking side
+// and ADR-0036 §5 declines that correlation outright — nothing here reads the invoking
+// call, in either direction. What is read is a structured marker on the canonical
+// source itself (ADR-0036 §2 as amended), and only on the run's terminal entry.
+//
+// ok is never derived, from either side: absence here is genuine silence rather than a
+// source signalling by omission, because the invoking result says async_launched on 600
+// of 617 correlatable runs and so no side observes success. A nullable outcome is
+// honest where a synthesized one would not be (ADR-0005: adapters must never guess).
+//
+// DurationMS is still nil: no record this adapter emits populates it, nil means "the
+// harness reported nothing", and ADR-0004's no-upsert store makes it permanent, so the
+// conservative direction is the one a later schema bump can still add.
 //
 // Invoker is model: a subagent run is entered by the model, never typed by the user.
 // ViaAgent is deliberately empty — it is the *child*'s attribution field (see call),
@@ -280,7 +329,7 @@ func resolveSubagentRuns(runs map[record.Identifier]*subagentRun, sessions *Sess
 // from the file reach no record field, no error and no log line: the id is consumed
 // into a hash and the directory into the resolver's answer (ADR-0007, plan §4.2).
 func (r *subagentRun) subagent(agentID record.Identifier) record.Record {
-	return record.Record{
+	event := record.Record{
 		SchemaVersion:  record.SchemaVersion,
 		EventID:        record.DeriveEventID(harness, subagentSourceEvent(agentID)),
 		Timestamp:      r.anchor.timestamp,
@@ -294,4 +343,9 @@ func (r *subagentRun) subagent(agentID record.Identifier) record.Record {
 		Invoker:        record.InvokerModel,
 		Entrypoint:     r.anchor.entrypoint,
 	}
+	if r.terminated && r.terminal.failed {
+		outcome := record.OutcomeError
+		event.Outcome = &outcome
+	}
+	return event
 }

@@ -47,7 +47,13 @@ import (
 // fail validOutcome: Decode returns a plain "invalid outcome", never
 // ErrUnsupportedVersion. Store.Stale counts only the latter (internal/store), so those
 // records would be dropped by store.Entries, counted by no health.Scan.StaleRecords,
-// and never rebuilt — the silent shrink the next paragraph is about.
+// and never rebuilt — the silent shrink the next paragraph is about. Version 8 adds a
+// dimension: a nullable mcp_server, the server segment of an MCP tool's own name,
+// stored as the harness spells it and validated as a bounded token, so it cannot carry
+// a secret and cannot carry a normalised guess either. It is a separate number from 7
+// rather than a second meaning for it: 7 shipped on main carrying only the rename, and
+// a version whose records two builds disagree about is the one thing this constant
+// exists to prevent.
 //
 // "Refused on read" is only half of that, and the half on its own is a silent
 // shrink: every consumer reads the spool through store.Entries, so a spool nobody
@@ -60,7 +66,7 @@ import (
 // delivery watermark, which stamps this number and starts over when it changes
 // (internal/remote). What a rebuild cannot recover is a period the harness has since
 // pruned: the store was the only surviving copy of it, and ADR-0014 accepts that.
-const SchemaVersion uint = 7
+const SchemaVersion uint = 8
 
 // ErrUnsupportedVersion is the one refusal from Validate a caller is meant to
 // recognise. Every other refusal means the record was never valid; this one means
@@ -159,9 +165,23 @@ type Record struct {
 	Name           Identifier `json:"name"`
 	Package        Identifier `json:"package,omitempty"`
 	PackageVersion Version    `json:"package_version,omitempty"`
-	Source         *Source    `json:"source"`
-	ViaSkill       Identifier `json:"via_skill,omitempty"`
-	ViaAgent       Identifier `json:"via_agent,omitempty"`
+	// MCPServer is the server segment of an MCP tool's name, exactly as the
+	// harness's own "mcp__<server>__<tool>" spelling gives it — never a config key
+	// and never a normalised guess. It is a token, not a name: the token domain
+	// admits no ":", so the colon-bearing config key an MCP server may really have
+	// ("plugin:context7:context7") cannot be written here at all, and the type is
+	// what enforces that rather than a convention (ADR-0007).
+	//
+	// Matching the observed segment to a configured server is the inventory join's
+	// work, not this field's, and a segment it cannot match is reported as
+	// unmatched rather than resolved (plan §3.3, §12). Populated only on a
+	// KindMCPTool record; an MCP tool name carrying no second separator has no
+	// segment to state and leaves it absent, which is an absence and never a
+	// bucket (ADR-0005).
+	MCPServer Identifier `json:"mcp_server,omitempty"`
+	Source    *Source    `json:"source"`
+	ViaSkill  Identifier `json:"via_skill,omitempty"`
+	ViaAgent  Identifier `json:"via_agent,omitempty"`
 	// ParentEventID is the event_id of this record's parent invocation, derived by
 	// the adapter from the child's own source event and never generated here
 	// (ADR-0004, ADR-0035 §2). It is a record id, so a bare Hash with omitempty
@@ -182,7 +202,17 @@ type Record struct {
 	Invoker       Invoker    `json:"invoker"`
 	Entrypoint    Entrypoint `json:"entrypoint,omitempty"`
 	Outcome       *Outcome   `json:"outcome"`
-	DurationMS    *int64     `json:"duration_ms"`
+	// DurationMS is how long the invocation took from request to result, in
+	// milliseconds: from the instant the primitive was called to the instant its
+	// result came back. The interval includes scheduling and any human
+	// permission-approval wait, so a permission-gated call reads as slow — it is
+	// not tool execution time and is never named or described as it.
+	//
+	// Nullable, and nil is first-class: an invocation nothing terminated with a real
+	// result measured no interval, and nil says so. A non-nil value is always a
+	// measurement, so 0 means a call that returned inside the source's resolution,
+	// never an unknown one (ADR-0005 applied to time, ADR-0027).
+	DurationMS *int64 `json:"duration_ms"`
 
 	// The session grain's totals (ADR-0002, ADR-0034 §3). They are populated only
 	// on a session_end record and are nil on every invocation-grain record. All
@@ -241,7 +271,7 @@ func Validate(r Record) error {
 	if !ValidHarness(r.Harness) || !validToken(r.SessionID) || !ValidRepo(r.Repo) || !validKind(r.Kind) || !ValidName(r.Name) || !validInvoker(r.Invoker) {
 		return errors.New("invalid required record field")
 	}
-	if !validOptionalName(r.Package) || !validOptionalName(r.ViaSkill) || !validOptionalName(r.ViaAgent) || !validOptionalName(r.Model) || !validOptionalName(r.Effort) || !validOptionalVersion(r.HarnessVersion) || !validOptionalVersion(r.PackageVersion) {
+	if !validOptionalName(r.Package) || !validOptionalName(r.ViaSkill) || !validOptionalName(r.ViaAgent) || !validOptionalName(r.Model) || !validOptionalName(r.Effort) || !validOptionalVersion(r.HarnessVersion) || !validOptionalVersion(r.PackageVersion) || !validOptionalToken(r.MCPServer) {
 		return errors.New("invalid optional record field")
 	}
 	if r.Entrypoint != "" && !validEntrypoint(r.Entrypoint) {

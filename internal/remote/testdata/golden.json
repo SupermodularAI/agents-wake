@@ -30,13 +30,13 @@
               "parentSpanId": "0eff906f628d95fa",
               "name": "skill:commit-message",
               "kind": 1,
-              "startTimeUnixNano": "1787572800000000000",
-              "endTimeUnixNano": "1787572801500000000",
+              "startTimeUnixNano": "1787572798500000000",
+              "endTimeUnixNano": "1787572800000000000",
               "attributes": [
                 {
                   "key": "wake.schema_version",
                   "value": {
-                    "intValue": "7"
+                    "intValue": "8"
                   }
                 },
                 {
@@ -103,6 +103,12 @@
                   "key": "wake.package_version",
                   "value": {
                     "stringValue": "1.4.0"
+                  }
+                },
+                {
+                  "key": "wake.mcp_server",
+                  "value": {
+                    "stringValue": "claude-in-chrome"
                   }
                 },
                 {
@@ -259,7 +265,7 @@
                 {
                   "key": "wake.schema_version",
                   "value": {
-                    "intValue": "7"
+                    "intValue": "8"
                   }
                 },
                 {
@@ -339,7 +345,7 @@
                 {
                   "key": "wake.schema_version",
                   "value": {
-                    "intValue": "7"
+                    "intValue": "8"
                   }
                 },
                 {
@@ -406,6 +412,12 @@
                   "key": "wake.package_version",
                   "value": {
                     "stringValue": "1.4.0"
+                  }
+                },
+                {
+                  "key": "wake.mcp_server",
+                  "value": {
+                    "stringValue": "claude-in-chrome"
                   }
                 },
                 {
@@ -550,13 +562,13 @@
               "spanId": "0b0e92f75b50188d",
               "name": "session_end:session",
               "kind": 1,
-              "startTimeUnixNano": "1787572800000000000",
-              "endTimeUnixNano": "1787572801500000000",
+              "startTimeUnixNano": "1787572798500000000",
+              "endTimeUnixNano": "1787572800000000000",
               "attributes": [
                 {
                   "key": "wake.schema_version",
                   "value": {
-                    "intValue": "7"
+                    "intValue": "8"
                   }
                 },
                 {
@@ -623,6 +635,12 @@
                   "key": "wake.package_version",
                   "value": {
                     "stringValue": "1.4.0"
+                  }
+                },
+                {
+                  "key": "wake.mcp_server",
+                  "value": {
+                    "stringValue": "claude-in-chrome"
                   }
                 },
                 {

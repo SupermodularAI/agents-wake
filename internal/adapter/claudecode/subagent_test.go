@@ -3,6 +3,7 @@ package claudecode
 import (
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -160,7 +161,7 @@ func TestScanCountsOneSubagentRunAsOneRecord(t *testing.T) {
 	if event.Outcome != nil {
 		t.Errorf("Outcome = %v, want nil: a synthesized outcome is forbidden", *event.Outcome)
 	}
-	summary := metrics.Aggregate(records)
+	summary := metrics.Aggregate(records, nil)
 	if len(summary.Primitives) != 1 || summary.Primitives[0].Invocations != 1 {
 		t.Errorf("Aggregate() primitives = %+v, want explorer with one invocation", summary.Primitives)
 	}
@@ -179,7 +180,7 @@ func TestScanDerivesTwoRecordsForTwoRunsOfOneSubagent(t *testing.T) {
 	if records[0].EventID == records[1].EventID {
 		t.Errorf("both runs derived the same event id %q", records[0].EventID)
 	}
-	summary := metrics.Aggregate(records)
+	summary := metrics.Aggregate(records, nil)
 	if len(summary.Primitives) != 1 || summary.Primitives[0].Invocations != 2 {
 		t.Errorf("Aggregate() primitives = %+v, want one explorer primitive with two invocations", summary.Primitives)
 	}
@@ -399,10 +400,15 @@ func TestScanRetainsNothingFromASubagentTranscript(t *testing.T) {
 					`"toolUseResult":{"stdout":%s},"message":{"model":"sonnet","content":[]}}`+"\n"+
 					`{"uuid":"agent-entry-2","sessionId":"session-1","cwd":%s,"timestamp":"2026-08-13T12:00:01Z",`+
 					`"version":"1.0.0","entrypoint":"cli","isSidechain":true,"agentId":"agent-1",`+
+					// The failure marker's free-text siblings sit on the very entry the marker
+					// does. Only the boolean is evidence: a bounded enum cannot carry a secret
+					// and a message body can (ADR-0007, plan §4.2).
+					`"isApiErrorMessage":true,"error":%s,"apiErrorStatus":%s,`+
 					`"attributionAgent":%s,"message":{"model":"sonnet","content":[]}}`,
 				quoted(t, consentedPath), quoted(t, value), quoted(t, value), quoted(t, "swordfish-"+value),
 				quoted(t, value), quoted(t, value), quoted(t, "swordfish-"+value),
-				quoted(t, consentedPath), quoted(t, name))
+				quoted(t, consentedPath), quoted(t, "swordfish-"+value), quoted(t, "swordfish-"+value),
+				quoted(t, name))
 
 			records, _ := twoSources(t, closedSession, finished, transcript)
 
@@ -462,5 +468,149 @@ func TestScanDerivesASubagentIDThatCollidesWithNoOtherShape(t *testing.T) {
 	}
 	if len(subagentRecords(records)) != 1 {
 		t.Errorf("subagent records = %d, want 1", len(subagentRecords(records)))
+	}
+}
+
+// subagentTranscriptWithMarker is one subagent transcript whose entry at markerIndex
+// carries the harness's own structured failure marker, isApiErrorMessage. That is the
+// shape measured on 26 of 917 real subagent transcripts, with the value true in 26 of
+// 26 occurrences. markerIndex 2 makes the marker the run's terminal entry, which is 25
+// of those 26; markerIndex 1 is the remaining one, where the run carried on afterwards.
+func subagentTranscriptWithMarker(t *testing.T, agentID, session, name string, markerIndex int) string {
+	t.Helper()
+	lines := strings.Split(subagentTranscriptIn(t, agentID, session, name, consentedPath), "\n")
+	if markerIndex < 0 || markerIndex >= len(lines) {
+		t.Fatalf("markerIndex %d is outside a %d-entry transcript", markerIndex, len(lines))
+	}
+	lines[markerIndex] = strings.Replace(lines[markerIndex], `"agentId":`, `"isApiErrorMessage":true,"agentId":`, 1)
+	return strings.Join(lines, "\n")
+}
+
+// AC 1: a run whose own transcript ends in the harness's failure marker is rated
+// error. The signal is read from the canonical source itself (ADR-0036 §2 as
+// amended), never by correlating with the invoking call (ADR-0036 §5).
+func TestScanDerivesErrorForASubagentWhoseTranscriptEndsInAnAPIError(t *testing.T) {
+	records, result := twoSources(t, closedSession, Idleness{},
+		subagentTranscriptWithMarker(t, "agent-1", "session-1", "explorer", 2))
+
+	subagents := subagentRecords(records)
+	if len(subagents) != 1 {
+		t.Fatalf("subagent records = %+v, want exactly one (result = %+v)", subagents, result)
+	}
+	event := subagents[0]
+	if event.Outcome == nil {
+		t.Fatalf("Outcome = nil, want %q: the run's own terminal entry carries the harness's failure marker", record.OutcomeError)
+	}
+	if *event.Outcome != record.OutcomeError {
+		t.Errorf("Outcome = %q, want %q", *event.Outcome, record.OutcomeError)
+	}
+	if err := record.Validate(event); err != nil {
+		t.Errorf("Validate(%+v) error = %v", event, err)
+	}
+}
+
+// Only the terminal entry counts. In the one measured transcript where the marker was
+// not last, the run carried on for 40 further entries — a run that demonstrably
+// survived an API error did not fail, and deriving error from a marker anywhere would
+// invent a failure the user cannot reproduce (ADR-0005, ADR-0015's terminal rule).
+func TestScanKeepsNilForASubagentThatRecoveredAfterAnAPIError(t *testing.T) {
+	records, result := twoSources(t, closedSession, Idleness{},
+		subagentTranscriptWithMarker(t, "agent-1", "session-1", "explorer", 1))
+
+	subagents := subagentRecords(records)
+	if len(subagents) != 1 {
+		t.Fatalf("subagent records = %+v, want exactly one (result = %+v)", subagents, result)
+	}
+	if outcome := subagents[0].Outcome; outcome != nil {
+		t.Errorf("Outcome = %q, want nil: the run continued past the marker, so nothing says it failed", *outcome)
+	}
+}
+
+// AC 2: no code path produces ok for a subagent, from either side. Absence here is
+// genuine silence rather than a source signalling by omission — the invoking result
+// says async_launched on 600 of 617 correlatable runs, so no side observes success
+// (ADR-0005, operator decision 2).
+func TestScanNeverDerivesOKForASubagent(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		sources []string
+	}{
+		{name: "no marker", sources: []string{subagentTranscript(t, "agent-1", "session-1", "explorer")}},
+		{name: "marker on the terminal entry", sources: []string{subagentTranscriptWithMarker(t, "agent-1", "session-1", "explorer", 2)}},
+		{name: "marker mid-run", sources: []string{subagentTranscriptWithMarker(t, "agent-1", "session-1", "explorer", 1)}},
+		// The load-bearing shape: the invoking tool_result carries "is_error":false,
+		// the clearest success token the invoking side has. It must reach no subagent
+		// record, because nothing reads the invoking side in either direction (BC-1).
+		{name: "an invoking result reporting no error", sources: []string{
+			subagentInvocationLines("call-1", "session-1", "explorer"),
+			subagentTranscript(t, "agent-1", "session-1", "explorer"),
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			records, result := twoSources(t, closedSession, Idleness{}, test.sources...)
+			if len(subagentRecords(records)) != 1 {
+				t.Fatalf("subagent records = %+v, want exactly one (result = %+v)", subagentRecords(records), result)
+			}
+			for _, event := range records {
+				if event.Kind != record.KindSubagent || event.Outcome == nil {
+					continue
+				}
+				if *event.Outcome == record.OutcomeOK {
+					t.Errorf("subagent record %+v was rated ok; a subagent's success is observed by no side, so ok is never derived (ADR-0005)", event)
+				}
+			}
+		})
+	}
+}
+
+// ADR-0004: two scans of one walk produce byte-identical store contents, so the new
+// fold is a max over a total order of source-supplied values and never over arrival
+// order. Nothing in the transcript format promises the entries are ordered.
+func TestScanDerivesTheSameSubagentOutcomeInEitherEntryOrder(t *testing.T) {
+	forward := subagentTranscriptWithMarker(t, "agent-1", "session-1", "explorer", 2)
+	lines := strings.Split(forward, "\n")
+	slices.Reverse(lines)
+	reversed := strings.Join(lines, "\n")
+
+	first, _ := twoSources(t, closedSession, Idleness{}, forward)
+	second, _ := twoSources(t, closedSession, Idleness{}, reversed)
+
+	forwardRecords, reversedRecords := subagentRecords(first), subagentRecords(second)
+	if len(forwardRecords) != 1 || len(reversedRecords) != 1 {
+		t.Fatalf("records = %+v and %+v, want one subagent record from each ordering", forwardRecords, reversedRecords)
+	}
+	if forwardRecords[0].EventID != reversedRecords[0].EventID {
+		t.Errorf("event ids = %q and %q, want the entry order not to change the derived id", forwardRecords[0].EventID, reversedRecords[0].EventID)
+	}
+	if forwardRecords[0].Outcome == nil || reversedRecords[0].Outcome == nil {
+		t.Fatalf("outcomes = %v and %v, want %q from both orderings", forwardRecords[0].Outcome, reversedRecords[0].Outcome, record.OutcomeError)
+	}
+	if *forwardRecords[0].Outcome != record.OutcomeError || *reversedRecords[0].Outcome != record.OutcomeError {
+		t.Errorf("outcomes = %q and %q, want %q from both orderings", *forwardRecords[0].Outcome, *reversedRecords[0].Outcome, record.OutcomeError)
+	}
+}
+
+// AC 6 under the new branch: rating a run does not make it two records. Claude Code's
+// storage still describes the run twice — the parent's invoking tool_use/tool_result
+// pair and the subagent's own transcript — and only the transcript is canonical
+// (ADR-0036 §1-§2, whose anti-duplication rule the amendment leaves untouched).
+func TestScanCountsOneFailedSubagentRunAsOneRecord(t *testing.T) {
+	records, result := twoSources(t, closedSession, Idleness{},
+		subagentInvocationLines("call-1", "session-1", "explorer"),
+		subagentTranscriptWithMarker(t, "agent-1", "session-1", "explorer", 2))
+
+	if len(records) != 1 {
+		t.Fatalf("records = %+v, want exactly one for one run (result = %+v)", records, result)
+	}
+	event := records[0]
+	if event.Kind != record.KindSubagent || event.Name != "explorer" {
+		t.Fatalf("record = %+v, want the explorer subagent record", event)
+	}
+	if event.Outcome == nil || *event.Outcome != record.OutcomeError {
+		t.Fatalf("Outcome = %v, want %q", event.Outcome, record.OutcomeError)
+	}
+	summary := metrics.Aggregate(records, nil)
+	if len(summary.Primitives) != 1 || summary.Primitives[0].Invocations != 1 {
+		t.Errorf("Aggregate() primitives = %+v, want explorer with one invocation: the invoking tool_use still produces no record", summary.Primitives)
 	}
 }

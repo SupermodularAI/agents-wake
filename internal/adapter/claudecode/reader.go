@@ -137,6 +137,33 @@ type Result struct {
 	// the question came up (plan §4.2, ADR-0007). Read reports it for the one source it
 	// read.
 	SkippedTypedInvocations int
+	// OutOfOrderPairs counts terminated tool calls whose result instant precedes
+	// their own tool_use instant. The pair measured no interval, so DurationMS is
+	// left nil rather than clamped to 0: ADR-0027 reserves a wire-level 0 for a
+	// genuine zero-duration call and delivers it into a receiver store that can
+	// never be rebuilt, so a clamped 0 would state an instant call that nobody
+	// measured (ADR-0005 applied to time).
+	//
+	// It is timestamp order, not transcript line order. A tool_result line written
+	// before its own tool_use line is an ordinary out-of-order write this reader
+	// already pairs correctly, and its instants are still in order — it is not
+	// counted here.
+	//
+	// The record is written all the same, and is counted by Parsed upstream: the
+	// invocation happened and only its duration is unknown. This counter is what
+	// keeps that unknown visible rather than silent (plan §12).
+	//
+	// It is per source and complete on Read, like SkippedTypedInvocations: a pair is
+	// judged at the moment both halves are in hand, which is always inside one
+	// source's read, so Close derives none of its own.
+	//
+	// It deliberately does not move doctor's state word — same reasoning as
+	// RefusedSubagentRuns and SkippedTypedInvocations. There is no incremental
+	// cursor, so every scan re-reads the same transcript and re-counts the same
+	// pairs, and a state word driven by it could never change back (see
+	// health.Diagnose). It carries only a count — no instant, no name, no session
+	// id, no transcript value (ADR-0007, plan §4.2).
+	OutOfOrderPairs int
 	// SkippedSources counts the sources this scan read that derived nothing, refused
 	// nothing, and had nothing attributed back to them by the post-walk resolution —
 	// most often because their working directory belongs to no consented repository.
@@ -151,6 +178,18 @@ type Result struct {
 	// It is a count of sources, never of paths: a source is the ordinal the scan
 	// assigned it (ADR-0007, plan §4.2). Read reports it for the one source it read.
 	SkippedSources int
+	// SkippedSourceOrdinals names which sources those were, in ascending order — the
+	// ordinal this scan assigned each source as it arrived, and never anything else.
+	//
+	// A caller keeping its own per-source notes — which working directory it declined
+	// for that source, say — keys them the same way and needs no path from here: this
+	// package's guarantee is that a source is an ordinal, and a directory would be a
+	// path leaving a package that has none (ADR-0007, plan §4.2). DG-114's breakdown of
+	// doctor's skipped count is built on the caller's side from these.
+	//
+	// Close reports it whole. Read leaves it nil for SkippedSources' reason: a source's
+	// contribution can resolve after its own read has ended (ADR-0036).
+	SkippedSourceOrdinals []int
 }
 
 // Resolver maps one observed event — a recorded working directory and the instant it
@@ -222,6 +261,9 @@ func Read(reader io.Reader, resolve Resolver, names record.Namer, installed Inst
 	// Summed for the same defensive reason, though a typed invocation is judged entirely
 	// within the line it is on, so Close derives none of its own today.
 	final.SkippedTypedInvocations += first.SkippedTypedInvocations
+	// Summed for the same defensive reason, though a pair is judged inside one
+	// source's read and Close derives none of its own today.
+	final.OutOfOrderPairs += first.OutOfOrderPairs
 	return final, nil
 }
 
@@ -373,6 +415,18 @@ type transcriptEntry struct {
 	// false, twice, so it cannot do that job. It adds no record.Record field and
 	// persists nothing: reading a flag is not retaining it (ADR-0007).
 	IsSidechain bool `json:"isSidechain"`
+	// IsAPIErrorMessage is Claude Code's own failure marker on a subagent's turn: a
+	// top-level boolean the harness writes, never a value embedded in a tool's output
+	// (ADR-0036 §5's admissibility line). Measured on 26 of 917 subagent transcripts,
+	// with the value true in 26 of 26 occurrences, always on an entry of type
+	// "assistant".
+	//
+	// It is the only thing read from such an entry. The free-text error string and
+	// apiErrorStatus that sit beside it are deliberately not modelled here: a bounded
+	// boolean cannot carry a secret and a message body can, and the record type is the
+	// allowlist (ADR-0007, plan §4.2). Reading a flag is not retaining it — no record
+	// field carries this value; it decides one bounded enum and is dropped.
+	IsAPIErrorMessage bool `json:"isApiErrorMessage"`
 	// ToolUseResult stays raw because real Claude Code writes whatever shape the
 	// tool returned: an object for a structured result, a bare string for Bash, an
 	// array of content blocks for Task. A typed field type-errors the whole line —
@@ -474,16 +528,80 @@ type toolResult struct {
 // retain a result whose tool_use has not arrived yet without holding any
 // transcript string at all — not a denial kind, not a tool name (ADR-0007,
 // plan §4.2).
+//
+// The duration is the one field the result line alone cannot supply: an interval
+// needs both halves of the pair. It is stamped by pairedWith at the moment a call
+// and its result are put together, which is why resultOf — which decodes the
+// result line with no call in hand — leaves it nil.
 type callResult struct {
 	timestamp time.Time
 	outcome   *record.Outcome
+	// duration is the request-to-result interval this pair measured, in
+	// milliseconds, or nil when it measured none. It is stamped by pairedWith at
+	// the moment a call and its result are put together — never derived inside
+	// complete, because interrupted() reaches complete with the call's own instant
+	// as the result instant and a delta computed there would be a non-nil 0 on the
+	// one path ADR-0015 requires to stay unknown (ADR-0005 applied to time).
+	//
+	// It is a number, never a transcript value: nothing here widens ADR-0007's
+	// allowlist.
+	duration *int64
+	// omitted reports that this result line reached its is_error check with no
+	// denial kind and no interrupted flag, and found the field absent. It is the
+	// half of the outcome derivation the result line cannot finish alone: whether an
+	// omission is this family's success token or genuinely unknown depends on the
+	// tool the call named, which lives on the other half of the pair — the same
+	// reason the duration is stamped at pairing time rather than derived here.
+	//
+	// It is a bool, never a transcript value: no tool name is added to this struct
+	// and nothing here widens ADR-0007's allowlist.
+	//
+	// Invariant: omitted is true only when outcome is nil.
+	omitted bool
 }
 
 // resultOf derives the terminal half of a call from the tool_result entry and
 // block, at the moment the line is read. Both orders of the pair go through this
 // one function, so line order cannot change a derived outcome.
+//
+// The duration is deliberately left nil here: this function sees the result line
+// alone, and an interval needs the call it terminated. pairedWith stamps it.
 func resultOf(entry transcriptEntry, block contentBlock) callResult {
-	return callResult{timestamp: entry.Timestamp, outcome: outcomeFor(entry, block)}
+	outcome, omitted := outcomeFor(entry, block)
+	return callResult{timestamp: entry.Timestamp, outcome: outcome, omitted: omitted}
+}
+
+// pairedWith stamps onto the result that terminated this call the interval the
+// pair measured, and reports whether the pair measured one at all.
+//
+// The interval is request-to-result: from the tool_use instant to the tool_result
+// instant. It includes scheduling and any human permission-approval wait, so a
+// permission-gated call reads as slow. It is not tool execution time and must not
+// be named or described as it. The harness's own toolUseResult.durationMs is a
+// different measurement and is deliberately not consulted, preferred or blended —
+// one provenance, always.
+//
+// A result instant that precedes its call's measured nothing, so the duration
+// stays nil and the caller counts the occurrence: clamping to 0 would publish an
+// unmeasured interval as a definite instant call, which is what ADR-0027 reserves
+// a wire-level 0 for and delivers into a receiver store that can never be rebuilt.
+// The record is still derived — only the duration is unknown, the invocation
+// happened.
+//
+// The comparison is strictly Before, so an equal pair is a measured zero and keeps
+// a non-nil 0: at the source's millisecond resolution a sub-millisecond call is a
+// genuine zero-duration call, and collapsing it to nil would lose exactly the
+// distinction the wake.duration_ms attribute exists to carry (ADR-0027).
+//
+// Both pairing orders go through it, for the reason resultOf exists: line order
+// may not change a derived value.
+func (call call) pairedWith(result callResult) (callResult, bool) {
+	if result.timestamp.Before(call.timestamp) {
+		return result, false
+	}
+	elapsed := result.timestamp.Sub(call.timestamp).Milliseconds()
+	result.duration = &elapsed
+	return result, true
 }
 
 // interruptedResult reports the one signal this reader takes from a tool result
@@ -674,8 +792,12 @@ type call struct {
 	kind        record.Kind
 	name        record.Identifier
 	packageName record.Identifier
-	viaSkill    record.Identifier
-	viaAgent    record.Identifier
+	// mcpServer is the segment mcpServerSegment read out of this call's tool name,
+	// empty for every call that is not an MCP tool and for an MCP tool name with no
+	// second separator. It is stored verbatim; see mcpServerSegment.
+	mcpServer record.Identifier
+	viaSkill  record.Identifier
+	viaAgent  record.Identifier
 	// agentID is the id of the subagent transcript this call's tool_use line was
 	// read from, empty when the entry declared none or declared one outside the
 	// token domain. It is ADR-0035 §2's case-1 key and ADR-0036 §2's — the agent id
@@ -770,6 +892,12 @@ func (entry transcriptEntry) call(source int, block contentBlock, resolve Resolv
 	}
 	if packageName, ok := packageFromAttribution(entry.AttributionMCPServer); ok {
 		derived.packageName = packageName
+	}
+	// The tool name, not entry.AttributionMCPServer: that field carries the config
+	// key, is absent on many MCP entries, and is already spoken for by packageName.
+	// The prefix the harness itself composed is present on every MCP tool_use.
+	if server, found := mcpServerSegment(block.Name); found {
+		derived.mcpServer = server
 	}
 	// The same record.BoundedToken gate observeSubagentRun applies, so this call
 	// derives byte-identically the id subagentRun.subagent() derives — and an agentId
@@ -889,7 +1017,27 @@ func subagentInvocation(name string) bool { return name == "Agent" || name == "T
 // terminal path — forward order, out of order, and the staleness rule — shares one
 // derivation and one stamping rule, and a call can only ever yield one shape of
 // record.
+//
+// The duration arrives already derived on the callResult and is copied, never
+// computed here. interrupted() reaches this function with the call's own instant
+// standing in for the result instant, so a delta taken here would be a non-nil 0
+// on the one path that must stay unknown (ADR-0015, ADR-0005 applied to time).
+//
+// The outcome arrives almost derived. The one verdict a result line cannot reach
+// alone is whether an omitted is_error is that family's success token or the source
+// saying nothing, because it turns on the tool the call named — which only this
+// side of the pair holds. It is resolved here rather than in pairedWith because
+// pairedWith returns early for a pair whose instants came back inverted, and a
+// verdict that skipped that early return would depend on instant order, against
+// ADR-0004's byte-identical rescan bar and ADR-0015's cursor-is-an-optimisation
+// rule. interrupted() reaches here with omitted false by construction, so the
+// staleness path cannot acquire an ok (ADR-0015).
 func (call call) complete(result callResult) record.Record {
+	outcome := result.outcome
+	if result.omitted && omitsOnSuccess(call.kind, call.name) {
+		resolved := record.OutcomeOK
+		outcome = &resolved
+	}
 	return record.Record{
 		SchemaVersion:  record.SchemaVersion,
 		EventID:        call.eventID,
@@ -901,12 +1049,14 @@ func (call call) complete(result callResult) record.Record {
 		Kind:           call.kind,
 		Name:           call.name,
 		Package:        call.packageName,
+		MCPServer:      call.mcpServer,
 		ViaSkill:       call.viaSkill,
 		ViaAgent:       call.viaAgent,
 		Model:          call.model,
 		Invoker:        call.invoker,
 		Entrypoint:     call.entrypoint,
-		Outcome:        result.outcome,
+		Outcome:        outcome,
+		DurationMS:     result.duration,
 	}
 }
 
@@ -926,6 +1076,12 @@ func (call call) complete(result callResult) record.Record {
 // activity would make the same logical event serialise differently once unrelated
 // later lines are appended to the session. There is no result entry on this path, so
 // a result-derived timestamp is unavailable by construction.
+//
+// For the same reason there is no duration: the callResult built here carries none,
+// so DurationMS stays nil by construction rather than by exclusion. It is
+// deliberately not derived from the two instants this call hands to complete —
+// they are the same instant, and a 0 there would state an invocation that returned
+// instantly when in truth nothing measured it (ADR-0015, ADR-0005 applied to time).
 func (call call) interrupted() record.Record {
 	outcome := record.OutcomeInterrupted
 	return call.complete(callResult{timestamp: call.timestamp, outcome: &outcome})
@@ -958,10 +1114,43 @@ func kindFor(name record.Identifier) record.Kind {
 	if name == "Skill" {
 		return record.KindSkill
 	}
-	if len(name) > 5 && string(name[:5]) == "mcp__" {
+	if len(name) > len(mcpPrefix) && string(name[:len(mcpPrefix)]) == mcpPrefix {
 		return record.KindMCPTool
 	}
 	return record.KindBuiltinTool
+}
+
+// mcpPrefix and mcpSeparator are Claude Code's own spelling of an MCP tool name:
+// mcp__<server>__<tool>. They are parsed here and nowhere else — this is one
+// harness's naming, not a shared vocabulary, so no interface and no shared helper
+// is extracted for a second adapter that does not exist (ADR-0013).
+const (
+	mcpPrefix    = "mcp__"
+	mcpSeparator = "__"
+)
+
+// mcpServerSegment returns the server segment of an MCP tool name, exactly as the
+// tool name spells it. It normalises nothing: the config key a segment corresponds
+// to is the inventory join's question, and answering it here would persist a guess
+// (ADR-0008).
+//
+// A name with no second separator has no segment, and that is an absence rather
+// than a fallback to the whole name (ADR-0005). A segment outside the token domain
+// is refused silently and valuelessly — it is transcript content and must never be
+// quoted (plan §4.2).
+func mcpServerSegment(toolName string) (record.Identifier, bool) {
+	if len(toolName) <= len(mcpPrefix) || toolName[:len(mcpPrefix)] != mcpPrefix {
+		return "", false
+	}
+	rest := toolName[len(mcpPrefix):]
+	for index := 1; index+len(mcpSeparator) <= len(rest); index++ {
+		if rest[index:index+len(mcpSeparator)] != mcpSeparator {
+			continue
+		}
+		server, err := record.BoundedToken(rest[:index])
+		return server, err == nil
+	}
+	return "", false
 }
 
 func packageFromAttribution(value string) (record.Identifier, bool) {
@@ -981,26 +1170,43 @@ func packageFromAttribution(value string) (record.Identifier, bool) {
 	return "", false
 }
 
-func outcomeFor(entry transcriptEntry, block contentBlock) *record.Outcome {
+// outcomeFor derives everything about a call's verdict that its result line can
+// state on its own, in a fixed precedence: a recognised denial kind first, then the
+// interrupted flag, then is_error. A failure signal always outranks the field's
+// presence or absence — a denied or interrupted call did not succeed, whatever
+// is_error says or omits (ADR-0005, ADR-0015).
+//
+// The second result is the half of the derivation this function cannot finish. It
+// is true only on the last arm — is_error absent, with no denial kind and no
+// interrupted flag — and reports that the verdict now turns on which tool the call
+// named, which no result line carries. complete finishes it.
+func outcomeFor(entry transcriptEntry, block contentBlock) (*record.Outcome, bool) {
 	switch entry.ToolDenialKind {
 	case "permission-rule":
 		outcome := record.OutcomeDeniedHarnessRule
-		return &outcome
+		return &outcome, false
 	case "user-rejected":
 		outcome := record.OutcomeDeniedUser
-		return &outcome
+		return &outcome, false
 	}
 	if entry.interruptedResult() {
 		outcome := record.OutcomeInterrupted
-		return &outcome
+		return &outcome, false
 	}
 	if block.IsError == nil {
-		return nil
+		// The omission is this line's own only when nothing else on it points at a
+		// failure. A denial kind the switch above could not name is still a denial
+		// the source spelled — a vocabulary this reader does not map, never the
+		// absence of one — so the family's omission licence does not reach it and the
+		// verdict stays unknown. Unknown is never success (ADR-0005), and a denial
+		// spelling the harness adds later has to surface as a rising null rate rather
+		// than be absorbed as ok (plan §3.3, §12).
+		return nil, entry.ToolDenialKind == ""
 	}
 	if *block.IsError {
 		outcome := record.OutcomeError
-		return &outcome
+		return &outcome, false
 	}
 	outcome := record.OutcomeOK
-	return &outcome
+	return &outcome, false
 }

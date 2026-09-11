@@ -64,15 +64,17 @@ func spoolLines(t *testing.T, path string) int {
 
 // reportedCalls returns the CALLS column of the USED PRIMITIVES row naming name — the
 // number a person reads out of `wake report`. Anchored from the front, at the field past
-// PRIMITIVE, TYPE, HARNESS, REPO and LAST USED, rather than a substring search or a
+// PRIMITIVE, TYPE, HARNESS, PROJECT and LAST USED, rather than a substring search or a
 // from-the-end offset: those five columns are each a single token by construction — a
 // repository cell is either a bounded token or repo-<hex>, neither of which holds
-// whitespace — but ERRORS (last) renders as two tokens ("1 (33.3%)") whenever a primitive
-// has failures, which would shift a from-the-end offset onto the failure count instead of
-// CALLS.
+// whitespace — but ERRORS (last) is multi-token whenever a primitive has failures, which
+// would shift a from-the-end offset onto some part of the error cell instead of CALLS.
+// Since DG-103 that cell carries its own denominator ("1 of 3 rated (33.3%); 1 unrated"),
+// so it now runs to six tokens rather than two: anchoring from the front was already the
+// only stable choice, and the widened cell makes it more so, not less.
 func reportedCalls(t *testing.T, rendered, name string) string {
 	t.Helper()
-	const callsIndex = 5 // PRIMITIVE, TYPE, HARNESS, REPO, LAST USED, then CALLS
+	const callsIndex = 5 // PRIMITIVE, TYPE, HARNESS, PROJECT, LAST USED, then CALLS
 	for line := range strings.Lines(rendered) {
 		fields := strings.Fields(line)
 		if len(fields) <= callsIndex || fields[0] != name {
@@ -96,7 +98,7 @@ func invocationsOf(t *testing.T, spool *store.Store, statePath string, kind reco
 		Primitives:     []inventory.Primitive{{Harness: "claude-code", Kind: kind, Name: name}},
 		ProjectScanned: true,
 	}
-	if err := primitives.Refresh(spool, discovery); err != nil {
+	if err := primitives.Refresh(spool, discovery, nil); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 	snapshot, err := primitives.Read()
@@ -873,5 +875,23 @@ func TestClaudeCodePersistsATypedInvocationAndCountsASkippedOne(t *testing.T) {
 	}
 	if result.SkippedTypedInvocations != 1 || result.Refused != 0 || result.Malformed != 0 {
 		t.Fatalf("ClaudeCode() = %+v, want one skip and no refusal", result)
+	}
+}
+
+// The ordinals reach the caller that keeps the per-source notes. A count that arrived
+// without them would leave the breakdown guessing which source it was about, and the
+// nil this package would forward silently is exactly the failure the assertion catches.
+func TestCloseForwardsTheSkippedSourceOrdinals(t *testing.T) {
+	collecting := `{"uuid":"entry-1","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:00Z","entrypoint":"cli","message":{"model":"sonnet","id":"msg_1","content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}
+{"uuid":"entry-2","sessionId":"session-1","cwd":"/repo","timestamp":"2026-08-13T12:00:01Z","entrypoint":"cli","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`
+	unconsented := `{"uuid":"other-1","sessionId":"session-2","cwd":"/elsewhere","timestamp":"2026-08-13T12:00:00Z","entrypoint":"cli","message":{"model":"sonnet","id":"msg_2","content":[{"type":"tool_use","id":"call-2","name":"Bash"}]}}`
+
+	_, final := walkSources(t, claudecode.Idleness{}, collecting, unconsented)
+
+	if final.SkippedSources != 1 {
+		t.Fatalf("SkippedSources = %d, want 1", final.SkippedSources)
+	}
+	if !slices.Equal(final.SkippedSourceOrdinals, []int{1}) {
+		t.Errorf("SkippedSourceOrdinals = %v, want [1]: the second source is the one that produced nothing", final.SkippedSourceOrdinals)
 	}
 }

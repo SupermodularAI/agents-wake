@@ -18,11 +18,11 @@ func TestRenderShowsPrimitiveActivityAndLastObserved(t *testing.T) {
 	builtin := reportRecord("builtin", &ok)
 	builtin.Kind = record.KindBuiltinTool
 	builtin.Name = "Bash"
-	summary := metrics.Aggregate([]record.Record{reportRecord("review", &ok), reportRecord("retry", nil), reportRecord("failed", &failed), builtin})
+	summary := metrics.Aggregate([]record.Record{reportRecord("review", &ok), reportRecord("retry", nil), reportRecord("failed", &failed), builtin}, nil)
 
 	var output bytes.Buffer
 	available := []inventory.Usage{
-		{Harness: "claude-code", Kind: record.KindSkill, Name: "review", Repo: "0123456789abcdef0123456789abcdef", Invocations: 3, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "review", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 3, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)},
 		{Harness: "claude-code", Kind: record.KindSkill, Name: "unused-skill"},
 	}
 	if err := Render(&output, summary, available, Options{}); err != nil {
@@ -50,11 +50,12 @@ func TestRenderShowsPrimitiveActivityAndLastObserved(t *testing.T) {
 	}
 }
 
-func TestRenderShowsPerPrimitiveErrorsAsCountAndPercentage(t *testing.T) {
-	summary := metrics.Aggregate(nil)
+func TestRenderShowsPerPrimitiveErrorsWithTheRatedPopulation(t *testing.T) {
+	summary := metrics.Aggregate(nil, nil)
 	available := []inventory.Usage{
-		{Harness: "claude-code", Kind: record.KindSkill, Name: "flaky", Repo: "0123456789abcdef0123456789abcdef", Invocations: 4, Failures: 1, Unknown: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)},
-		{Harness: "claude-code", Kind: record.KindSkill, Name: "solid", Repo: "0123456789abcdef0123456789abcdef", Invocations: 2, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "flaky", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 4, Failures: 1, Unknown: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "partly-rated", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 2, Failures: 1, Unknown: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "solid", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 2, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)},
 	}
 
 	var output bytes.Buffer
@@ -62,17 +63,61 @@ func TestRenderShowsPerPrimitiveErrorsAsCountAndPercentage(t *testing.T) {
 		t.Fatalf("Render() error = %v", err)
 	}
 	text := output.String()
-	// flaky: 1 failure out of 3 known (4 invocations, 1 excluded as unknown).
-	if !strings.Contains(text, "flaky") || !strings.Contains(text, "33.3%") {
-		t.Fatalf("report missing flaky primitive's error rate:\n%s", text)
+	// flaky: 1 failure out of the 3 calls that were rated at all (4 invocations,
+	// 1 excluded as unknown). The denominator is in the cell because it is not
+	// the CALLS column beside it.
+	if line := lineStartingWith(text, "flaky"); !strings.Contains(line, "1 of 3 rated (33.3%); 1 unrated") {
+		t.Fatalf("flaky primitive's error cell lost its rated population, got %q:\n%s", line, text)
+	}
+	// DG-103's case. The first assertion is the shape; the second is the bug:
+	// 2 calls with 1 error and 1 unreported outcome used to render "1 (100.0%)",
+	// two correct numbers a reader joins into a false one against CALLS.
+	line := lineStartingWith(text, "partly-rated")
+	if !strings.Contains(line, "1 of 1 rated (100.0%); 1 unrated") {
+		t.Fatalf("partially-rated primitive's error cell = %q, want its rated population:\n%s", line, text)
+	}
+	if strings.Contains(line, "1 (100.0%)") {
+		t.Fatalf("partially-rated primitive still prints a percentage with no denominator: %q", line)
 	}
 	if line := lineStartingWith(text, "solid"); !strings.Contains(line, "0") || strings.Contains(line, "%") {
 		t.Fatalf("failure-free primitive should report a bare 0, got %q:\n%s", line, text)
 	}
 }
 
+// AC 3 at `wake report`: a kind Wake has never rated must not print a bare 0 in
+// the ERRORS column beside a CALLS column reading 3. Every subagent record
+// written before this ticket carries outcome: nil, so this row is the real shape
+// of the table rather than a contrived one.
+func TestRenderMarksASubagentRowWithNoRatedPopulationAsUnrated(t *testing.T) {
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	available := []inventory.Usage{
+		{Harness: "claude-code", Kind: record.KindSubagent, Name: "explorer", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 3, Unknown: 3, LastUsed: at},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "solid", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 2, LastUsed: at},
+	}
+
+	var output bytes.Buffer
+	if err := Render(&output, metrics.Aggregate(nil, nil), available, Options{}); err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	text := output.String()
+
+	explorer := lineStartingWith(text, "explorer")
+	if !strings.Contains(explorer, "unrated (0 of 3 rated)") {
+		t.Fatalf("a wholly unrated subagent row = %q, want its unrated population:\n%s", explorer, text)
+	}
+	// ADR-0006: no population-free figure leaves the cell, so no percentage either.
+	if strings.Contains(explorer, "%") {
+		t.Fatalf("unrated subagent row = %q, want no rate at all: nothing was rated", explorer)
+	}
+	// The control. A rated, failure-free row still reads exactly "0" — the cell
+	// DG-103 settled is unchanged, and the two facts stay distinguishable.
+	if solid := strings.TrimRight(lineStartingWith(text, "solid"), " \t"); !strings.HasSuffix(solid, "0") || strings.Contains(solid, "unrated") {
+		t.Fatalf("rated failure-free row = %q, want a bare 0 in the ERRORS column:\n%s", solid, text)
+	}
+}
+
 func TestRenderRespectsPrimitiveSectionFilters(t *testing.T) {
-	available := []inventory.Usage{{Harness: "claude-code", Kind: record.KindSkill, Name: "used", Repo: "0123456789abcdef0123456789abcdef", Invocations: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)}, {Harness: "claude-code", Kind: record.KindSkill, Name: "unused"}}
+	available := []inventory.Usage{{Harness: "claude-code", Kind: record.KindSkill, Name: "used", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)}, {Harness: "claude-code", Kind: record.KindSkill, Name: "unused"}}
 	for _, test := range []struct {
 		name    string
 		options Options
@@ -84,7 +129,7 @@ func TestRenderRespectsPrimitiveSectionFilters(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var output bytes.Buffer
-			if err := Render(&output, metrics.Aggregate([]record.Record{reportRecord("used", nil)}), available, test.options); err != nil {
+			if err := Render(&output, metrics.Aggregate([]record.Record{reportRecord("used", nil)}, nil), available, test.options); err != nil {
 				t.Fatalf("Render() error = %v", err)
 			}
 			if !strings.Contains(output.String(), test.want) || strings.Contains(output.String(), test.omit) {
@@ -96,7 +141,7 @@ func TestRenderRespectsPrimitiveSectionFilters(t *testing.T) {
 
 func TestRenderShowsHelpfulEmptyState(t *testing.T) {
 	var output bytes.Buffer
-	if err := Render(&output, metrics.Aggregate(nil), nil, Options{}); err != nil {
+	if err := Render(&output, metrics.Aggregate(nil, nil), nil, Options{}); err != nil {
 		t.Fatalf("Render() error = %v", err)
 	}
 	if !strings.Contains(output.String(), "No terminal events yet. Run `wake ingest`") {
@@ -113,7 +158,7 @@ func TestRenderShowsHelpfulEmptyState(t *testing.T) {
 func TestRenderDoesNotClaimAnEmptyStoreForASessionWithNoPrimitiveUse(t *testing.T) {
 	instant := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
 	var output bytes.Buffer
-	if err := Render(&output, metrics.Aggregate([]record.Record{sessionEndRecord("session-1", instant)}), nil, Options{}); err != nil {
+	if err := Render(&output, metrics.Aggregate([]record.Record{sessionEndRecord("session-1", instant)}, nil), nil, Options{}); err != nil {
 		t.Fatalf("Render() error = %v", err)
 	}
 	text := output.String()
@@ -128,7 +173,7 @@ func TestRenderDoesNotClaimAnEmptyStoreForASessionWithNoPrimitiveUse(t *testing.
 func TestRenderLabelsAbsentActivityWithoutAZeroTimestamp(t *testing.T) {
 	var output bytes.Buffer
 	available := []inventory.Usage{{Harness: "claude-code", Kind: record.KindSkill, Name: "unused"}}
-	if err := Render(&output, metrics.Aggregate(nil), available, Options{Usage: true}); err != nil {
+	if err := Render(&output, metrics.Aggregate(nil, nil), available, Options{Usage: true}); err != nil {
 		t.Fatalf("Render() error = %v", err)
 	}
 	if !strings.Contains(output.String(), "Last observed: not observed") || strings.Contains(output.String(), "0001-01-01") {
@@ -140,9 +185,9 @@ func TestRenderLabelsAbsentActivityWithoutAZeroTimestamp(t *testing.T) {
 // a count of unused primitives by kind — rather than the usage view's tables.
 func TestRenderUnusedOnlyReplacesInvocationOverviewWithUnusedCountsByKind(t *testing.T) {
 	ok := record.OutcomeOK
-	summary := metrics.Aggregate([]record.Record{reportRecord("used", &ok)})
+	summary := metrics.Aggregate([]record.Record{reportRecord("used", &ok)}, nil)
 	available := []inventory.Usage{
-		{Harness: "claude-code", Kind: record.KindSkill, Name: "used", Repo: "0123456789abcdef0123456789abcdef", Invocations: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "used", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)},
 		{Harness: "claude-code", Kind: record.KindSkill, Name: "unused-skill-1"},
 		{Harness: "claude-code", Kind: record.KindSkill, Name: "unused-skill-2"},
 		{Harness: "claude-code", Kind: record.KindMCPTool, Name: "unused-tool"},
@@ -177,8 +222,8 @@ func TestRenderUnusedOnlyReplacesInvocationOverviewWithUnusedCountsByKind(t *tes
 // already says.
 func TestRenderUnusedOnlyOmitsOverviewWhenNothingIsUnused(t *testing.T) {
 	ok := record.OutcomeOK
-	summary := metrics.Aggregate([]record.Record{reportRecord("used", &ok)})
-	available := []inventory.Usage{{Harness: "claude-code", Kind: record.KindSkill, Name: "used", Repo: "0123456789abcdef0123456789abcdef", Invocations: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)}}
+	summary := metrics.Aggregate([]record.Record{reportRecord("used", &ok)}, nil)
+	available := []inventory.Usage{{Harness: "claude-code", Kind: record.KindSkill, Name: "used", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)}}
 
 	var output bytes.Buffer
 	if err := Render(&output, summary, available, Options{Unused: true}); err != nil {
@@ -212,39 +257,73 @@ func linesStartingWith(text, prefix string) []string {
 	return found
 }
 
-// TestRenderShowsOneRowPerRepositoryWithItsLabel is DG-93 at the terminal: the
-// snapshot's grain is per repository, so one primitive used in two of them is two
-// rows, and each row names which repository it is — by label where one is recorded,
-// by a readable form of the id otherwise. Never a blank cell (plan §4.5).
-func TestRenderShowsOneRowPerRepositoryWithItsLabel(t *testing.T) {
+// TestRenderShowsOneRowNamingItsProjectOrCountingSeveral is the restored grain at
+// the terminal: one primitive is one row however many projects it was invoked in.
+// A row used in exactly one names it — by label where one is recorded, by a readable
+// form of the id otherwise — and a row spanning several says how many rather than
+// naming one of them as though it were the only one (ADR-0042). Never a blank cell
+// (plan §4.5).
+func TestRenderShowsOneRowNamingItsProjectOrCountingSeveral(t *testing.T) {
 	const labelled, unlabelled = "0123456789abcdef0123456789abcdef", "fedcba9876543210fedcba9876543210"
 	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
 	available := []inventory.Usage{
-		{Harness: "claude-code", Kind: record.KindSkill, Name: "review", Repo: labelled, Invocations: 2, LastUsed: at},
-		{Harness: "claude-code", Kind: record.KindSkill, Name: "review", Repo: unlabelled, Invocations: 1, LastUsed: at},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "review", Repos: []record.Hash{labelled}, Invocations: 2, LastUsed: at},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "deploy", Repos: []record.Hash{labelled, unlabelled}, Invocations: 3, LastUsed: at},
 	}
 
 	var output bytes.Buffer
 	options := Options{Usage: true, Labels: repolabel.Labels{labelled: "agents-wake"}}
-	if err := Render(&output, metrics.Aggregate(nil), available, options); err != nil {
+	if err := Render(&output, metrics.Aggregate(nil, nil), available, options); err != nil {
 		t.Fatalf("Render() error = %v", err)
 	}
 	text := output.String()
-	for _, want := range []string{"REPO", "agents-wake", "repo-fedcba987654"} {
-		if !strings.Contains(text, want) {
-			t.Errorf("report missing %q:\n%s", want, text)
-		}
+	if !strings.Contains(text, "PROJECT") {
+		t.Errorf("report has no PROJECT column:\n%s", text)
 	}
 	rows := linesStartingWith(text, "review")
-	if len(rows) != 2 {
-		t.Fatalf("rows for `review` = %d, want one per repository:\n%s", len(rows), text)
+	if len(rows) != 1 {
+		t.Fatalf("rows for `review` = %d, want one row for one primitive:\n%s", len(rows), text)
 	}
-	// By field position on the plain rendering: PRIMITIVE, TYPE, HARNESS, REPO.
-	for _, row := range rows {
-		fields := strings.Fields(row)
-		if len(fields) < 4 || fields[3] == "" {
-			t.Fatalf("row %q has no repository cell", row)
+	// By field position on the plain rendering: PRIMITIVE, TYPE, HARNESS, PROJECT.
+	// The cell is a single token by construction, which is what makes this readable.
+	for _, testCase := range []struct {
+		primitive string
+		want      string
+	}{
+		{primitive: "review", want: "agents-wake"},
+		{primitive: "deploy", want: "2-projects"},
+	} {
+		matched := linesStartingWith(text, testCase.primitive)
+		if len(matched) != 1 {
+			t.Fatalf("rows for %q = %d, want one:\n%s", testCase.primitive, len(matched), text)
 		}
+		fields := strings.Fields(matched[0])
+		if len(fields) < 4 || fields[3] != testCase.want {
+			t.Errorf("row %q project cell = %q, want %q", matched[0], fields, testCase.want)
+		}
+	}
+}
+
+// --unused is the intersection of inventory and invocations (ADR-0002): never used
+// anywhere. A primitive invoked in one project and not another is used, full stop,
+// and must never appear in the table that tells a reader what to remove.
+func TestRenderDoesNotListAPrimitiveUsedInOneProjectAsUnused(t *testing.T) {
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	available := []inventory.Usage{
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "used-somewhere", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 6, LastUsed: at},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "never-used"},
+	}
+
+	var output bytes.Buffer
+	if err := Render(&output, metrics.Aggregate(nil, nil), available, Options{Unused: true}); err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	text := output.String()
+	if len(linesStartingWith(text, "never-used")) != 1 {
+		t.Fatalf("unused table does not list `never-used`:\n%s", text)
+	}
+	if len(linesStartingWith(text, "used-somewhere")) != 0 {
+		t.Fatalf("unused table lists a primitive that was used in a project:\n%s", text)
 	}
 }
 
@@ -256,17 +335,24 @@ func TestRenderShowsNoRepositoryColumnForUnusedPrimitives(t *testing.T) {
 	available := []inventory.Usage{{Harness: "claude-code", Kind: record.KindSkill, Name: "unused"}}
 
 	var output bytes.Buffer
-	if err := Render(&output, metrics.Aggregate(nil), available, Options{Unused: true}); err != nil {
+	if err := Render(&output, metrics.Aggregate(nil, nil), available, Options{Unused: true}); err != nil {
 		t.Fatalf("Render() error = %v", err)
 	}
-	// The table's own header row, not the whole report: "WAKE REPORT" contains
-	// "REPO", and the closing disclaimer names repository paths.
+	// The table's own header row, not the whole report: the used table's header and
+	// the sentence explaining it both name the column, and the closing disclaimer
+	// names repository paths.
 	header := lineStartingWith(output.String(), "PRIMITIVE")
 	if header == "" {
 		t.Fatalf("unused-only report has no primitive table:\n%s", output.String())
 	}
-	if strings.Contains(header, "REPO") {
+	if strings.Contains(header, "PROJECT") {
 		t.Fatalf("unused table header carries a repository column: %q", header)
+	}
+	// And the gloss travels with the column. Hoisted out of primitiveUsage it would
+	// explain a column an unused-only report never prints, which reads as the bug
+	// plan §4.5 names rather than as an absence.
+	if strings.Contains(output.String(), "PROJECT is the project") {
+		t.Errorf("unused-only report explains a column it does not print:\n%s", output.String())
 	}
 }
 
@@ -277,7 +363,7 @@ func TestRenderMakesNoClaimThatRepositoryLabelsAreNeverShown(t *testing.T) {
 	available := []inventory.Usage{{Harness: "claude-code", Kind: record.KindSkill, Name: "unused"}}
 
 	var output bytes.Buffer
-	if err := Render(&output, metrics.Aggregate(nil), available, Options{}); err != nil {
+	if err := Render(&output, metrics.Aggregate(nil, nil), available, Options{}); err != nil {
 		t.Fatalf("Render() error = %v", err)
 	}
 	text := output.String()
@@ -291,8 +377,8 @@ func TestRenderMakesNoClaimThatRepositoryLabelsAreNeverShown(t *testing.T) {
 
 func TestRenderPrettyDrawsColorAndBoxedTablesOnlyWhenAsked(t *testing.T) {
 	ok := record.OutcomeOK
-	summary := metrics.Aggregate([]record.Record{reportRecord("review", &ok)})
-	available := []inventory.Usage{{Harness: "claude-code", Kind: record.KindSkill, Name: "review", Repo: "0123456789abcdef0123456789abcdef", Invocations: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)}}
+	summary := metrics.Aggregate([]record.Record{reportRecord("review", &ok)}, nil)
+	available := []inventory.Usage{{Harness: "claude-code", Kind: record.KindSkill, Name: "review", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 1, LastUsed: time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)}}
 
 	var plain bytes.Buffer
 	if err := Render(&plain, summary, available, Options{}); err != nil {
@@ -369,5 +455,101 @@ func sessionEndRecord(sessionID record.Identifier, at time.Time) record.Record {
 		Invoker:          record.InvokerAuto,
 		ToolCalls:        &zero,
 		BuiltinToolCalls: &zero,
+	}
+}
+
+// unmatchedNote is the sentence primitiveUsage prints once, and only when a printed
+// row is unmatched. It is a footnote rather than a column: an unmatched row would
+// leave every other row's cell empty, which is the empty column plan §4.5 forbids.
+const unmatchedNote = "A server marked (unmatched) was invoked but matches no MCP server this pass discovered"
+
+func TestRenderMarksAnUnmatchedServerAndExplainsIt(t *testing.T) {
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	available := []inventory.Usage{
+		{Harness: "claude-code", Kind: record.KindMCPServer, Name: "linear-server", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 3, Unmatched: true, LastUsed: at},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "review", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 1, LastUsed: at},
+	}
+	var output bytes.Buffer
+	if err := Render(&output, metrics.Aggregate(nil, nil), available, Options{}); err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	text := output.String()
+	for _, want := range []string{"mcp server (unmatched)", unmatchedNote} {
+		if !strings.Contains(text, want) {
+			t.Errorf("report missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestRenderOmitsTheUnmatchedNoteWhenNoRowIsUnmatched(t *testing.T) {
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	available := []inventory.Usage{
+		{Harness: "claude-code", Kind: record.KindMCPServer, Name: "claude-in-chrome", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 3, LastUsed: at},
+	}
+	var output bytes.Buffer
+	if err := Render(&output, metrics.Aggregate(nil, nil), available, Options{}); err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	text := output.String()
+	if strings.Contains(text, unmatchedNote) {
+		t.Errorf("report printed the unmatched note with no unmatched row:\n%s", text)
+	}
+	if strings.Contains(text, "(unmatched)") {
+		t.Errorf("report marked a matched server:\n%s", text)
+	}
+}
+
+// DG-99's user-visible symptom, at the renderer: a server with activity must not be
+// listed as unused, and must not be counted in the unused overview either.
+func TestRenderKeepsAUsedServerOutOfUnusedPrimitives(t *testing.T) {
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	available := []inventory.Usage{
+		{Harness: "claude-code", Kind: record.KindMCPServer, Name: "claude-in-chrome", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 4, LastUsed: at},
+		{Harness: "claude-code", Kind: record.KindSkill, Name: "unused-skill"},
+	}
+	var output bytes.Buffer
+	if err := Render(&output, metrics.Aggregate(nil, nil), available, Options{Unused: true}); err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	text := output.String()
+	unused := text[strings.Index(text, "UNUSED PRIMITIVES"):]
+	if strings.Contains(unused, "claude-in-chrome") {
+		t.Errorf("a used MCP server was listed as unused:\n%s", text)
+	}
+	if !strings.Contains(text, "Total unused\t1") && !strings.Contains(text, "Total unused  1") {
+		t.Errorf("Total unused counted the used server:\n%s", text)
+	}
+}
+
+// TestRenderNamesTheProjectColumnAndNeverTheSessionGrain is DG-105 at the terminal.
+// The column holds the project an invocation is attributed to — a property of the
+// invocation grain (ADR-0002) — and the session-anchor reading was rejected on the
+// merits (ADR-0038 §2). So the used table's header and every sentence around it must
+// name the project and must not reach for "session", which is a delimited grain term
+// here (ADR-0034 §1), not a loose word for "the run".
+func TestRenderNamesTheProjectColumnAndNeverTheSessionGrain(t *testing.T) {
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	available := []inventory.Usage{{Harness: "claude-code", Kind: record.KindSkill, Name: "review", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 2, LastUsed: at}}
+
+	var output bytes.Buffer
+	if err := Render(&output, metrics.Aggregate(nil, nil), available, Options{Usage: true}); err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	text := output.String()
+	start := strings.Index(text, "USED PRIMITIVES")
+	if start < 0 {
+		t.Fatalf("report has no used-primitives section:\n%s", text)
+	}
+	// Deliberately unbounded: the used table is the last thing Render writes here, and
+	// the constraint is meant to bind any footnote a later ticket appends below it too.
+	section := text[start:]
+	if !strings.Contains(section, "PROJECT is the project each invocation's own working directory resolved to") {
+		t.Errorf("used-primitives section does not say what the PROJECT column holds:\n%s", section)
+	}
+	if strings.Contains(section, "REPO") {
+		t.Errorf("used-primitives section still names the column REPO:\n%s", section)
+	}
+	if strings.Contains(strings.ToLower(section), "session") {
+		t.Errorf("the PROJECT column's copy names the session grain:\n%s", section)
 	}
 }

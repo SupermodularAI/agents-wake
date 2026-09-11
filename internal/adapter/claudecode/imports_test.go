@@ -53,6 +53,13 @@ var frozenPackageImports = map[string][]string{
 		"github.com/SupermodularAI/agents-wake/internal/record",
 		"slices",
 	},
+	// Pending carry-across-scans is derivation support, not a filesystem
+	// capability: the serialisable form is values only — bounded ids, hashes,
+	// timestamps, enums — and the caller's own file does the I/O (ADR-0019 §1).
+	"pending.go": {
+		"github.com/SupermodularAI/agents-wake/internal/record",
+		"time",
+	},
 	"session.go": {
 		"github.com/SupermodularAI/agents-wake/internal/record",
 		"time",
@@ -75,6 +82,13 @@ var frozenPackageImports = map[string][]string{
 	"typed.go": {
 		"github.com/SupermodularAI/agents-wake/internal/record",
 		"strings",
+	},
+	// The measured omission set is a literal keyed by kind and name, so it needs the
+	// record vocabulary and nothing else. It reads no directory and consults no
+	// installed-primitive set: the set is evidence written down here, not discovery
+	// (ADR-0019 §1, ADR-0036 §3).
+	"omission.go": {
+		"github.com/SupermodularAI/agents-wake/internal/record",
 	},
 }
 

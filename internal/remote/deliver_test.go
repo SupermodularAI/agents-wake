@@ -56,6 +56,19 @@ type spy struct {
 	statuses []int
 	got      []captured
 	readErr  error
+	// unclean names the request indexes the receiver answers with a 2xx status
+	// and then abandons: the declared Content-Length is never fulfilled and the
+	// connection closes. That is what an accepted batch whose exchange did not
+	// complete cleanly looks like from the client, and it is the shape the
+	// watermark used to treat as a rejection.
+	unclean map[int]bool
+	// watch, when set, is the delivery state file the receiver reads at the
+	// moment each request arrives, so a test can see what was durable *during*
+	// the flush rather than only after it. The flush is blocked on this POST
+	// while the read happens, and the file is published whole (atomicfile), so
+	// the read is never a torn one.
+	watch     string
+	positions []uint64
 }
 
 func (s *spy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -74,8 +87,24 @@ func (s *spy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case len(s.statuses) > 0:
 		status = s.statuses[len(s.statuses)-1]
 	}
+	if s.watch != "" {
+		s.positions = append(s.positions, readDeliveryState(s.watch).Position)
+	}
+	unclean := s.unclean[index]
 	s.mu.Unlock()
 
+	if unclean {
+		// The status and a declared length reach the client, so the client has a
+		// response and a 2xx; the body then never arrives. ErrAbortHandler closes
+		// the connection without logging a panic.
+		w.Header().Set("Content-Length", "64")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte("x"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		panic(http.ErrAbortHandler)
+	}
 	w.WriteHeader(status)
 }
 
@@ -101,7 +130,12 @@ func (s *spy) request(t *testing.T, index int) captured {
 // serve starts a receiver answering with statuses and returns it with its URL.
 func serve(t *testing.T, statuses ...int) (*spy, string) {
 	t.Helper()
-	receiver := &spy{statuses: statuses}
+	return start(t, &spy{statuses: statuses})
+}
+
+// start runs a receiver a test has configured itself.
+func start(t *testing.T, receiver *spy) (*spy, string) {
+	t.Helper()
 	server := httptest.NewServer(receiver)
 	t.Cleanup(server.Close)
 	return receiver, server.URL
@@ -281,11 +315,116 @@ func TestAFailedBatchStopsTheRun(t *testing.T) {
 	}
 }
 
+// TestAnAmbiguousPostAcceptFailureIsNotReSent is the ticket's regression test.
+//
+// The receiver answers the first request with 200 and then abandons the
+// response, so the 2xx arrives and the body does not. The batch *was* accepted
+// — the receiver has those spans — and the watermark must record that, or every
+// record in it is posted a second time on the next flush. It used to be: post
+// reported the broken tail as a delivery failure and the run advanced over
+// nothing.
+//
+// The assertion is the one the decision names: the next flush must not re-send
+// those span ids. It sends the two new records and nothing else.
+func TestAnAmbiguousPostAcceptFailureIsNotReSent(t *testing.T) {
+	paths := testPaths(t)
+	receiver, endpoint := start(t, &spy{unclean: map[int]bool{0: true}})
+	enable(t, paths, endpoint)
+	seed(t, paths, 3)
+
+	if err := Flush(paths); !errors.Is(err, ErrDeliveryFailed) {
+		t.Fatalf("Flush() error = %v, want ErrDeliveryFailed — the exchange did not complete", err)
+	}
+	if got := storedPosition(t, paths); got != 3 {
+		t.Fatalf("position = %d, want 3 — the receiver accepted the batch", got)
+	}
+	first := spanIDsOf(t, receiver, 0)
+	if len(first) != 3 {
+		t.Fatalf("the first flush sent %d spans, want 3", len(first))
+	}
+
+	seedFrom(t, paths, 3, 2)
+	if err := Flush(paths); err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+	if got := receiver.count(); got != 2 {
+		t.Fatalf("requests = %d, want 2", got)
+	}
+	second := spanIDsOf(t, receiver, 1)
+	if len(second) != 2 {
+		t.Errorf("the second flush sent %d spans, want exactly the 2 new records", len(second))
+	}
+	for _, id := range second {
+		if slices.Contains(first, id) {
+			t.Errorf("span %s was re-sent after the receiver had already accepted it", id)
+		}
+	}
+}
+
+// TestAnAcceptedBatchIsDurableBeforeTheNextOne closes the crash window this
+// ticket is about. The watermark used to live in memory for the whole flush and
+// reach disk once, at the end: a flush that posted several batches and was then
+// killed — a detached child, a host restart — lost every acceptance it held, and
+// the next flush posted all of them again.
+//
+// The receiver reads the state file at the moment each request arrives, which is
+// the only place the difference is visible: by the time the flush returns, the
+// trailing write has made the old code look identical to the new one.
+func TestAnAcceptedBatchIsDurableBeforeTheNextOne(t *testing.T) {
+	paths := testPaths(t)
+	receiver, endpoint := start(t, &spy{watch: deliveryStatePath(paths)})
+	enable(t, paths, endpoint)
+	seed(t, paths, maxBatchRecords+1)
+
+	if err := Flush(paths); err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+	if got := receiver.count(); got != 2 {
+		t.Fatalf("requests = %d, want 2", got)
+	}
+	receiver.mu.Lock()
+	observed := slices.Clone(receiver.positions)
+	receiver.mu.Unlock()
+
+	if observed[0] != 0 {
+		t.Errorf("position was %d when the first batch was posted, want 0 — nothing is accepted yet", observed[0])
+	}
+	if observed[1] != maxBatchRecords {
+		t.Errorf("position was %d when the second batch was posted, want %d — the first batch's acceptance must already be durable", observed[1], maxBatchRecords)
+	}
+	if got := storedPosition(t, paths); got != maxBatchRecords+1 {
+		t.Errorf("position = %d, want %d", got, maxBatchRecords+1)
+	}
+}
+
+// TestAFailedDurableWriteStopsTheRun is the other half of "acceptance is recorded
+// before the run continues": a run that cannot record an acceptance must not go on
+// posting batches it also cannot record. Every one of those would be re-sent.
+//
+// The state path is a directory, so the publishing rename fails while the data
+// directory stays writable — the flush still has to create its lock file there.
+func TestAFailedDurableWriteStopsTheRun(t *testing.T) {
+	paths := testPaths(t)
+	receiver, endpoint := serve(t, http.StatusOK)
+	enable(t, paths, endpoint)
+	seed(t, paths, maxBatchRecords+1)
+	if err := os.MkdirAll(deliveryStatePath(paths), 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	if err := Flush(paths); err == nil {
+		t.Fatal("Flush() error = nil, want the failed state write")
+	}
+	if got := receiver.count(); got != 1 {
+		t.Errorf("requests = %d, want 1 — the run must stop when it cannot record an acceptance", got)
+	}
+}
+
 // TestWatermarkPastHeadResetsAndResends covers `ingest --rebuild`: store.Discard
 // re-derives the spool, so a watermark past head means the store shrank. Reset
-// and re-send rather than clamp — at-least-once is free because the receiver
-// deduplicates on a span id derived from the deterministic event id, whereas
-// clamping would skip records permanently.
+// and re-send rather than clamp — a re-sent record is the same span, derived from
+// the deterministic event id, so the duplicate is repairable by whoever reads the
+// receiver's store, whereas clamping would skip records permanently.
 func TestWatermarkPastHeadResetsAndResends(t *testing.T) {
 	paths := testPaths(t)
 	receiver, endpoint := serve(t, http.StatusOK)
@@ -323,10 +462,10 @@ func TestWatermarkPastHeadResetsAndResends(t *testing.T) {
 // Position > head cannot either, because the spool grew rather than shrank.
 //
 // The assertion is the one readDeliveryState's doc comment makes: every record the
-// user consented to send reaches the wire. Re-sending is free, because the receiver
-// collapses a duplicate on a span id derived from the deterministic event id
-// (ADR-0004, ADR-0018, ADR-0027); a skip is permanent and nothing downstream ever
-// notices.
+// user consented to send reaches the wire. Re-sending costs a duplicate that carries
+// the same span id, derived from the deterministic event id (ADR-0004, ADR-0018,
+// ADR-0027), and is therefore collapsible after the fact; a skip is permanent and
+// nothing downstream ever notices.
 func TestAStaleSpoolStrandsNothingWhenTheRebuildArrivesLater(t *testing.T) {
 	paths := testPaths(t)
 	receiver, endpoint := serve(t, http.StatusOK)
@@ -378,6 +517,42 @@ func TestAStaleSpoolStrandsNothingWhenTheRebuildArrivesLater(t *testing.T) {
 	}
 }
 
+// TestAStaleSpoolIsNeverRecordedMidFlush is the per-batch durable write's one
+// exception, and the reason it is an exception.
+//
+// Over a spool this build cannot read whole, Entries' numbering is provisional:
+// the lines it cannot decode take no position yet and take one back when the
+// rebuild lands. A position recorded over that numbering fails *forward* — every
+// record beneath it is skipped permanently and nothing downstream ever notices.
+// So the mid-flush write is the one write that does not happen here, and the
+// receiver reads the state file as each batch arrives to prove it.
+func TestAStaleSpoolIsNeverRecordedMidFlush(t *testing.T) {
+	paths := testPaths(t)
+	receiver, endpoint := start(t, &spy{watch: deliveryStatePath(paths)})
+	enable(t, paths, endpoint)
+	seed(t, paths, maxBatchRecords+1)
+	seedFromAnotherSchemaVersion(t, paths, testRecords(maxBatchRecords+1, 1))
+
+	if err := Flush(paths); err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+	if got := receiver.count(); got != 2 {
+		t.Fatalf("requests = %d, want 2", got)
+	}
+	receiver.mu.Lock()
+	observed := slices.Clone(receiver.positions)
+	receiver.mu.Unlock()
+
+	for index, position := range observed {
+		if position != 0 {
+			t.Errorf("position was %d when batch %d was posted, want 0 — a provisional numbering must never be made durable", position, index+1)
+		}
+	}
+	if got := storedPosition(t, paths); got != 0 {
+		t.Errorf("position = %d, want 0 after the flush too", got)
+	}
+}
+
 // seedFromAnotherSchemaVersion appends records to the spool one schema version back.
 //
 // By hand, because there is no earlier build here to write them and this build's own
@@ -424,6 +599,22 @@ func deliveredSpanIDs(t *testing.T, receiver *spy) []string {
 			}
 			ids = append(ids, id)
 		}
+	}
+	return ids
+}
+
+// spanIDsOf is every span id one request carried, so a test can ask which
+// records a *particular* flush put on the wire rather than the union of all of
+// them.
+func spanIDsOf(t *testing.T, receiver *spy, index int) []string {
+	t.Helper()
+	var ids []string
+	for _, span := range spansOf(t, gunzip(t, receiver.request(t, index).body)) {
+		id, ok := span["spanId"].(string)
+		if !ok {
+			t.Fatalf("spanId is %T, want a string", span["spanId"])
+		}
+		ids = append(ids, id)
 	}
 	return ids
 }
@@ -709,7 +900,10 @@ func TestNoErrorPathLeaksTheEndpointOrCredential(t *testing.T) {
 		"closed listener": func(t *testing.T, p config.Paths) {
 			t.Helper()
 			shortTimeouts(t)
-			enable(t, p, "http://"+endpointToken+"/v1/traces")
+			// https:// because config no longer stores an http:// endpoint to a
+			// host that is not loopback. What this case needs is a host nothing
+			// answers on, and .invalid never resolves under either scheme.
+			enable(t, p, "https://"+endpointToken+"/v1/traces")
 		},
 		"rejected batch": func(t *testing.T, p config.Paths) {
 			t.Helper()
@@ -725,9 +919,14 @@ func TestNoErrorPathLeaksTheEndpointOrCredential(t *testing.T) {
 			t.Cleanup(func() { close(block) })
 			enable(t, p, server.URL)
 		},
+		"accepted but the exchange did not complete": func(t *testing.T, p config.Paths) {
+			t.Helper()
+			_, endpoint := start(t, &spy{unclean: map[int]bool{0: true}})
+			enable(t, p, endpoint)
+		},
 		"a credential store this build refuses": func(t *testing.T, p config.Paths) {
 			t.Helper()
-			enable(t, p, "http://"+endpointToken+"/v1/traces")
+			enable(t, p, "https://"+endpointToken+"/v1/traces")
 			corruptCredentialStore(t, p)
 		},
 	}

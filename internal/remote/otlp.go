@@ -124,7 +124,7 @@ const (
 	// langfuse.trace.name and the twelve session-grain keys are all conditional —
 	// the first two on a resolved label and nothing else (ADR-0038 §1) — so this
 	// sizes the allocation for the widest span rather than for every span.
-	maxSpanAttributes = 35
+	maxSpanAttributes = 36
 )
 
 // errEncode is deliberately valueless. A diagnostic that quoted the record it
@@ -314,6 +314,19 @@ func spanAttributes(r record.Record, labels RepoLabels) []keyValue {
 	attrs = appendString(attrs, "langfuse.trace.name", labelFor(labels, r.Repo))
 	attrs = appendString(attrs, "wake.package", string(r.Package))
 	attrs = appendString(attrs, "wake.package_version", string(r.PackageVersion))
+	// wake.mcp_server is the server segment the record already carries. It is a
+	// widening of the key set, not of the exposure: the same characters already
+	// leave the machine inside wake.name ("mcp__claude-in-chrome__computer"), and
+	// this projects them into their own bounded attribute so a receiver can group by
+	// server instead of parsing a tool name. No prompt text, no tool arguments, no
+	// tool output (ADR-0027, ADR-0030).
+	//
+	// Emitted on every span whose record carries the field, never gated to one span
+	// of a trace and never propagated from an anchor: an attribute a receiver groups
+	// by has to ride every span the grouping should reach, carrying that span's own
+	// value (ADR-0038 §1, §2). appendString turns absent into no attribute, so a
+	// non-MCP span emits nothing.
+	attrs = appendString(attrs, "wake.mcp_server", string(r.MCPServer))
 	if r.Source != nil {
 		attrs = appendString(attrs, "wake.source", string(*r.Source))
 	}
@@ -340,6 +353,11 @@ func spanAttributes(r record.Record, labels RepoLabels) []keyValue {
 	if r.DurationMS != nil {
 		// Gated on nil, never on the value. Emitting 0 for an unreported
 		// duration would turn "not measured" into "measured as instant".
+		//
+		// The number is request-to-result: from the instant the primitive was
+		// called to the instant its result came back. It includes scheduling and
+		// any human permission-approval wait, so a permission-gated call reads as
+		// slow — it is not tool execution time and is never described as it.
 		attrs = appendInt(attrs, "wake.duration_ms", *r.DurationMS)
 	}
 	// The session grain's totals. They are populated only on a session_end record,
@@ -477,8 +495,9 @@ func traceID(r record.Record) string {
 
 // spanID is where the record's EventID goes. EventID is mapped onto the wire by
 // derivation into spanId, not copied into a wake.* attribute — the span id is
-// the identity a receiver deduplicates on, which is precisely the job ADR-0004
-// gives the event id, so a second copy would be redundant, not safer.
+// the identity a receiver would deduplicate on, and the one a consumer that needs
+// exact counts must collapse on when its receiver does not — which is precisely the
+// job ADR-0004 gives the event id, so a second copy would be redundant, not safer.
 //
 // Truncating is safe because record.Validate has already run and guarantees 64
 // lowercase hex characters. A span id is 8 bytes: the first 16 hex chars.
@@ -504,8 +523,10 @@ func parentSpanID(r record.Record) string {
 // spanTimes renders the record's Timestamp and DurationMS as proto3 JSON
 // decimal strings, reporting false when the pair is not representable.
 //
-// Timestamp is mapped onto the wire by derivation into startTimeUnixNano rather
-// than as its own attribute. An unknown duration renders a zero-length span:
+// Timestamp is mapped onto the wire by derivation into endTimeUnixNano rather
+// than as its own attribute: a paired record is stamped from its tool_result
+// instant, so ts is when the invocation finished. The start is derived backwards
+// from it over the duration. An unknown duration renders a zero-length span:
 // end == start states "the harness did not report how long this took", where a
 // guessed duration would state a number nobody measured (ADR-0005's rule applied
 // to time — unknown is never filled in).
@@ -529,15 +550,28 @@ func spanTimes(r record.Record) (start, end string, ok bool) {
 	if sec < 0 || sec > maxUnixSecond {
 		return "", "", false
 	}
-	startNano := r.Timestamp.UTC().UnixNano()
-	endNano := startNano
+	// The record's ts is the span's END, not its start. complete stamps a paired
+	// record from the tool_result instant, so ts is when the invocation finished;
+	// adding a duration to it would draw every exported span running from its own
+	// finish time forward. The start is derived backwards instead, and the stored
+	// Timestamp is not touched — restamping it would change a field on every paired
+	// record, need a rebuild, and still not correct what has already been delivered.
+	endNano := r.Timestamp.UTC().UnixNano()
+	startNano := endNano
 	if r.DurationMS != nil {
-		// Checked before the multiply, not after: signed overflow would
-		// silently produce a negative end time.
-		if *r.DurationMS > (math.MaxInt64-startNano)/nanosPerMilli {
+		// Checked before the multiply, exactly as the addition was: signed overflow
+		// would silently produce a wrong time. The same comparison also bounds the
+		// subtraction — a duration no larger than endNano/nanosPerMilli cannot take
+		// the start below the epoch, which OTLP's unsigned nano fields cannot
+		// express at all. Either way the record is dropped and counted, never
+		// wrapped and never emitted with the duration quietly discarded (ADR-0027,
+		// plan §12).
+		//
+		// This guard is live for the first time now that the field is populated.
+		if *r.DurationMS > endNano/nanosPerMilli {
 			return "", "", false
 		}
-		endNano = startNano + *r.DurationMS*nanosPerMilli
+		startNano = endNano - *r.DurationMS*nanosPerMilli
 	}
 	return strconv.FormatInt(startNano, 10), strconv.FormatInt(endNano, 10), true
 }

@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"strconv"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -27,7 +28,7 @@ func init() { commands = append(commands, newDoctorCmd) }
 func newDoctorCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
-		Short: "Report what Wake's last scan and last hook change managed to do",
+		Short: "Show what Wake is collecting, and what it cannot read",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			paths, err := config.ResolvePaths()
@@ -41,6 +42,43 @@ func newDoctorCmd() *cobra.Command {
 			return writeDiagnosis(cmd.OutOrStdout(), paths, claudeDir)
 		},
 	}
+}
+
+// counterLine is one `key: count` line. It is a named type rather than an anonymous
+// struct because writeDiagnosis prints two groups of them with a derived line in
+// between.
+type counterLine struct {
+	key   string
+	value int
+}
+
+// writeCounters prints one group of counter lines.
+func writeCounters(out io.Writer, lines []counterLine) error {
+	for _, line := range lines {
+		if _, err := fmt.Fprintf(out, "%s: %d\n", line.key, line.value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeReasons prints one group of counter lines that read a word rather than a number
+// when no scan measured them.
+//
+// It holds no decision: which lines these are, and whether they were observed, are
+// health's (ADR-0001, plan §6.2). It is the same shape as the `last scan: never` line
+// above — a rendering choice made from a flag the layer below computed.
+func writeReasons(out io.Writer, lines []counterLine, observed bool) error {
+	for _, line := range lines {
+		value := health.SkippedUnobserved
+		if observed {
+			value = strconv.Itoa(line.value)
+		}
+		if _, err := fmt.Fprintf(out, "%s: %s\n", line.key, value); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // writeDiagnosis prints the counters and the one state word they imply.
@@ -82,6 +120,17 @@ func newDoctorCmd() *cobra.Command {
 // for the reason Diagnose argues. This line is what reports the loss, which is why it
 // prints whatever the state word says.
 //
+// The pending-subagent-run line sits between the two it must never be confused with. It
+// is beside `refused subagent runs` because both describe subagent runs, and directly
+// above `pending calls` because both describe something not final yet — and it is a
+// third line rather than part of either, because a run and a call resolve at different
+// boundaries: a call at its result, a run at its session's close. It is the unresolved
+// set the last scan's closing walk held, not the runs that scan newly deferred and not a
+// count of work waiting to be collected — health.Scan.PendingSubagentRuns states what it
+// does and does not mean. It prints whatever the state word says, and health.Diagnose is
+// where the argument for that lives — this function holds no decision (ADR-0001,
+// plan §6.2).
+//
 // The stale-record count and the store-rebuild word are two lines for the same reason:
 // the count says how many records the store holds that this build cannot read, and the
 // word says whether anything has re-derived them. The scan that found them may not have
@@ -105,6 +154,35 @@ func newDoctorCmd() *cobra.Command {
 // machine has no primitive for was never Wake's to collect. Every scan re-skips the
 // same built-ins, so a state word following that count could never change again — the
 // line is how it is reported instead.
+//
+// The collection-scope line sits directly under `skipped transcripts` because that
+// counter is the one whose meaning turns on it: the same machine, the same transcripts
+// and no consent change report 1041 skipped under the boundary-honouring scan and 143
+// under a scan of the whole history (DG-110), because a transcript that predates its
+// repository's consent instant derives nothing under one scope and derives records
+// under the other. Both numbers are right, and a reader with only one of them cannot
+// tell which question it answers. The counter loop is split around this line rather
+// than the line being appended after it, because the adjacency is the whole point. The
+// word is health.Diagnose's and not this function's, the same way `store rebuild` is
+// printed here and decided there: internal/cli only parses and prints (ADR-0001,
+// plan §6.2).
+//
+// The six skipped-reason lines sit *after* the collection-scope line rather than
+// between it and `skipped transcripts`, because DG-110's adjacency is the reason that
+// line exists at all and six lines between them would break it. The whole skipped
+// family is then contiguous. The third of them — a transcript from a linked worktree of
+// a repository this machine consented — is the line the breakdown exists for: on the
+// machine where the problem was found it was 223 of 1,422, nine days of collection the
+// user had asked for and did not get, invisible because one integer summed three
+// populations. It deliberately does not move the state word, for the reason
+// health.Diagnose argues about every standing fact: every scan re-classifies the same
+// directory, so a word following it could never change back. This line is what reports
+// the loss instead.
+//
+// `not observed` is never the same reading as `0` (ADR-0046): the six lines say
+// "nobody measured these" when no scan classified, and a real zero only when one did.
+// No key contains a slash — TestDoctorOutputNamesNoPathOrLabel reads any slash in this
+// output as a leaked path, and that check is worth more than the punctuation.
 func writeDiagnosis(out io.Writer, paths config.Paths, claudeDir string) error {
 	report, readErr := health.New(paths.HealthFile).Read()
 
@@ -121,17 +199,12 @@ func writeDiagnosis(out io.Writer, paths config.Paths, claudeDir string) error {
 
 	diagnosis := health.Diagnose(report, readErr, hookErr)
 
-	for _, line := range []struct {
-		key   string
-		value int
-	}{
+	if err := writeCounters(out, []counterLine{
 		{"hooks installed", installed},
 		{"hooks removed", report.Hooks.Removed},
 		{"owned hook groups kept", report.Hooks.KeptOwned},
-	} {
-		if _, err := fmt.Fprintf(out, "%s: %d\n", line.key, line.value); err != nil {
-			return err
-		}
+	}); err != nil {
+		return err
 	}
 
 	lastScan := "never"
@@ -141,14 +214,29 @@ func writeDiagnosis(out io.Writer, paths config.Paths, claudeDir string) error {
 	if _, err := fmt.Fprintf(out, "last scan: %s\n", lastScan); err != nil {
 		return err
 	}
-	for _, line := range []struct {
-		key   string
-		value int
-	}{
+	if err := writeCounters(out, []counterLine{
 		{"transcripts", report.Scan.Transcripts},
 		{"unreadable sources", report.Scan.Unreadable},
 		{"parse errors", report.Scan.ParseErrors},
 		{"skipped transcripts", report.Scan.Skipped},
+	}); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(out, "collection scope: %s\n", diagnosis.Scope); err != nil {
+		return err
+	}
+	skipped := health.SkippedByReason(report.Scan)
+	if err := writeReasons(out, []counterLine{
+		{"skipped transcripts not in a repository", skipped.NotARepository},
+		{"skipped transcripts in an unconsented repository", skipped.UnconsentedRepository},
+		{"skipped transcripts in an unregistered worktree of a consented repository", skipped.UnregisteredWorktree},
+		{"skipped transcripts outside the collection window", skipped.OutsideCollectionWindow},
+		{"skipped transcripts not classified", skipped.Unclassified},
+		{"skipped transcripts holding nothing terminal", skipped.NothingTerminal},
+	}, skipped.Observed); err != nil {
+		return err
+	}
+	if err := writeCounters(out, []counterLine{
 		{"events written", report.Scan.EventsWritten},
 		{"records from an earlier schema version", report.Scan.StaleRecords},
 		{"refused project entries", report.Scan.RefusedProjects},
@@ -156,14 +244,17 @@ func writeDiagnosis(out io.Writer, paths config.Paths, claudeDir string) error {
 		{"global boundary registrations refused", report.Scan.BoundaryRefused},
 		{"refused calls", report.Scan.RefusedCalls},
 		{"refused subagent runs", report.Scan.RefusedSubagentRuns},
+		{"pending subagent runs", report.Scan.PendingSubagentRuns},
 		{"pending calls", report.Scan.PendingCalls},
 		{"interrupted calls", report.Scan.InterruptedCalls},
 		{"ambiguous skill runs", report.Scan.AmbiguousSkillRuns},
 		{"skipped typed invocations", report.Scan.SkippedTypedInvocations},
-	} {
-		if _, err := fmt.Fprintf(out, "%s: %d\n", line.key, line.value); err != nil {
-			return err
-		}
+		// "call and result", not "call/result": TestDoctorOutputNamesNoPathOrLabel
+		// reads any slash in this output as a leaked path, and that check is worth
+		// more than the punctuation.
+		{"out-of-order call and result pairs", report.Scan.OutOfOrderPairs},
+	}); err != nil {
+		return err
 	}
 
 	if _, err := fmt.Fprintf(out, "store rebuild: %s\n", diagnosis.StoreRebuild); err != nil {

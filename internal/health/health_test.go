@@ -290,3 +290,152 @@ func TestEveryCounterFieldIsACountOrATime(t *testing.T) {
 		})
 	}
 }
+
+// A scan's counters and the scope that produced them travel together, or the pairing
+// is only true in memory: Skipped is the counter whose meaning turns on the scope, and
+// a JSON tag that never made it onto the field would drop the scope on the round trip
+// while every in-process assertion still passed.
+func TestAScanCarriesTheScopeItRanUnder(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		scope Scope
+	}{
+		{"the boundary-honouring scan", ScopeConsentedWindow},
+		{"a scan of the whole history", ScopeWholeHistory},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "health.json")
+			at := time.Now().UTC().Truncate(time.Second)
+			store := New(path)
+			if err := store.RecordScan(Scan{At: at, Skipped: 4, Scope: c.scope}); err != nil {
+				t.Fatalf("RecordScan() error = %v", err)
+			}
+
+			got, err := store.Read()
+			if err != nil {
+				t.Fatalf("Read() error = %v", err)
+			}
+			if got.Scan.Scope != c.scope {
+				t.Errorf("Scan.Scope = %v, want %v", got.Scan.Scope, c.scope)
+			}
+			if got.Scan.Skipped != 4 {
+				t.Errorf("Scan.Skipped = %d, want 4 — the counter the scope explains", got.Scan.Skipped)
+			}
+		})
+	}
+}
+
+// A version-7 file carries no scope, and its zero value here is a real one — the
+// consented window. Read as this format, a file written by a scan of the whole history
+// would report its Skipped under the other scope's name: not a number left
+// unexplained, but a number explained wrongly, which is worse. One machine, one
+// afternoon, no consent change: 1041 skipped under one scope and 143 under the other.
+//
+// Refusing it costs one scan's diagnostics on a file that is derived and non-precious
+// (ADR-0014), which is the trade every bump from 2 to 7 made.
+func TestReadRejectsAVersion7Report(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "health.json")
+	version7 := `{"version":7,"scan":{"at":"2026-08-17T10:00:00Z","transcripts":1200,"skipped":1041},` +
+		`"hooks":{"at":"2026-08-17T10:00:00Z","installed":2}}`
+	if err := os.WriteFile(path, []byte(version7), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	if _, err := New(path).Read(); err == nil {
+		t.Fatal("Read() error = nil, want a refusal for the version-7 format")
+	}
+}
+
+// A version-8 file carries no breakdown, and its zero value is not a real one.
+// SkippedClassified false is the honest reading of a file nobody classified — but only
+// if the flag is trusted, and a file written before the flag existed decodes it as
+// false for the same reason it decodes every count as zero. Read as this format it
+// would report "no worktree of a consented repository was skipped" for a scan that
+// never asked, which is the failure every bump since 2 has avoided.
+func TestReadRejectsAVersion8Report(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "health.json")
+	version8 := `{"version":8,"scan":{"at":"2026-08-17T10:00:00Z","transcripts":1422,"skipped":1041,"scope":1},` +
+		`"hooks":{"at":"2026-08-17T10:00:00Z","installed":2}}`
+	if err := os.WriteFile(path, []byte(version8), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	if _, err := New(path).Read(); err == nil {
+		t.Fatal("Read() error = nil, want a refusal for the version-8 format")
+	}
+}
+
+// A version-9 file carries no pending-subagent-run count. Read as this format it would
+// report 0 — an empty carry — for a measurement nobody took, and a user whose runs are
+// sitting unresolved in the carry would see a healthy scan and a confident zero. That is
+// the failure every bump since 2 has avoided.
+func TestReadRejectsAVersion9Report(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "health.json")
+	version9 := `{"version":9,"scan":{"at":"2026-09-11T10:00:00Z","transcripts":1422,"skipped":1041,` +
+		`"skipped_not_a_repository":1,"skipped_unconsented_repository":2,` +
+		`"skipped_unregistered_worktree":3,"skipped_outside_collection_window":4,` +
+		`"skipped_unclassified":5,"skipped_nothing_terminal":6,"skipped_classified":true,` +
+		`"scope":1},"hooks":{"at":"2026-09-11T10:00:00Z","installed":2}}`
+	if err := os.WriteFile(path, []byte(version9), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	if _, err := New(path).Read(); err == nil {
+		t.Fatal("Read() error = nil, want a refusal for the version-9 format")
+	}
+}
+
+// The carry's unresolved count travels to disk under its own key, or the counter is only
+// true in memory: a missing or duplicated JSON tag would drop it on the round trip, or
+// alias it onto PendingCalls, while every in-process assertion still passed. The two are
+// written with different values here for exactly that reason.
+func TestAScanCarriesItsPendingSubagentRunCount(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "health.json")
+	want := Scan{
+		At:                  time.Now().UTC().Truncate(time.Second),
+		PendingSubagentRuns: 7,
+		PendingCalls:        2,
+	}
+	store := New(path)
+	if err := store.RecordScan(want); err != nil {
+		t.Fatalf("RecordScan() error = %v", err)
+	}
+
+	got, err := store.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if got.Scan != want {
+		t.Errorf("Scan round-tripped as %+v, want %+v", got.Scan, want)
+	}
+}
+
+// The breakdown travels to disk with the counter it explains, or the pairing is only
+// true in memory: a JSON tag that never made it onto a field would drop that reason on
+// the round trip while every in-process assertion still passed.
+func TestAScanCarriesItsSkippedBreakdown(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "health.json")
+	want := Scan{
+		At:                             time.Now().UTC().Truncate(time.Second),
+		Skipped:                        21,
+		SkippedNotARepository:          1,
+		SkippedUnconsentedRepository:   2,
+		SkippedUnregisteredWorktree:    3,
+		SkippedOutsideCollectionWindow: 4,
+		SkippedUnclassified:            5,
+		SkippedNothingTerminal:         6,
+		SkippedClassified:              true,
+	}
+	store := New(path)
+	if err := store.RecordScan(want); err != nil {
+		t.Fatalf("RecordScan() error = %v", err)
+	}
+
+	got, err := store.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if got.Scan != want {
+		t.Errorf("Scan round-tripped as %+v, want %+v", got.Scan, want)
+	}
+}

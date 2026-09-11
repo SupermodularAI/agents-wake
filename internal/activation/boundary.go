@@ -10,8 +10,8 @@ import (
 	"github.com/SupermodularAI/agents-wake/internal/store"
 )
 
-// boundaryDiscovery collects the working directories one walk saw that the recorded
-// global root encloses and no recorded entry matched.
+// boundaryDiscovery collects the working directories one walk saw that no recorded
+// entry matched, on a machine with a collection boundary recorded.
 //
 // Observing is not registering (ADR-0032 §5): the set is collected on the derivation
 // path and acted on only after the walk has finished. Registering inside the resolver
@@ -31,17 +31,23 @@ func newBoundaryDiscovery(repos *config.Repos) *boundaryDiscovery {
 	return &boundaryDiscovery{repos: repos, seen: map[string]bool{}}
 }
 
-// observe records cwd when the recorded boundary strictly encloses it.
+// observe records cwd when it is a candidate for registration after the walk.
 //
-// With no boundary recorded WithinGlobalRoot is always false, so the set stays empty
-// and there is exactly one walk in the common case. The check is a pure string
-// operation over the snapshot — no stat, no git — so adding it to the derivation path
-// costs the resolver nothing it was not already allowed to spend (ADR-0019 §1).
+// The gate is the candidate test and not the admission test (ADR-0044 §1): a linked
+// worktree of a consented repository is admitted wherever on disk it lives, and where
+// one lives is a property of whichever tool manages them rather than of its path — so
+// no path test here could tell one from any other unmatched directory. Admission is
+// decided once, after the walk, by RegisterUnderGlobalRoot (ADR-0032 §5).
+//
+// With no boundary recorded OfferableUnderGlobalRoot is always false, so the set stays
+// empty and there is exactly one walk in the common case. The check is a pure string
+// operation over the snapshot — no stat, no git — so it costs the resolver nothing it
+// was not already allowed to spend (ADR-0019 §1, ADR-0044 §4).
 func (d *boundaryDiscovery) observe(cwd string) {
 	if d == nil || d.seen[cwd] {
 		return
 	}
-	if !d.repos.WithinGlobalRoot(cwd) {
+	if !d.repos.OfferableUnderGlobalRoot(cwd) {
 		return
 	}
 	d.seen[cwd] = true
@@ -64,11 +70,16 @@ func (d *boundaryDiscovery) pending() []string {
 // repositories discovered by the same walk must not disagree about when they were
 // consented.
 //
-// Every failure is soft and counted. "Could not read means collects nothing, never an
-// error that breaks a command" (plan §4.3) — a scan that stopped because one
-// discovered directory could not be registered would lose the rest of the batch and
-// the events it had already read. Counted rather than swallowed, because a silent
-// refusal is indistinguishable from a machine with nothing to discover.
+// Every failure is soft. "Could not read means collects nothing, never an error that
+// breaks a command" (plan §4.3) — a scan that stopped because one discovered directory
+// could not be registered would lose the rest of the batch and the events it had
+// already read.
+//
+// Each failure that describes collection this machine lost is also counted, because a
+// silent refusal is indistinguishable from a machine with nothing to discover. The one
+// that describes no loss is not: a directory the second arm does not admit — not a
+// linked worktree, or a worktree of a repository nobody consented — was never going to
+// be collected (see the case below).
 func registerDiscovered(repos *config.Repos, dirs []string, from time.Time) (registered, gone, refused int) {
 	for _, dir := range dirs {
 		_, err := repos.RegisterUnderGlobalRoot(dir, from)
@@ -79,11 +90,28 @@ func registerDiscovered(repos *config.Repos, dirs []string, from time.Time) (reg
 			// An honest zero: there is nothing left there to read, so nothing was lost
 			// by not registering it.
 			gone++
+		case errors.Is(err, config.ErrNotAnAdmittedWorktree):
+			// The boundary working, not a failure. ADR-0044 §1 widened the candidate set
+			// to every unmatched directory, because where a linked worktree lives cannot
+			// be decided from its path — so this is now the ordinary answer for the many
+			// directories that are not one. Counting it as refused would report
+			// "collection that was lost" about a directory nobody consented, and would
+			// pin a non-zero counter on every machine that has ever run a session
+			// outside its boundary. They are counted, by reason, in classifySkipped —
+			// as a classification that registers nothing rather than as a refusal,
+			// because a refusal here is the boundary working (ADR-0047 §1, §2).
+			//
+			// It is this sentinel and never ErrOutsideGlobalRoot, which is the narrower
+			// fact that a discovered root left the bound its own consent rests on — a
+			// directory the user did consent, carried by no number. Skipping that one
+			// too would hide the case ADR-0044 was written to end.
+			continue
 		default:
-			// A NestedRootError, a boundary that moved out from under the directory, an
-			// entry this build could not read back. The sessions were readable and no
-			// number carries them, which is why the counter joins doctor's "collects
-			// nothing" arm.
+			// A NestedRootError, a discovered root that escaped the boundary or the
+			// worktree the probe named, a boundary that moved out from under the
+			// directory, an entry this build could not read back. The sessions were
+			// readable and no number carries them, which is why the counter joins
+			// doctor's "collects nothing" arm.
 			refused++
 		}
 	}
@@ -112,21 +140,34 @@ func registerDiscovered(repos *config.Repos, dirs []string, from time.Time) (reg
 // not a property of the source but of the work done, so the two walks' contributions
 // are summed. Taking the second walk's alone would report zero events written for a
 // scan that wrote plenty on the first, and doctor would say "collects zero".
+// The skipped breakdown follows the surviving walk's counters for the same reason they
+// are replaced wholesale: a breakdown of one walk printed beside another walk's total
+// would be two answers on one screen, and the six reasons would not sum to the number
+// above them. It is computed once, here, after the walks — never inside one — so no git
+// call reaches the derivation path (ADR-0019 §1, ADR-0044 §4, ADR-0047 §3). A walk that
+// returned an error is left unclassified, which is honest: it did not finish, so it
+// measured nothing.
+//
 // The two stale-spool counters are set here rather than inside either walk, for the
 // reason the paragraph above gives: a walk's counters describe the source it read, and
 // these describe the store it wrote into. Setting them at the one return point is also
 // what keeps them from being dropped when the second walk's counters replace the
-// first's.
+// first's. The scope is set at the same point and for a related reason: it describes
+// the scan rather than the source a walk read, and there is exactly one place that
+// still knows it once the walks have returned.
 func scanWithBoundary(paths config.Paths, repos *config.Repos, claudeDir string, events *store.Store, installed claudecode.Installed, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope) (int, health.Scan, error) {
 	found, rebuilt, err := rebuildStaleSpool(events, scope)
 	if err != nil {
 		// A spool this build cannot read and could not replace. At is stamped so the
 		// failed scan is reported as a scan that read nothing rather than as one that
-		// never ran; the error itself is what the caller surfaces.
-		return 0, health.Scan{At: time.Now().UTC()}, err
+		// never ran; the error itself is what the caller surfaces. The scope is stamped
+		// here too: this scan ran under one, it is recorded whether it succeeded or
+		// not, and a failed scan reported under the other scope would be read as a
+		// number about a question it never asked.
+		return 0, health.Scan{At: time.Now().UTC(), Scope: scope.health()}, err
 	}
 	written, scan, err := scanBoundaryWalks(paths, repos, claudeDir, events, installed, stale, idle, scope)
-	scan.StaleRecords, scan.StaleRebuilt = found, rebuilt
+	scan.StaleRecords, scan.StaleRebuilt, scan.Scope = found, rebuilt, scope.health()
 	return written, scan, err
 }
 
@@ -189,12 +230,15 @@ func rebuildStaleSpool(events *store.Store, scope collectionScope) (found int, r
 
 func scanBoundaryWalks(paths config.Paths, repos *config.Repos, claudeDir string, events *store.Store, installed claudecode.Installed, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope) (int, health.Scan, error) {
 	discovery := newBoundaryDiscovery(repos)
-	written, scan, err := importHistory(repos, claudeDir, events, installed, stale, idle, scope, discovery)
+	written, scan, skipped, err := importHistory(repos, claudeDir, events, installed, stale, idle, scope, discovery, paths)
 	if err != nil {
+		// Unclassified on the way out, and correctly: the walk did not finish, so it
+		// measured nothing to classify and doctor reads the breakdown as "not observed".
 		return written, scan, err
 	}
 	pending := discovery.pending()
 	if len(pending) == 0 {
+		classifySkipped(repos, skipped, &scan)
 		return written, scan, nil
 	}
 
@@ -202,6 +246,7 @@ func scanBoundaryWalks(paths config.Paths, repos *config.Repos, claudeDir string
 	registered, gone, refused := registerDiscovered(repos, pending, time.Now().UTC())
 	scan.BoundarySkipped, scan.BoundaryRefused = gone, refused
 	if registered == 0 {
+		classifySkipped(repos, skipped, &scan)
 		return written, scan, nil
 	}
 
@@ -221,11 +266,14 @@ func scanBoundaryWalks(paths config.Paths, repos *config.Repos, claudeDir string
 	// command's discovery picks it up, and the skip counter is what reports the gap
 	// meanwhile — the same fallibility ADR-0036 §3 puts that counter there for. Building
 	// a second set here would pay for discovery twice on the hook-fired path (ADR-0016).
-	second, secondScan, err := importHistory(reopened, claudeDir, events, installed, stale, idle, scope, nil)
+	second, secondScan, secondSkipped, err := importHistory(reopened, claudeDir, events, installed, stale, idle, scope, nil, paths)
 	if err != nil {
 		return written + second, scan, err
 	}
 	secondScan.EventsWritten += scan.EventsWritten
 	secondScan.BoundarySkipped, secondScan.BoundaryRefused = gone, refused
+	// The second walk's grouping, against the table the second walk ran under. The
+	// first walk's is discarded here exactly as its counters are.
+	classifySkipped(reopened, secondSkipped, &secondScan)
 	return written + second, secondScan, nil
 }

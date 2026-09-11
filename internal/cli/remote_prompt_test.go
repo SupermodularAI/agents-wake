@@ -297,10 +297,51 @@ func TestANonHTTPURLIsRefusedAndRePrompted(t *testing.T) {
 	if endpoint != ok {
 		t.Errorf("confirmEndpoint() = %q, want %q", endpoint, ok)
 	}
-	if !strings.Contains(buf.String(), "not an absolute http:// or https:// URL") {
+	if !strings.Contains(buf.String(), "an http:// URL to a loopback host") {
 		t.Errorf("the refusal never named the rule: %q", buf.String())
 	}
 	forbid(t, fake.transcript()+buf.String(), "ftp://api.example.com")
+}
+
+// The confirmation shares config.EndpointHost with the write path, so it refuses
+// exactly what the store refuses — a cleartext URL to a remote host included.
+// The refusal names the rule and, as above, never quotes the value back.
+func TestACleartextURLToARemoteHostIsRefusedAndRePrompted(t *testing.T) {
+	const ok = "https://ok.example.com/v1/traces"
+	fake := &fakeTerminal{answers: []string{"http://api.example.com/v1/traces", ok, "y"}}
+	var buf bytes.Buffer
+
+	endpoint, err := confirmEndpoint(fake, &buf, "")
+	if err != nil {
+		t.Fatalf("confirmEndpoint() = %v", err)
+	}
+	if endpoint != ok {
+		t.Errorf("confirmEndpoint() = %q, want %q", endpoint, ok)
+	}
+	if !strings.Contains(buf.String(), "an http:// URL to a loopback host") {
+		t.Errorf("the refusal never named the rule: %q", buf.String())
+	}
+	forbid(t, fake.transcript()+buf.String(), "api.example.com/v1/traces")
+}
+
+// The other half of the same rule: a self-hosted collector on this machine is
+// confirmed like any other destination, and what is shown is its bare host.
+func TestALoopbackHTTPURLIsConfirmed(t *testing.T) {
+	const loopback = "http://127.0.0.1:4318/v1/traces"
+	fake := &fakeTerminal{answers: []string{"y"}}
+	var buf bytes.Buffer
+
+	endpoint, err := confirmEndpoint(fake, &buf, loopback)
+	if err != nil {
+		t.Fatalf("confirmEndpoint() = %v", err)
+	}
+	if endpoint != loopback {
+		t.Errorf("confirmEndpoint() = %q, want %q", endpoint, loopback)
+	}
+	if !strings.Contains(fake.transcript(), "127.0.0.1:4318") {
+		t.Errorf("the confirmation never showed the host: %q", fake.transcript())
+	}
+	forbid(t, fake.transcript()+buf.String(), "/v1/traces")
 }
 
 // A Ctrl-D ends the wizard with nothing written. This is also what bounds the

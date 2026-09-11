@@ -4,7 +4,11 @@
 // of the local map (ADR-0014 § Decision).
 package repolabel
 
-import "github.com/SupermodularAI/agents-wake/internal/record"
+import (
+	"strconv"
+
+	"github.com/SupermodularAI/agents-wake/internal/record"
+)
 
 // Labels maps a repository id to the readable label recorded for it on this
 // machine. It is resolved by internal/cli through config.ProjectLabels and
@@ -19,7 +23,7 @@ type Labels map[string]string
 // to keep every repository on one machine distinguishable.
 const idPrefix = 12
 
-// Display returns what a repository column shows for repo.
+// Display returns what the PROJECT column shows for repo.
 //
 // Never blank and never invented (ADR-0007; ADR-0033 §3; plan §4.5 as DG-93
 // applies it). Three cases, in order:
@@ -49,4 +53,29 @@ func (l Labels) Display(repo record.Hash) string {
 		id = id[:idPrefix]
 	}
 	return "repo-" + id
+}
+
+// DisplayAll returns what the PROJECT column shows for a row whose invocations
+// spanned repos. Three cases, in order:
+//
+//   - none — Display's deliberate dash: nothing invoked it, so there is no
+//     project to name (ADR-0002).
+//   - one — Display's answer for it, so a cell that names a project has exactly
+//     one definition rather than two.
+//   - several — how many, never one of them. Naming one would report it as the
+//     only project the primitive was used in, which is the misreport a
+//     per-repository row grain used to make (ADR-0042).
+//
+// The count renders as a single whitespace-free token by construction: the cell
+// is read by field position out of a whitespace-separated table, so "4 projects"
+// would shift every column after it.
+func (l Labels) DisplayAll(repos []record.Hash) string {
+	switch len(repos) {
+	case 0:
+		return l.Display("")
+	case 1:
+		return l.Display(repos[0])
+	default:
+		return strconv.Itoa(len(repos)) + "-projects"
+	}
 }

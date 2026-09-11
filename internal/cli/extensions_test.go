@@ -35,6 +35,10 @@ func TestEachSeamIsRegisteredExactlyOnce(t *testing.T) {
 // this snapshot: a build that ordered them differently fails here rather than shipping
 // a doctor whose sections moved.
 //
+// The collection-scope line sits between `skipped transcripts` and `events written`
+// rather than at the end: it is what says which question the skipped count answers, and
+// a fresh install has no scan to describe, so it reads "not recorded" here (DG-110).
+//
 // isolateRemote rather than isolate, because isolate does not clear
 // WAKE_REMOTE_AUTHORIZATION: a developer who exports it would otherwise see
 // `remote credential: set` and a failure that says nothing about the code.
@@ -57,6 +61,13 @@ func TestDoctorOutputOnAFreshInstall(t *testing.T) {
 		"unreadable sources: 0\n" +
 		"parse errors: 0\n" +
 		"skipped transcripts: 0\n" +
+		"collection scope: not recorded\n" +
+		"skipped transcripts not in a repository: not observed\n" +
+		"skipped transcripts in an unconsented repository: not observed\n" +
+		"skipped transcripts in an unregistered worktree of a consented repository: not observed\n" +
+		"skipped transcripts outside the collection window: not observed\n" +
+		"skipped transcripts not classified: not observed\n" +
+		"skipped transcripts holding nothing terminal: not observed\n" +
 		"events written: 0\n" +
 		"records from an earlier schema version: 0\n" +
 		"refused project entries: 0\n" +
@@ -64,10 +75,12 @@ func TestDoctorOutputOnAFreshInstall(t *testing.T) {
 		"global boundary registrations refused: 0\n" +
 		"refused calls: 0\n" +
 		"refused subagent runs: 0\n" +
+		"pending subagent runs: 0\n" +
 		"pending calls: 0\n" +
 		"interrupted calls: 0\n" +
 		"ambiguous skill runs: 0\n" +
 		"skipped typed invocations: 0\n" +
+		"out-of-order call and result pairs: 0\n" +
 		"store rebuild: not needed\n" +
 		"integration: never scanned\n" +
 		"global boundary: not set\n" +

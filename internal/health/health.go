@@ -13,8 +13,11 @@
 // ADR-0007 applied to diagnostics). A test asserts the field types, because the
 // temptation a later change will feel is to add "and here is why" as a string. A bool
 // is admitted on the same terms as an int and no looser — two values, neither of them
-// text — and only for a fact that is a yes or a no rather than a count. The
-// state word `doctor` prints is Diagnose's return value derived over these counters
+// text — and only for a fact that is a yes or a no rather than a count. A defined int
+// enum is admitted on those same terms: named values, bounded, none of them text. There
+// is one, Scope, and it says which of the two collection scopes produced the counters
+// beside it — a fact with exactly two answers, neither of which a count could carry.
+// The state word `doctor` prints is Diagnose's return value derived over these counters
 // on every read, and never a field in the file.
 //
 // The file is derived and non-precious. It lives under the data root, and deleting
@@ -69,7 +72,35 @@ import (
 // version-6 file read as this format would report 0 for a counter nobody measured, and
 // it is the only line that says a typed invocation named something this machine has no
 // primitive for. Same failure, same remedy, same cost.
-const reportVersion = 7
+//
+// Bumped to 8 when the scan gained the collection scope that produced its counters
+// (DG-110): a version-7 file carries no scope, and the zero value here is a real one —
+// ScopeConsentedWindow. Skipped is precisely the counter that turns on it, because a
+// transcript whose events all predate its repository's consent instant derives nothing
+// under one scope and derives records under the other: one machine, one afternoon and
+// no consent change reported 1041 skipped under the boundary-honouring scan and 143
+// under a scan of the whole history. So a defaulted scope would not leave a number
+// unexplained, it would explain it wrongly, which is the worse half of the failure the
+// bump to 2 avoided. Same remedy, and the same cost — one scan's diagnostics, on a file
+// that is derived and non-precious (ADR-0014).
+// Bumped to 9 when the scan gained the skipped-transcript breakdown and the flag
+// saying whether it classified at all (DG-114): a version-8 file carries no breakdown,
+// and its zero value is not a real one. SkippedClassified false is the honest reading
+// of a file nobody classified — but only if the flag is trusted, and a file written
+// before the flag existed decodes it as false for exactly the same reason it decodes
+// every count as zero. Read as this format it would report "no worktree of a consented
+// repository was skipped" for a scan that never asked, which is the failure the bump to
+// 2 avoided. Same remedy, and the same cost — one scan's diagnostics, on a file that is
+// derived and non-precious (ADR-0014).
+//
+// Bumped to 10 when the scan gained the pending-subagent-run counter (DG-115): a
+// version-9 file carries no such count, and read as this format it would report 0 — an
+// empty carry — for a measurement nobody took. That is the failure the bump to 2
+// avoided, and it is the one this counter exists to close: a user whose runs are sitting
+// unresolved in the carry would see a healthy scan and a confident zero.
+// Same remedy, and the same cost — one scan's diagnostics, on a file that is derived
+// and non-precious (ADR-0014).
+const reportVersion = 10
 
 // reportFileMode is the mode the counter file is written with. It holds no path and
 // no label, but it is state about this user's machine and the rest of the local
@@ -97,13 +128,65 @@ type Report struct {
 // would make one historical read failure mark every later clean scan as dirty,
 // destroying the distinction this package exists to draw.
 type Scan struct {
-	At              time.Time `json:"at"`
-	Transcripts     int       `json:"transcripts"`
-	Unreadable      int       `json:"unreadable"`
-	ParseErrors     int       `json:"parse_errors"`
-	Skipped         int       `json:"skipped"`
-	EventsWritten   int       `json:"events_written"`
-	RefusedProjects int       `json:"refused_projects"`
+	At          time.Time `json:"at"`
+	Transcripts int       `json:"transcripts"`
+	Unreadable  int       `json:"unreadable"`
+	ParseErrors int       `json:"parse_errors"`
+	// Skipped counts transcripts a scan read successfully that yielded no terminal
+	// event. It is an honest zero and never a failure — and it summed three unrelated
+	// populations, which is why the six counters below break it down: a transcript from
+	// a plain directory nobody consented, one from a repository nobody consented, and
+	// one from a linked worktree of a repository the user did consent are three
+	// different facts, and only the third describes collection the user asked for and
+	// did not get. The six partition this number exactly.
+	Skipped int `json:"skipped"`
+	// SkippedNotARepository counts them for a working directory git answered was inside
+	// no working tree. The ordinary case on any machine that runs agents outside a
+	// checkout, and no loss: those sessions were never attributable to a repository.
+	SkippedNotARepository int `json:"skipped_not_a_repository"`
+	// SkippedUnconsentedRepository counts them for a working directory inside a
+	// repository this machine has not consented — including a linked worktree of one.
+	// No loss either: nobody asked Wake to collect it.
+	SkippedUnconsentedRepository int `json:"skipped_unconsented_repository"`
+	// SkippedUnregisteredWorktree counts them for a working directory inside a linked
+	// worktree whose repository this machine *did* consent, and it is the line this
+	// breakdown exists for. On the machine where the problem was found it was 223 of
+	// 1,422 transcripts: nine days of collection the user had asked for, lost, while
+	// every counter beside it read healthy — because one integer summed three
+	// populations and this one was invisible inside it (ADR-0047 §1).
+	//
+	// It deliberately does not move Diagnose's state word, on the same standing-fact
+	// argument BoundaryRefused carries: there is no incremental cursor, so every scan
+	// re-classifies the same directory and re-counts the same transcripts, and a state
+	// word following this counter could never change back. This line is what reports
+	// the loss instead, which is why it prints whatever the state word says.
+	SkippedUnregisteredWorktree int `json:"skipped_unregistered_worktree"`
+	// SkippedOutsideCollectionWindow counts them for a working directory the recorded
+	// table does match — so consent is not what skipped the transcript; the window is.
+	// Its events predate the instant collection began for that repository (ADR-0024,
+	// ADR-0025), which is the population Scope was added for and now has its own line.
+	SkippedOutsideCollectionWindow int `json:"skipped_outside_collection_window"`
+	// SkippedUnclassified counts them for a working directory nothing could answer
+	// about: the directory is gone, or git could not be run, timed out, or answered a
+	// shape this build cannot read. ADR-0047 §4 — never a default bucket. It is also
+	// the zero value of the classification, so a path that forgets to classify lands
+	// here rather than in a reason it did not measure.
+	SkippedUnclassified int `json:"skipped_unclassified"`
+	// SkippedNothingTerminal counts them where no working directory was declined at
+	// all: the transcript resolved as consented and still produced nothing, because
+	// every call in it is unterminated and not yet stale (ADR-0015), or because it
+	// carried no usable working directory to decline.
+	SkippedNothingTerminal int `json:"skipped_nothing_terminal"`
+	// SkippedClassified is whether this scan classified the transcripts it skipped at
+	// all. A scan whose walk did not finish did not, and its zeroes are not zeroes:
+	// doctor renders the six counters above as "not observed" rather than as 0, which
+	// is ADR-0046's rule and the distinction ADR-0010 asks doctor to draw.
+	//
+	// A bool on StaleRebuilt's stated terms — a yes-or-no fact an int would have to
+	// encode as a count of something it does not count.
+	SkippedClassified bool `json:"skipped_classified"`
+	EventsWritten     int  `json:"events_written"`
+	RefusedProjects   int  `json:"refused_projects"`
 	// RefusedCalls counts primitive invocations a reader found but could not
 	// derive a valid record from — it could not name the primitive, or a bounded
 	// dimension such as the entrypoint carried a value outside Wake's vocabulary:
@@ -132,6 +215,42 @@ type Scan struct {
 	// release will ever name them. So it is deliberately not one of Diagnose's "collects
 	// nothing" reasons: a state word driven by this counter could never change again.
 	RefusedSubagentRuns int `json:"refused_subagent_runs"`
+	// PendingSubagentRuns counts the subagent runs the last scan's closing walk still
+	// held unresolved: anchored — by that scan, or by an earlier one whose carry it
+	// restored — and not judged, because no scan has observed the session that would
+	// judge them close. Not lost collection and not an invocation count: the carry is
+	// what lets a later scan resolve them (ADR-0015). It is deliberately not one of
+	// Diagnose's "collects nothing" reasons.
+	//
+	// It is a separate counter from PendingCalls and never folded into it. An
+	// unterminated tool call resolves when its result is written; a subagent run
+	// resolves when its session closes (ADR-0036 §2, ADR-0023). Two boundaries, two
+	// populations, and one integer summing unlike populations is what hides the one
+	// that matters (ADR-0047 §1).
+	//
+	// It counts pending *runs* only, never the carried children beside them: a child is
+	// a derived record awaiting a parent, not an unobserved invocation, and summing the
+	// two would be the same conflation one line up.
+	//
+	// It is the unresolved set the last scan's closing walk held, not the work that scan
+	// newly did: the set includes runs earlier scans anchored and this one restored from
+	// the carry, and with no incremental cursor (T020, T102) every scan re-reads the whole
+	// history. Reading it as "this scan deferred N runs" would overstate it. It is not the
+	// size of pending.json either — that file's merge is union-only and also holds
+	// resolved runs and the carried children, so that is the larger number.
+	//
+	// It is not a count of work waiting to be collected, and on an old machine it is
+	// mostly not that. A run leaves the set only when a scan observes its session close,
+	// and nothing else evicts it: pending.json's merge is union-only, so a resolved run
+	// stays in the carry file and every later scan restores it. While the transcripts are
+	// still there that costs nothing — the scan observes the session again and judges the
+	// run again — but once the harness has pruned them the restored run can never be
+	// judged, because SessionState.Closed reports false for a session it never observed.
+	// From then on it is counted by every scan with its record already in the store
+	// (activation's TestThePendingCarryReadmitsARunItAlreadyResolved). So the number does
+	// not fall back to zero by itself and grows over a machine's life; read it as the
+	// size of the carry's unresolved set, never as outstanding work.
+	PendingSubagentRuns int `json:"pending_subagent_runs"`
 	// PendingCalls counts tool calls the last scan found unterminated whose session is
 	// still inside the staleness window: a number that is not final yet, not collection
 	// that was lost (ADR-0015). It is deliberately not one of Diagnose's
@@ -175,17 +294,52 @@ type Scan struct {
 	// written, and a state word that can never change again is not a diagnosis (ADR-0036
 	// §3, plan §3.3, §12). See claudecode.Result.SkippedTypedInvocations and Diagnose.
 	SkippedTypedInvocations int `json:"skipped_typed_invocations"`
-	// BoundarySkipped counts directories a scan discovered under the recorded global
-	// root and did not register because the directory no longer exists (ADR-0032
-	// Consequences). It is an honest zero, not lost collection: there is nothing left
-	// there to read, so it is deliberately not one of Diagnose's "collects nothing"
-	// reasons — the same reason Skipped is not.
+	// OutOfOrderPairs counts tool calls the last scan terminated whose result instant
+	// preceded their own call instant. The pair measured no interval, so the record
+	// carries a nil duration rather than a clamped 0 — ADR-0027 reserves a wire-level
+	// 0 for a genuine zero-duration call, delivered into a receiver store that can
+	// never be rebuilt. The invocation itself is in the store and is counted by
+	// EventsWritten.
+	//
+	// It is timestamp order, not the order the two lines were written in: a
+	// tool_result written before its own tool_use is an ordinary out-of-order write
+	// the reader pairs correctly and does not count here.
+	//
+	// It is uncertainty about one number on a record that exists, not lost collection
+	// and not an invocation count, and it is deliberately not one of Diagnose's
+	// "collects nothing" reasons: with no incremental cursor every scan re-reads the
+	// same transcript and re-counts the same pairs, so a state word following it could
+	// never change back.
+	OutOfOrderPairs int `json:"out_of_order_pairs"`
+	// BoundarySkipped counts working directories a scan offered to registration under
+	// the recorded global root and did not register because the directory no longer
+	// exists (ADR-0032 Consequences). It is an honest zero, not lost collection: there
+	// is nothing left there to read, so it is deliberately not one of Diagnose's
+	// "collects nothing" reasons — the same reason Skipped is not.
+	//
+	// Only directories the boundary encloses reach it. A vanished directory outside the
+	// boundary fails ADR-0044 §1's probe before consent is decided — git cannot answer
+	// about a directory that is not there — so it is turned away as not admitted and
+	// skipped without being counted at all.
 	BoundarySkipped int `json:"boundary_skipped"`
-	// BoundaryRefused counts directories a scan discovered under the recorded global
-	// root and could not register — most often a root that nests with one already
-	// recorded (ADR-0019 §5), and otherwise a discovered root the boundary does not
-	// enclose. The sessions in it were readable and no number carries them, so this is
-	// collection that was lost and the counter is what reports it (plan §3.3, §12).
+	// BoundaryRefused counts working directories a scan offered to registration under
+	// the recorded global root and could not register — most often a root that nests
+	// with one already recorded (ADR-0019 §5), and otherwise a discovered root that
+	// left the bound its own admission rests on: the boundary, for a directory the
+	// boundary encloses, and the worktree the probe named, for a linked worktree of a
+	// consented repository (ADR-0044 §1). The sessions in it were readable and no
+	// number carries them, so this is collection that was lost and the counter is what
+	// reports it (plan §3.3, §12).
+	//
+	// What it does not count is the directory that is simply not admitted. Since
+	// ADR-0044 §1 the offered set is every working directory no recorded entry matched
+	// rather than only those under the boundary, and the ordinary answer for one that
+	// is not a linked worktree of a consented repository is a refusal about a directory
+	// nobody consented — no loss, and counting it here would pin this counter non-zero
+	// on every machine that has ever run a session outside its boundary. That
+	// population is counted by reason instead, in the skipped breakdown above, as a
+	// classification that registers nothing rather than as a refusal (ADR-0047 §1);
+	// SkippedUnregisteredWorktree is the line inside it that does describe loss.
 	//
 	// It is deliberately not one of Diagnose's "collects nothing" reasons, and that
 	// exclusion is argued where the arm is: every scan re-observes the same directory
@@ -221,7 +375,42 @@ type Scan struct {
 	// that is still owed is: those records are in the store and no surface can read
 	// them, which is the definition that arm exists for.
 	StaleRebuilt bool `json:"stale_rebuilt"`
+	// Scope is which collection scope produced the counters above, and Skipped is the
+	// counter that needs it: a transcript whose events all predate its repository's
+	// consent instant derives nothing under ScopeConsentedWindow and derives records
+	// under ScopeWholeHistory, so one machine's unchanged history reports a different
+	// Skipped depending only on which scan ran — 1041 against 143 in one afternoon
+	// (DG-110). Both numbers are right; without this field a reader cannot tell which
+	// question either of them answers.
+	//
+	// It is stamped by the one function that already carries the scope
+	// (activation.scanWithBoundary) and is never derived from the counters.
+	Scope Scope `json:"scope"`
 }
+
+// Scope is which of the two collection scopes a scan ran under, and it is exactly
+// one of two.
+//
+// A defined int rather than a string, for the reason the package comment gives: this
+// file carries counts, flags and bounded values and never text (ADR-0007 applied to
+// diagnostics). internal/health owns it rather than sharing internal/activation's own
+// collectionScope, because internal/activation imports this package and the reverse
+// import would be a cycle; the two are mapped at the one place a scan is recorded.
+//
+// Its zero value is a real scope, the way StaleRebuilt's false is a real answer, so a
+// file written by a format that did not carry it must never be read as this one.
+// reportVersion 8 is what refuses it.
+type Scope int
+
+const (
+	// ScopeConsentedWindow is the scan nobody asked for — the one a hook fires —
+	// which collects inside each repository's recorded boundary (ADR-0024, ADR-0025).
+	ScopeConsentedWindow Scope = iota
+	// ScopeWholeHistory is the scan the user asked for: `wake init --full`,
+	// `wake ingest` and `wake ingest --rebuild`, which import everything the harness
+	// holds for a consented repository.
+	ScopeWholeHistory
+)
 
 // Hooks is what the last `init` or `remove` managed to do. KeptOwned is the partial
 // state the ticket asks to surface: a group carrying Wake's marker that `remove`

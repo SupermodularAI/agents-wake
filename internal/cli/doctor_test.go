@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -19,7 +21,7 @@ func TestDoctorReportsNeverScannedOnAFreshInstall(t *testing.T) {
 		t.Fatalf("doctor error = %v", err)
 	}
 
-	for _, want := range []string{"integration: never scanned", "last scan: never"} {
+	for _, want := range []string{"integration: never scanned", "last scan: never", "collection scope: not recorded"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output is missing %q:\n%s", want, out)
 		}
@@ -106,6 +108,89 @@ func TestDoctorReportsRefusedSubagentRunsWithoutBlindingTheState(t *testing.T) {
 		t.Fatalf("doctor error = %v", err)
 	}
 	for _, want := range []string{"refused subagent runs: 2", "integration: collecting"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output is missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// A subagent run the scan could not resolve is carried to the next scan, not lost, so it
+// gets its own line and deliberately does not move the state word: nothing was lost, and
+// that reason carries the exclusion on its own (health.Diagnose, ADR-0015). It is not
+// excluded for being transient — it is not one. A run leaves the carry only when a scan
+// observes its session close, so this counter sits above zero on a machine collecting
+// normally (activation's TestThePendingCarryReadmitsARunItAlreadyResolved), which is one
+// more reason to keep it out of the arm rather than a reason to fold it in.
+func TestDoctorReportsPendingSubagentRunsWithoutBlindingTheState(t *testing.T) {
+	paths := isolate(t)
+	if err := health.New(paths.HealthFile).RecordScan(health.Scan{
+		At: time.Now().UTC(), Transcripts: 2, EventsWritten: 6, PendingSubagentRuns: 4,
+	}); err != nil {
+		t.Fatalf("RecordScan() error = %v", err)
+	}
+
+	out, _, err := runSplit(t, "doctor")
+	if err != nil {
+		t.Fatalf("doctor error = %v", err)
+	}
+	for _, want := range []string{"pending subagent runs: 4", "integration: collecting"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output is missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "collects nothing") {
+		t.Errorf("a pending subagent run was reported as lost collection:\n%s", out)
+	}
+}
+
+// Two lines, two populations. A tool call resolves when its result is written; a
+// subagent run resolves when its session closes. The values differ here so a merged or
+// aliased field cannot pass, and each key must own exactly one line of its own — one
+// integer summing unlike populations is what hides the one that matters (ADR-0047 §1).
+func TestDoctorDoesNotConflatePendingSubagentRunsWithPendingCalls(t *testing.T) {
+	paths := isolate(t)
+	if err := health.New(paths.HealthFile).RecordScan(health.Scan{
+		At: time.Now().UTC(), Transcripts: 2, EventsWritten: 6, PendingCalls: 2, PendingSubagentRuns: 5,
+	}); err != nil {
+		t.Fatalf("RecordScan() error = %v", err)
+	}
+
+	out, _, err := runSplit(t, "doctor")
+	if err != nil {
+		t.Fatalf("doctor error = %v", err)
+	}
+	lines := strings.Split(out, "\n")
+	for _, want := range []string{"pending calls: 2", "pending subagent runs: 5"} {
+		count := 0
+		for _, line := range lines {
+			if line == want {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf("found %d lines equal to %q, want exactly 1:\n%s", count, want, out)
+		}
+	}
+}
+
+// A call and its result whose instants came back out of order is a number that
+// could not be measured on a record that exists — not lost collection. It gets its
+// own line and deliberately does not blind the state word: with no incremental
+// cursor every scan re-reads the same transcript and re-counts the same pairs, so a
+// state word following it would pin the machine to "collects nothing" for good.
+func TestDoctorReportsOutOfOrderPairsWithoutBlindingTheState(t *testing.T) {
+	paths := isolate(t)
+	if err := health.New(paths.HealthFile).RecordScan(health.Scan{
+		At: time.Now().UTC(), Transcripts: 1, EventsWritten: 6, OutOfOrderPairs: 3,
+	}); err != nil {
+		t.Fatalf("RecordScan() error = %v", err)
+	}
+
+	out, _, err := runSplit(t, "doctor")
+	if err != nil {
+		t.Fatalf("doctor error = %v", err)
+	}
+	for _, want := range []string{"out-of-order call and result pairs: 3", "integration: collecting"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output is missing %q:\n%s", want, out)
 		}
@@ -263,7 +348,15 @@ func TestDoctorOutputNamesNoPathOrLabel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
-	if recordErr := health.New(paths.HealthFile).RecordScan(health.Scan{At: time.Now().UTC(), Transcripts: 2}); recordErr != nil {
+	// The breakdown is recorded non-zero, so the no-slash and no-marker assertions
+	// below cover the six lines it adds rather than passing on the "not observed"
+	// rendering that a scan without it would print.
+	if recordErr := health.New(paths.HealthFile).RecordScan(health.Scan{
+		At: time.Now().UTC(), Transcripts: 2, Skipped: 6,
+		SkippedNotARepository: 1, SkippedUnconsentedRepository: 1, SkippedUnregisteredWorktree: 1,
+		SkippedOutsideCollectionWindow: 1, SkippedUnclassified: 1, SkippedNothingTerminal: 1,
+		SkippedClassified: true,
+	}); recordErr != nil {
 		t.Fatalf("RecordScan() error = %v", recordErr)
 	}
 
@@ -403,5 +496,291 @@ func TestDoctorReportsSkippedTypedInvocationsWithoutBlindingTheState(t *testing.
 		if !strings.Contains(out, want) {
 			t.Errorf("output is missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// The acceptance criterion, and the reason this ticket exists: doctor's `skipped
+// transcripts` is scope-blind. One machine, one afternoon, one unchanged set of
+// transcripts and no consent change reported 1041 skipped under the hook-fired scan and
+// 143 under `wake ingest`, and an operator read the drop as a consent boundary
+// unlocking ~900 transcripts. Both numbers are right — the boundary-honouring scan
+// derives nothing from a transcript that predates its repository's consent instant, and
+// a scan of the whole history derives records from the very same file.
+//
+// So this pins the pairing rather than the field: the count and the word are asserted
+// together, and asserted to differ across the two scopes over one fixture set. A test
+// that only asserted the field exists would still pass while the rendering regressed to
+// a constant, which is precisely the state the counter is in today.
+func TestDoctorPairsTheSkippedCountWithTheScopeThatProducedIt(t *testing.T) {
+	isolate(t)
+	dir := claudeHome(t)
+	root := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("MkdirAll() root error = %v", err)
+	}
+	t.Chdir(root)
+	// The resolved form, which is what init registers: on darwin t.TempDir() sits
+	// behind a symlink, and a transcript naming the unresolved path would resolve to
+	// no consented repository and be skipped for the wrong reason.
+	consented, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error = %v", err)
+	}
+	// A plain `init`: forward-only, so the consent instant is now and the fixture
+	// below is historical relative to it (ADR-0024).
+	if out, initErr := run(t, "init"); initErr != nil {
+		t.Fatalf("init error = %v: %s", initErr, out)
+	}
+
+	// One fixture set, written once and never touched again — both scans read exactly
+	// this, so the two numbers can differ only by the scope.
+	transcriptDir := filepath.Join(dir, "projects", "session")
+	if err = os.MkdirAll(transcriptDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll() transcript error = %v", err)
+	}
+	transcript := `{"uuid":"entry-1","sessionId":"session-1","cwd":"` + consented + `","timestamp":"2026-08-17T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}
+{"uuid":"entry-2","sessionId":"session-1","cwd":"` + consented + `","timestamp":"2026-08-17T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`
+	if err = os.WriteFile(filepath.Join(transcriptDir, "session.jsonl"), []byte(transcript), 0o600); err != nil {
+		t.Fatalf("WriteFile() transcript error = %v", err)
+	}
+
+	// The hook-fired scan first, against an empty store, so its skip cannot be
+	// confused with a source that was merely already imported. It is silent and nil
+	// whatever it found (ADR-0016).
+	out, stderr, err := runSplit(t, "ingest", "--quiet", "--hook-scan")
+	if err != nil || out != "" || stderr != "" {
+		t.Fatalf("hook scan = (%q, %q, %v), want silence and nil (ADR-0016)", out, stderr, err)
+	}
+	consentedWindowOut, _, err := runSplit(t, "doctor")
+	if err != nil {
+		t.Fatalf("doctor after the hook scan error = %v", err)
+	}
+
+	if _, _, err = runSplit(t, "ingest"); err != nil {
+		t.Fatalf("ingest error = %v", err)
+	}
+	wholeHistoryOut, _, err := runSplit(t, "doctor")
+	if err != nil {
+		t.Fatalf("doctor after ingest error = %v", err)
+	}
+
+	windowSkipped := lineValue(t, consentedWindowOut, "skipped transcripts")
+	windowScope := lineValue(t, consentedWindowOut, "collection scope")
+	historySkipped := lineValue(t, wholeHistoryOut, "skipped transcripts")
+	historyScope := lineValue(t, wholeHistoryOut, "collection scope")
+
+	if windowSkipped != "1" || windowScope != "forward from each consent instant" {
+		t.Errorf("the hook-fired scan reported skipped %q under scope %q, want \"1\" under \"forward from each consent instant\":\n%s", windowSkipped, windowScope, consentedWindowOut)
+	}
+	if historySkipped != "0" || historyScope != "the whole history" {
+		t.Errorf("`wake ingest` reported skipped %q under scope %q, want \"0\" under \"the whole history\":\n%s", historySkipped, historyScope, wholeHistoryOut)
+	}
+	// The pairing itself: one fixture set, two scopes, two different counts — and the
+	// rendered word has to move with them or the count is unreadable.
+	if windowSkipped == historySkipped {
+		t.Errorf("both scopes reported skipped transcripts: %s; the fixture no longer distinguishes them and this test proves nothing", windowSkipped)
+	}
+	if windowScope == historyScope {
+		t.Errorf("both scans rendered collection scope: %s, so the number above cannot be read", windowScope)
+	}
+}
+
+// lineValue returns the text after "key: " on doctor's line for key.
+func lineValue(t *testing.T, out, key string) string {
+	t.Helper()
+	for line := range strings.SplitSeq(out, "\n") {
+		if rest, found := strings.CutPrefix(line, key+": "); found {
+			return rest
+		}
+	}
+	t.Fatalf("output has no %q line:\n%s", key, out)
+	return ""
+}
+
+// The `Short` string is read by someone who has never run the command, so it says
+// what the command shows rather than which of Wake's internals last ran. Its length
+// is not asserted here: that is a rule about the whole help table, and it is held
+// over every registered command in root_test.go rather than invented for this one.
+func TestDoctorShortSaysWhatTheCommandShows(t *testing.T) {
+	for _, command := range commands {
+		cmd := command()
+		if cmd.Name() != "doctor" {
+			continue
+		}
+		if strings.Contains(cmd.Short, "hook change") {
+			t.Errorf("Short = %q; it describes Wake's internals to a reader who has not run it yet", cmd.Short)
+		}
+		return
+	}
+	t.Fatal("no doctor command is registered")
+}
+
+// Ticket AC 1, at the surface: the count above splits into six lines, and the third
+// is the one this ticket exists for. The state word stays where it was — the
+// breakdown reports the loss and does not blind the state.
+func TestDoctorSplitsSkippedTranscriptsByReason(t *testing.T) {
+	paths := isolate(t)
+	if err := health.New(paths.HealthFile).RecordScan(health.Scan{
+		At:                             time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC),
+		Transcripts:                    6,
+		Skipped:                        21,
+		SkippedNotARepository:          1,
+		SkippedUnconsentedRepository:   2,
+		SkippedUnregisteredWorktree:    3,
+		SkippedOutsideCollectionWindow: 4,
+		SkippedUnclassified:            5,
+		SkippedNothingTerminal:         6,
+		SkippedClassified:              true,
+	}); err != nil {
+		t.Fatalf("RecordScan() error = %v", err)
+	}
+
+	out, _, err := runSplit(t, "doctor")
+	if err != nil {
+		t.Fatalf("doctor error = %v", err)
+	}
+
+	for key, want := range map[string]string{
+		"skipped transcripts":                                                       "21",
+		"skipped transcripts not in a repository":                                   "1",
+		"skipped transcripts in an unconsented repository":                          "2",
+		"skipped transcripts in an unregistered worktree of a consented repository": "3",
+		"skipped transcripts outside the collection window":                         "4",
+		"skipped transcripts not classified":                                        "5",
+		"skipped transcripts holding nothing terminal":                              "6",
+	} {
+		if got := lineValue(t, out, key); got != want {
+			t.Errorf("%q = %q, want %q:\n%s", key, got, want, out)
+		}
+	}
+	if got := lineValue(t, out, "integration"); got != "collects zero" {
+		t.Errorf("integration = %q, want \"collects zero\"; the breakdown reports the loss and never moves the word:\n%s", got, out)
+	}
+}
+
+// Ticket AC 3: the two readings must not be confusable. A scan that never classified
+// has no zeroes to report, and the count above it is unchanged — so a reader can tell
+// "these are all zero" from "nobody measured these" (ADR-0046).
+func TestDoctorReadsAnUnclassifiedBreakdownAsNotObserved(t *testing.T) {
+	paths := isolate(t)
+	if err := health.New(paths.HealthFile).RecordScan(health.Scan{
+		At:      time.Date(2026, 8, 17, 10, 0, 0, 0, time.UTC),
+		Skipped: 4,
+	}); err != nil {
+		t.Fatalf("RecordScan() error = %v", err)
+	}
+
+	out, _, err := runSplit(t, "doctor")
+	if err != nil {
+		t.Fatalf("doctor error = %v", err)
+	}
+
+	for _, key := range skippedReasonKeys {
+		if got := lineValue(t, out, key); got != "not observed" {
+			t.Errorf("%q = %q, want \"not observed\":\n%s", key, got, out)
+		}
+	}
+	if got := lineValue(t, out, "skipped transcripts"); got != "4" {
+		t.Errorf("skipped transcripts = %q, want \"4\"; the count above is unaffected:\n%s", got, out)
+	}
+}
+
+// skippedReasonKeys is the six lines, spelled once so a test asserting on all of them
+// cannot drift from a test asserting on one.
+var skippedReasonKeys = []string{
+	"skipped transcripts not in a repository",
+	"skipped transcripts in an unconsented repository",
+	"skipped transcripts in an unregistered worktree of a consented repository",
+	"skipped transcripts outside the collection window",
+	"skipped transcripts not classified",
+	"skipped transcripts holding nothing terminal",
+}
+
+// hostileDirectoryNames is doctor's hostile-payload corpus for the skipped breakdown.
+// ADR-0007 requires one per new input shape, and DG-114 gives doctor a new one: the
+// working directory of a transcript nothing collected. Every value here is a directory
+// a user can really create, chosen to break a different thing — a line the output
+// format would swallow, an escape sequence a terminal would act on, a format verb, a
+// value that impersonates one of doctor's own keys.
+var hostileDirectoryNames = []string{
+	"plain-marker",
+	"marker with spaces",
+	"marker\nskipped transcripts: 999",
+	"marker\x1b[31mred",
+	"marker%s%d",
+	"marker\"quoted\"",
+	"marker'squoted'",
+	"marker`tick`",
+	"marker\ttab",
+	strings.Repeat("marker", 200),
+}
+
+// Ticket AC 2, the hostile-payload half. The breakdown is counts, so no directory of a
+// skipped transcript may reach the output — not the name, not the path it sits at, and
+// not a line the name smuggled in.
+func TestDoctorNamesNoDirectoryOfASkippedTranscript(t *testing.T) {
+	for index, name := range hostileDirectoryNames {
+		t.Run(strconv.Itoa(index), func(t *testing.T) {
+			isolate(t)
+			claudeDir := claudeHome(t)
+			base := t.TempDir()
+			skipped := filepath.Join(base, name)
+			if err := os.MkdirAll(skipped, 0o700); err != nil {
+				// The corpus is about what doctor does with a directory that exists, so a
+				// name the local filesystem refuses is skipped rather than failed.
+				t.Skipf("the filesystem refuses %q: %v", name, err)
+			}
+			root := filepath.Join(t.TempDir(), "repo")
+			if err := os.MkdirAll(root, 0o700); err != nil {
+				t.Fatalf("MkdirAll() root error = %v", err)
+			}
+			t.Chdir(root)
+			if out, initErr := run(t, "init"); initErr != nil {
+				t.Fatalf("init error = %v: %s", initErr, out)
+			}
+			// JSON-encoded rather than concatenated: a directory holding a quote or a
+			// newline would otherwise produce a transcript the reader could not parse,
+			// and the test would pass on a file nothing ever read.
+			encoded, err := json.Marshal(skipped)
+			if err != nil {
+				t.Fatalf("Marshal() error = %v", err)
+			}
+			transcriptDir := filepath.Join(claudeDir, "projects", "session")
+			if mkErr := os.MkdirAll(transcriptDir, 0o700); mkErr != nil {
+				t.Fatalf("MkdirAll() transcript error = %v", mkErr)
+			}
+			transcript := `{"uuid":"entry-1","sessionId":"session-1","cwd":` + string(encoded) + `,"timestamp":"2026-08-17T12:00:00Z","message":{"content":[{"type":"tool_use","id":"call-1","name":"Bash"}]}}
+{"uuid":"entry-2","sessionId":"session-1","cwd":` + string(encoded) + `,"timestamp":"2026-08-17T12:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","is_error":false}]}}`
+			if writeErr := os.WriteFile(filepath.Join(transcriptDir, "session.jsonl"), []byte(transcript), 0o600); writeErr != nil {
+				t.Fatalf("WriteFile() transcript error = %v", writeErr)
+			}
+			if _, _, ingestErr := runSplit(t, "ingest"); ingestErr != nil {
+				t.Fatalf("ingest error = %v", ingestErr)
+			}
+
+			out, _, doctorErr := runSplit(t, "doctor")
+			if doctorErr != nil {
+				t.Fatalf("doctor error = %v", doctorErr)
+			}
+
+			if got := lineValue(t, out, "skipped transcripts"); got != "1" {
+				t.Fatalf("skipped transcripts = %q, want \"1\"; the fixture no longer reaches the breakdown:\n%s", got, out)
+			}
+			for _, secret := range []string{name, skipped, base} {
+				if strings.Contains(out, secret) {
+					t.Errorf("output carries %q:\n%s", secret, out)
+				}
+			}
+			// The strongest form: nothing in this output has a legitimate slash in it.
+			if strings.Contains(out, "/") {
+				t.Errorf("output carries a path separator:\n%s", out)
+			}
+			// And no injected line survived: every line is still one `key: value`.
+			for line := range strings.SplitSeq(strings.TrimSuffix(out, "\n"), "\n") {
+				if !strings.Contains(line, ": ") {
+					t.Errorf("output line %q is not a key and a value; a directory name became a line of its own:\n%s", line, out)
+				}
+			}
+		})
 	}
 }

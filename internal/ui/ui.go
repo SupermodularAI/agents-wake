@@ -8,9 +8,9 @@ import (
 	"net"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/errorcell"
 	"github.com/SupermodularAI/agents-wake/internal/inventory"
 	"github.com/SupermodularAI/agents-wake/internal/metrics"
 	"github.com/SupermodularAI/agents-wake/internal/record"
@@ -32,7 +32,13 @@ var page = template.Must(template.ParseFS(assets, "dashboard.html"))
 // So a repository consented to while the dashboard is running shows its id
 // rather than its new label until the next `wake serve` — deliberate, and never
 // blank (repolabel.Display's contract). A nil map is valid.
-func Handler(source *store.Store, primitives *inventory.Store, labels repolabel.Labels) http.Handler {
+//
+// rollup — which repository each repository's activity is counted under, so a
+// linked git worktree's rows are counted under the repository it belongs to — is
+// resolved once by the caller on exactly the same grounds, and goes stale the same
+// way and for the same reason. A nil map is valid and leaves every repository
+// standing alone.
+func Handler(source *store.Store, primitives *inventory.Store, labels repolabel.Labels, rollup metrics.RepoRollup) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/" {
 			http.NotFound(writer, request)
@@ -53,7 +59,7 @@ func Handler(source *store.Store, primitives *inventory.Store, labels repolabel.
 			return
 		}
 		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := page.Execute(writer, view(metrics.Aggregate(records), available, labels)); err != nil {
+		if err := page.Execute(writer, view(metrics.Aggregate(records, rollup), available, labels)); err != nil {
 			return
 		}
 	})
@@ -84,8 +90,8 @@ func Listen(port int) (net.Listener, error) {
 
 // Serve serves the dashboard over an already-bound listener, with every request
 // phase bounded.
-func Serve(listener net.Listener, source *store.Store, primitives *inventory.Store, labels repolabel.Labels) error {
-	return serve(listener, Handler(source, primitives, labels), defaultTimeouts())
+func Serve(listener net.Listener, source *store.Store, primitives *inventory.Store, labels repolabel.Labels, rollup metrics.RepoRollup) error {
+	return serve(listener, Handler(source, primitives, labels, rollup), defaultTimeouts())
 }
 
 // serve exists so a test can bound the phases in milliseconds instead of seconds.
@@ -127,13 +133,13 @@ func view(summary metrics.Summary, available []inventory.Usage, labels repolabel
 		result.LastObserved = "-"
 	}
 	for _, primitive := range available {
-		view := primitiveView{Name: string(primitive.Name), Kind: strings.ReplaceAll(string(primitive.Kind), "_", " "), Harness: string(primitive.Harness), Repo: labels.Display(primitive.Repo), Invocations: number(primitive.Invocations)}
+		view := primitiveView{Name: string(primitive.Name), Kind: primitive.KindLabel(), Harness: string(primitive.Harness), Repo: labels.DisplayAll(primitive.Repos), Invocations: number(primitive.Invocations)}
 		if primitive.Invocations == 0 {
 			result.Unused = append(result.Unused, view)
 			continue
 		}
 		view.LastUsed = primitive.LastUsed.Local().Format("Jan 02 15:04")
-		view.Errors = errorCell(primitive)
+		view.Errors = errorcell.Render(primitive.ErrorRate())
 		result.Usage = append(result.Usage, view)
 	}
 	return result
@@ -148,17 +154,4 @@ func rate(ratio metrics.Ratio) string {
 }
 func ratioDetail(ratio metrics.Ratio) string {
 	return number(ratio.Numerator()) + " / " + number(ratio.Denominator()) + " known; " + number(ratio.Excluded()) + " excluded"
-}
-
-// errorCell mirrors internal/report's cell of the same name: a count first,
-// then the percentage in parentheses once there is a failure to rate.
-func errorCell(usage inventory.Usage) string {
-	if usage.Failures == 0 {
-		return "0"
-	}
-	ratio := metrics.NewRatio(usage.Failures, usage.Invocations-usage.Unknown, usage.Unknown, usage.Invocations)
-	if percent, ok := ratio.Percent(); ok {
-		return fmt.Sprintf("%d (%.1f%%)", usage.Failures, percent)
-	}
-	return number(usage.Failures)
 }

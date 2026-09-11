@@ -207,6 +207,7 @@ func TestDiagnoseOnlyEverReturnsAKnownState(t *testing.T) {
 		{Scan: Scan{At: scannedAt, EventsWritten: 1, BoundarySkipped: 2}},
 		{Scan: Scan{At: scannedAt, EventsWritten: 1, BoundaryRefused: 2}},
 		{Scan: Scan{At: scannedAt, EventsWritten: 1, RefusedSubagentRuns: 2}},
+		{Scan: Scan{At: scannedAt, EventsWritten: 1, PendingSubagentRuns: 2}},
 	}
 	failures := []error{nil, errors.New("refused")}
 
@@ -260,6 +261,42 @@ func TestDiagnoseDoesNotLetARefusedSubagentRunBlindTheIntegrationState(t *testin
 	}
 }
 
+// A subagent run the closing walk could not judge is not lost collection: the run is
+// carried to the next scan and the carry is what lets a later scan resolve it — a number
+// that is not final yet, in exactly the sense an unterminated call is (ADR-0015). That is
+// the whole reason for the exclusion, and it does not rest on the number being
+// short-lived, because it is not: nothing evicts a run from the carry but a scan
+// observing its session close, so a run whose transcripts the harness has pruned is
+// counted from then on whether or not it had already resolved and been written
+// (activation's TestThePendingCarryHoldsARunWhoseTranscriptsTheHarnessPruned and
+// TestThePendingCarryReadmitsARunItAlreadyResolved). This counter is not a transient that
+// falls back to zero by itself.
+//
+// The second case is the one that proves the exclusion — the first could be carried by
+// its events-written value alone.
+func TestDiagnoseDoesNotLetAPendingSubagentRunBlindTheIntegrationState(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		scan Scan
+		want State
+	}{
+		{"alongside events written", Scan{Transcripts: 2, EventsWritten: 4, PendingSubagentRuns: 5}, StateCollecting},
+		{"with nothing written", Scan{Transcripts: 1, PendingSubagentRuns: 5}, StateCollectsZero},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			c.scan.At = scannedAt
+
+			got := Diagnose(Report{Scan: c.scan}, nil, nil)
+			if got.State == StateCollectsNothing {
+				t.Error("a pending subagent run was reported as lost collection")
+			}
+			if got.State != c.want {
+				t.Errorf("State = %q, want %q", got.State, c.want)
+			}
+		})
+	}
+}
+
 // A directory the boundary discovered and that is no longer there is an honest zero,
 // for the reason Skipped is one: there is nothing left there to read, so nothing was
 // lost by not registering it. Folding it in would put every machine that has ever
@@ -281,5 +318,88 @@ func TestDiagnoseDoesNotBlindTheStateOnASkippedTypedInvocation(t *testing.T) {
 	got := Diagnose(Report{Scan: Scan{At: scannedAt, Transcripts: 2, EventsWritten: 4, SkippedTypedInvocations: 99}}, nil, nil)
 	if got.State != StateCollecting {
 		t.Errorf("State = %q, want %q", got.State, StateCollecting)
+	}
+}
+
+// The scope joins the scan time on the same gate, and for the same reason: a report
+// nobody has scanned and a counter file nobody could read have no scope to name, and
+// naming one anyway renders a scope nobody measured.
+func TestDiagnoseNamesTheScopeTheScanRanUnder(t *testing.T) {
+	if got := Diagnose(Report{Scan: Scan{At: scannedAt, EventsWritten: 1, Scope: ScopeConsentedWindow}}, nil, nil); got.Scope != CollectionScopeConsentedWindow {
+		t.Errorf("Scope = %q, want %q", got.Scope, CollectionScopeConsentedWindow)
+	}
+	if got := Diagnose(Report{Scan: Scan{At: scannedAt, EventsWritten: 1, Scope: ScopeWholeHistory}}, nil, nil); got.Scope != CollectionScopeWholeHistory {
+		t.Errorf("Scope = %q, want %q", got.Scope, CollectionScopeWholeHistory)
+	}
+	if got := Diagnose(Report{}, nil, nil); got.Scope != CollectionScopeUnrecorded {
+		t.Errorf("Scope = %q for a report nobody has scanned, want %q", got.Scope, CollectionScopeUnrecorded)
+	}
+	if got := Diagnose(Report{Scan: Scan{At: scannedAt, Scope: ScopeWholeHistory}}, errors.New("corrupt"), nil); got.Scope != CollectionScopeUnrecorded {
+		t.Errorf("Scope = %q for a counter file nobody could read, want %q", got.Scope, CollectionScopeUnrecorded)
+	}
+}
+
+// The closed-enum tripwire, the way TestDiagnoseOnlyEverReturnsAKnownState is one: a
+// stored value this build does not know — a hand-edited file, or a file from a format
+// nobody here has seen — reads as no scope rather than as the nearest one.
+func TestDiagnoseOnlyEverReturnsAKnownCollectionScope(t *testing.T) {
+	known := map[CollectionScope]bool{
+		CollectionScopeUnrecorded:      true,
+		CollectionScopeConsentedWindow: true,
+		CollectionScopeWholeHistory:    true,
+	}
+
+	reports := []Report{
+		{},
+		{Scan: Scan{At: scannedAt}},
+		{Scan: Scan{At: scannedAt, Scope: ScopeWholeHistory}},
+		{Scan: Scan{At: scannedAt, Scope: Scope(9)}},
+	}
+	failures := []error{nil, errors.New("refused")}
+
+	for _, report := range reports {
+		for _, countersErr := range failures {
+			for _, hooksErr := range failures {
+				if got := Diagnose(report, countersErr, hooksErr); !known[got.Scope] {
+					t.Errorf("Diagnose(%+v, %v, %v).Scope = %q, which is not one of the three", report, countersErr, hooksErr, got.Scope)
+				}
+			}
+		}
+	}
+}
+
+// Ticket AC 4. The breakdown reports a loss the state word deliberately does not
+// follow, for the reason BoundaryRefused's exclusion is argued: every scan
+// re-classifies the same directory, so a state word driven by any of these counters
+// could never change back.
+//
+// The want is the literal "collects zero" rather than StateCollectsZero, so the
+// assertion is byte-for-byte against the word the state had before this change and not
+// against a constant a later edit could move along with the behaviour.
+func TestTheStateWordIsUnaffectedByTheSkippedBreakdown(t *testing.T) {
+	base := Scan{At: scannedAt, Transcripts: 3, Skipped: 3}
+	if got := string(Diagnose(Report{Scan: base}, nil, nil).State); got != "collects zero" {
+		t.Fatalf("the base scan reports %q, want \"collects zero\"; the rest of this test is about moving off it", got)
+	}
+
+	for _, c := range []struct {
+		name string
+		with func(Scan) Scan
+	}{
+		{"not in a repository", func(s Scan) Scan { s.SkippedNotARepository = 3; return s }},
+		{"in an unconsented repository", func(s Scan) Scan { s.SkippedUnconsentedRepository = 3; return s }},
+		{"in an unregistered worktree", func(s Scan) Scan { s.SkippedUnregisteredWorktree = 3; return s }},
+		{"outside the collection window", func(s Scan) Scan { s.SkippedOutsideCollectionWindow = 3; return s }},
+		{"not classified", func(s Scan) Scan { s.SkippedUnclassified = 3; return s }},
+		{"holding nothing terminal", func(s Scan) Scan { s.SkippedNothingTerminal = 3; return s }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			scan := c.with(base)
+			scan.SkippedClassified = true
+
+			if got := string(Diagnose(Report{Scan: scan}, nil, nil).State); got != "collects zero" {
+				t.Errorf("State = %q, want \"collects zero\"; the breakdown reports the loss and never moves the word", got)
+			}
+		})
 	}
 }

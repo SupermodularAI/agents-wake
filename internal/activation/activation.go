@@ -15,6 +15,7 @@ import (
 	"github.com/SupermodularAI/agents-wake/internal/ingest"
 	"github.com/SupermodularAI/agents-wake/internal/inventory"
 	"github.com/SupermodularAI/agents-wake/internal/lockfile"
+	"github.com/SupermodularAI/agents-wake/internal/metrics"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 	"github.com/SupermodularAI/agents-wake/internal/store"
 )
@@ -393,6 +394,23 @@ const (
 	wholeHistory
 )
 
+// health maps this scan's scope onto the enum internal/health persists.
+//
+// The two enums are separate rather than shared because this package imports
+// internal/health and the reverse import would be a cycle. The default is the
+// narrower of the two: a scope this function has not been taught reads as the
+// boundary-honouring scan rather than as an import of the whole history.
+func (s collectionScope) health() health.Scope {
+	switch s {
+	case consentedWindow:
+		return health.ScopeConsentedWindow
+	case wholeHistory:
+		return health.ScopeWholeHistory
+	default:
+		return health.ScopeConsentedWindow
+	}
+}
+
 // resolverFor builds the consent answer one scan resolves every event against
 // (ADR-0010, ADR-0024): which repository the event's working directory belongs to,
 // and whether an event at that instant is one the repository consented to collect.
@@ -407,13 +425,27 @@ const (
 // (ADR-0032 §5). Registering here would judge two events of one scan against two
 // different tables. It is nil when there is nothing to collect for, and observe treats
 // a nil collector as a no-op.
-func resolverFor(repos *config.Repos, scope collectionScope, discover *boundaryDiscovery) claudecode.Resolver {
+//
+// notes is where the working directory this resolver declined is noted against the
+// source being read, and noting is all that happens there too: no git, no os.Stat, no
+// registration on this path (ADR-0019 §1). Noting is not classifying — the
+// classification runs once, after the walk, over the distinct directories these notes
+// name (ADR-0047 §3). Every decline is recorded, the collection-window one included,
+// because that population is a reason of its own and folding it into any other would
+// leave the breakdown unable to sum to the count it explains. It is nil-safe, like
+// discover.
+func resolverFor(repos *config.Repos, scope collectionScope, discover *boundaryDiscovery, notes *skippedNotes) claudecode.Resolver {
 	return func(cwd string, at time.Time) (record.Hash, bool) {
 		identity, err := repos.Identify(cwd)
 		if err != nil || !identity.Matched {
 			if err == nil {
 				discover.observe(cwd)
 			}
+			// Recorded even when Identify refused the spelling: a working directory this
+			// build cannot read is one the classification cannot answer about either, and
+			// ADR-0047 §4 wants that unclassified rather than folded into the nearest
+			// bucket.
+			notes.decline(cwd)
 			return record.Hash(identity.ID), false
 		}
 		if scope == wholeHistory {
@@ -422,7 +454,14 @@ func resolverFor(repos *config.Repos, scope collectionScope, discover *boundaryD
 		// An event exactly at the boundary is inside it: the boundary is the instant
 		// collection began, not the instant after.
 		from := repos.CollectsFrom(identity.ID)
-		return record.Hash(identity.ID), !at.Before(from)
+		if at.Before(from) {
+			// Consented, and outside the window collection began at (ADR-0024, ADR-0025).
+			// A different skip from every other one, and the counter DG-110 taught doctor
+			// to pair with the scope is the one it explains.
+			notes.decline(cwd)
+			return record.Hash(identity.ID), false
+		}
+		return record.Hash(identity.ID), true
 	}
 }
 
@@ -441,10 +480,21 @@ var importHistory = ingestHistory
 // rather than an error that breaks the command (plan §4.3). Swallowed and
 // uncounted, though, they are indistinguishable from a machine with no history —
 // which is the confusion ADR-0010 asks doctor to end.
-func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Store, installed claudecode.Installed, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope, discover *boundaryDiscovery) (int, health.Scan, error) {
+//
+// The third return value is the walk's skipped transcripts grouped by the working
+// directory each was declined for. It is not classified here: classifying inside the
+// walk would put a git call on the derivation path (ADR-0019 §1, ADR-0044 §4), and
+// classifying the first walk of a two-walk scan would produce a breakdown of counters
+// the second walk goes on to replace. The caller classifies once, against the walk
+// whose counters survive (ADR-0047 §3).
+//
+// paths carries the carry's home: the pending file lives under the data root beside
+// the spool, and loadPending/storePending resolve it from there.
+func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Store, installed claudecode.Installed, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope, discover *boundaryDiscovery, paths config.Paths) (int, health.Scan, skippedByDirectory, error) {
 	written := 0
 	scan := health.Scan{At: time.Now().UTC(), RefusedProjects: repos.DroppedEntries()}
-	resolve := resolverFor(repos, scope, discover)
+	notes := &skippedNotes{}
+	resolve := resolverFor(repos, scope, discover, notes)
 	// One scan for the whole walk, not one per transcript. Claude Code writes one
 	// session id into several files — the parent's and one per subagent — so a reader
 	// whose session state died with each file judged every session from a partial view:
@@ -455,6 +505,14 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 	// The Namer is hoisted with it. It was already constant across the walk — it is
 	// derived from the one name key — so building it once is the same value.
 	transcripts := ingest.NewClaudeCodeScan(resolve, record.NewNamer(repos.NameKey()), installed, stale, idle, destination)
+	// The carry is restored before the first source is read: a run an earlier scan
+	// anchored and a re-read entry merge through the same min-folds, so the walk
+	// resolves the union exactly as one scan over both would. What the carry
+	// restores is what a forward-only scope can never re-read — the entries
+	// predating the recorded boundary — and without it a run buffered by an
+	// import while its session was open is lost the moment that scan ends.
+	pending := loadPending(paths)
+	transcripts.RestorePending(pending.Runs, pending.Children)
 	err := filepath.WalkDir(filepath.Join(claudeDir, "projects"), func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			// "Not there" arrives by this same route as "could not be read":
@@ -478,6 +536,9 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 			return nil
 		}
 		defer file.Close()
+		// Immediately before the Read that claims the same ordinal, and exactly once per
+		// Read: that adjacency is the whole of what keeps the two ordinal sequences one.
+		notes.openSource()
 		result, ingestErr := transcripts.Read(file)
 		if ingestErr != nil {
 			scan.ParseErrors++
@@ -498,6 +559,12 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 		// fallible (ADR-0036 §3). Added per source, like RefusedCalls: the tag is judged
 		// entirely within the line it is on, so Close has no half to contribute.
 		scan.SkippedTypedInvocations += result.SkippedTypedInvocations
+		// A call and its result whose instants came back out of order. The invocation
+		// is in the store; only its duration is unknown, and it is left nil rather
+		// than clamped to a definite 0 (ADR-0027). Added per source, like the two
+		// above: a pair is judged the moment both halves are in hand, which is always
+		// inside one source's read.
+		scan.OutOfOrderPairs += result.OutOfOrderPairs
 		// Pending, Interrupted, AmbiguousSkillRuns and Skipped are deliberately not
 		// folded here. None of the four is knowable from one transcript any more: a call
 		// unterminated in this file may be terminated in the next, and a session quiet
@@ -511,14 +578,27 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 		// would judge a session closed from a partial view — permanently, since ADR-0015
 		// rejects upsert and ADR-0004 deduplicates the correction away. Deferring to the
 		// next scan costs a slower scan and never a wrong record.
-		return written, scan, err
+		//
+		// A walk that did not finish classified nothing either, so the grouping goes
+		// back empty and doctor reads the breakdown as "not observed" rather than as a
+		// row of zeroes nobody measured (ADR-0046).
+		return written, scan, skippedByDirectory{}, err
 	}
 	// Resolved once, over the union of every transcript the walk read. With no projects
 	// directory at all this read no source, so it derives nothing and store.Append on
 	// an empty slice creates no spool — the same clean zero that arm reported before.
 	final, closeErr := transcripts.Close()
+	// The carry is republished whether or not the close appended: what stayed
+	// unresolved is independent of the write, and losing it on a failed append
+	// would re-open the loss the carry closes. A store error is joined into the
+	// scan's error rather than replacing it — the append's failure is the one the
+	// caller already surfaces.
+	runs, children := transcripts.Pending()
+	if storeErr := storePending(paths, pendingState{Version: pendingVersion, Runs: runs, Children: children}); storeErr != nil {
+		closeErr = errors.Join(closeErr, storeErr)
+	}
 	if closeErr != nil {
-		return written, scan, closeErr
+		return written, scan, skippedByDirectory{}, closeErr
 	}
 	// A subagent transcript that declares no usable name is refused at the closure
 	// boundary, not while its own lines are read (ADR-0036 §2, ADR-0015), so leaving it
@@ -538,6 +618,29 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 	// folding it into that arm would put every machine that runs subagents permanently
 	// into "collects nothing" while thousands of records are written (health.Diagnose).
 	scan.RefusedSubagentRuns = final.RefusedSubagentRuns
+	// The unresolved runs the closing walk still holds: anchored — by this scan, or by an
+	// earlier one whose carry this scan restored — and not judged, because their sessions
+	// were not observed closed. Read off the same Pending() call storePending already
+	// uses — one read, post-Close, never a second one.
+	//
+	// Not the size of pending.json. That file's merge is union-only, so it also holds
+	// runs already resolved and written to the store, and the carried children beside
+	// them; this number is the walk's own unresolved set and is the smaller of the two.
+	// The two converge from below, though, and that is what keeps this number from being
+	// a count of outstanding work: a resolved run the file still holds is restored by
+	// every later scan, and once the harness has pruned the transcripts that would judge
+	// it, it is unresolved again for good. health.Scan.PendingSubagentRuns documents what
+	// a reader may take from the number.
+	//
+	// len(runs) only. The children beside them are an unlike population — a derived
+	// record awaiting a parent, not an unobserved invocation — and one integer summing
+	// the two would hide whichever of them matters (ADR-0047 §1).
+	//
+	// Assigned, not added, like the four counters around it: only the closure boundary
+	// knows what stayed unresolved, so there is no per-source half to add to. A walk that
+	// returned early above never reached here and the counter reads 0, which is what
+	// every close-derived counter beside it already does.
+	scan.PendingSubagentRuns = len(runs)
 	// Two different facts, deliberately two counters. Pending is a call whose session
 	// may still be running — transient, and not a fault. Interrupted is a call whose
 	// session went quiet past the threshold, so the invocation is now in the store
@@ -566,7 +669,7 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 	scan.Skipped = final.SkippedSources
 	scan.EventsWritten += final.Written
 	written += final.Written
-	return written, scan, nil
+	return written, scan, notes.group(final.SkippedSourceOrdinals), nil
 }
 
 // DiscoveryScope resolves which Claude Code discovery paths cwd may read.
@@ -638,7 +741,11 @@ func installedFrom(discovered inventory.Discovery) claudecode.Installed {
 }
 
 func refreshInventory(paths config.Paths, events *store.Store, discovered inventory.Discovery) error {
-	return inventory.New(paths.PrimitivesFile).Refresh(events, discovered)
+	// The roll-up is read here rather than passed down, so Init, InitGlobal and the
+	// hook-fired scan all inherit it with no further plumbing. It runs after Register
+	// has written the relation, so a `wake init` inside a linked worktree rolls up on
+	// the same call that recorded it.
+	return inventory.New(paths.PrimitivesFile).Refresh(events, discovered, metrics.RepoRollup(config.RepoRollup(paths)))
 }
 
 // AllRepoRoots resolves the Namer together with the canonical root of every

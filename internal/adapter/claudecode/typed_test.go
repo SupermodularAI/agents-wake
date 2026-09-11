@@ -69,6 +69,11 @@ func TestCommandTagReadsOnlyTheFirstTag(t *testing.T) {
 // guess at a record dimension, so the fold drops the name entirely and the tag lands
 // on the skip counter instead. Both input orders are asserted because
 // order-independence is the property, not the outcome of one ordering (ADR-0004).
+//
+// DG-108 left this refusal standing deliberately. Its discovery-side resolution only
+// removes a collision the harness itself declared away — a session skill_listing
+// naming the composed spelling — so a name no listing names still arrives here
+// contested and is still admitted under neither kind (ADR-0041).
 func TestNewInstalledDropsANameInstalledUnderTwoKinds(t *testing.T) {
 	orders := map[string][]InstalledPrimitive{
 		"skill then command": {
@@ -514,5 +519,57 @@ func TestReadRetainsNothingFromAStringShapedUserEntry(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// DG-106 folds a plugin skill's bare directory name onto its namespaced spelling
+// for the inventory row, but the discovered list this set is built from still
+// carries both. Admission must therefore be unchanged: a person who types either
+// spelling is still collected, and folding the list instead would have turned a
+// wrong report into lost collection. Both input orders are asserted because
+// order-independence is the property, not the outcome of one ordering (ADR-0004).
+func TestNewInstalledAdmitsAPluginSkillUnderBothSpellings(t *testing.T) {
+	bare := InstalledPrimitive{Name: "brainstorming", Kind: record.KindSkill}
+	namespaced := InstalledPrimitive{Name: "superpowers:brainstorming", Kind: record.KindSkill}
+	orders := map[string][]InstalledPrimitive{
+		"bare then namespaced": {bare, namespaced},
+		"namespaced then bare": {namespaced, bare},
+	}
+	for name, primitives := range orders {
+		t.Run(name, func(t *testing.T) {
+			installed := NewInstalled(primitives)
+			for _, spelling := range []record.Identifier{bare.Name, namespaced.Name} {
+				kind, known := installed.kindOf(spelling)
+				if !known || kind != record.KindSkill {
+					t.Fatalf("kindOf(%q) = %q, %t, want %q, true", spelling, kind, known, record.KindSkill)
+				}
+			}
+		})
+	}
+}
+
+// DG-108 folds the inventory row, never the list installedFrom builds: a plugin
+// command the harness lists as a namespaced skill renders as one skill row, while
+// both spellings stay admitted under the kind the machine has each of them as. A
+// person who types either is still collected, and the fold happens at render. Both
+// input orders are asserted because order-independence is the property, not the
+// outcome of one ordering (ADR-0004).
+func TestNewInstalledAdmitsAPluginCommandAndItsListedSkillSpelling(t *testing.T) {
+	command := InstalledPrimitive{Name: "code-review", Kind: record.KindCommand}
+	listed := InstalledPrimitive{Name: "code-review:code-review", Kind: record.KindSkill}
+	orders := map[string][]InstalledPrimitive{
+		"command then listed skill": {command, listed},
+		"listed skill then command": {listed, command},
+	}
+	for name, primitives := range orders {
+		t.Run(name, func(t *testing.T) {
+			installed := NewInstalled(primitives)
+			for _, want := range []InstalledPrimitive{command, listed} {
+				kind, known := installed.kindOf(want.Name)
+				if !known || kind != want.Kind {
+					t.Fatalf("kindOf(%q) = %q, %t, want %q, true", want.Name, kind, known, want.Kind)
+				}
+			}
+		})
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/SupermodularAI/agents-wake/internal/atomicfile"
@@ -18,35 +19,76 @@ import (
 )
 
 const (
-	// primitiveFileVersion is 2 because the snapshot's row grain changed: a row is
-	// now one primitive in one repository, not one primitive. A v1 file is a
-	// different shape, not a corrupt one, and Read answers accordingly.
-	primitiveFileVersion = 2
+	// primitiveFileVersion is 3 because the snapshot's row grain was restored: a row
+	// is one primitive, and the repositories its invocations happened in are a set
+	// beside it rather than part of its identity (ADR-0002, ADR-0042). A v1 or v2
+	// file is a different shape, not a corrupt one, and Read answers accordingly.
+	primitiveFileVersion = 3
 	fileMode             = fs.FileMode(0o600)
 )
 
 // Usage is a locally available primitive and its activity derived from the
 // event spool. Its fields are identifiers, enums, timestamps, and counters only.
 //
-// Failures and Unknown are raw counts, not a Ratio: metrics.Ratio's fields are
-// private so it cannot round-trip through JSON, and a renderer that wants a
-// rate can rebuild one with metrics.NewRatio(Failures, Invocations-Unknown,
-// Unknown, Invocations) — every terminal invocation is either known or
-// unknown, so those four counts are always consistent.
+// Failures and Unknown are raw counts, not a Ratio, for one reason only:
+// metrics.Ratio's fields are private, so it cannot round-trip through JSON. A
+// renderer that wants a rate calls ErrorRate and never assembles one from these
+// counts — this comment used to invite exactly that, and two renderers took the
+// invitation and drifted apart (DG-103).
 //
-// Repo is the salted repository id, never a readable label: it is an identifier
-// like every other field here (ADR-0007, ADR-0019 §3). It is empty exactly when
-// there are no invocations, because a repository is a property of an invocation
-// (ADR-0002) and a primitive nothing invoked has none to name.
+// Repos is the salted repository ids this row's invocations were counted under,
+// never readable labels: they are identifiers like every other field here
+// (ADR-0007, ADR-0019 §3). Sorted and duplicate-free, so two refreshes of one
+// spool produce the same bytes whatever order the records arrived in. It is empty
+// exactly when there are no invocations, because a repository is a property of an
+// invocation (ADR-0002) and a primitive nothing invoked has none to name — and it
+// is a dimension of the row, never its identity (ADR-0042).
 type Usage struct {
 	Harness     record.Identifier `json:"harness"`
 	Kind        record.Kind       `json:"kind"`
 	Name        record.Identifier `json:"name"`
-	Repo        record.Hash       `json:"repo,omitempty"`
+	Repos       []record.Hash     `json:"repos,omitempty"`
 	Invocations uint64            `json:"invocations"`
 	Failures    uint64            `json:"failures,omitempty"`
 	Unknown     uint64            `json:"unknown,omitempty"`
 	LastUsed    time.Time         `json:"last_used,omitempty"`
+	// Unmatched marks a row derived from invocations of an MCP server that no
+	// discovered config key accounts for: the calls happened, and the server they
+	// belong to could not be named from the inventory. It is reported rather than
+	// silently rendered as zero, which is the same discipline ADR-0005 applies to an
+	// unreported outcome and plan §12 applies to doctor — "collects nothing" is not
+	// "collects zero" (plan §3.3, §12).
+	//
+	// A bool, not a label: the snapshot's fields are identifiers, enums, timestamps
+	// and counters, and a bool is the tightest enumeration there is (ADR-0007).
+	Unmatched bool `json:"unmatched,omitempty"`
+}
+
+// KindLabel is this row's kind as a reader sees it, including the unmatched
+// marker. It lives here for ErrorRate's reason: two renderers each deriving a
+// display value from raw fields is how the ERRORS cell drifted (DG-103).
+func (u Usage) KindLabel() string {
+	label := strings.ReplaceAll(string(u.Kind), "_", " ")
+	if u.Unmatched {
+		label += " (unmatched)"
+	}
+	return label
+}
+
+// ErrorRate is this row's failure rate carrying the population it was measured
+// over. It is the exact inverse of the flattening derive performs, and it exists
+// so that no renderer reconstructs a rate from raw counts: that is the
+// alternative ADR-0006 rejected, and the one that let the ERRORS cell print a
+// percentage with no visible denominator (DG-103).
+//
+// Unknown is excluded from the denominator and reported beside it rather than
+// folded into either side: an unreported outcome is not a success (ADR-0005).
+//
+// It panics for counts valid would refuse, deliberately. NewRatio treats
+// impossible counts as a bug in this layer rather than as data (ADR-0006), and
+// any snapshot that reached a renderer has already passed valid.
+func (u Usage) ErrorRate() metrics.Ratio {
+	return metrics.NewRatio(u.Failures, u.Invocations-u.Unknown, u.Unknown, u.Invocations)
 }
 
 // EventSource is the read side of the event spool a refresh derives usage from.
@@ -75,7 +117,14 @@ func New(path string) *Store { return &Store{path: path, lockPath: path + ".lock
 // whole snapshot, so one that decided what to publish from an earlier read would
 // erase a newer one. Atomicity and isolation are different properties, and this
 // needs both.
-func (s *Store) Refresh(source EventSource, discovered Discovery) error {
+//
+// rollup arrives as an argument rather than being read here, because this package
+// reads no config (ADR-0019 §1), and it is handed straight to Aggregate rather than
+// applied afterwards, because it must land at the counting input, where the merged
+// row's denominator and its excluded-unknown count are recomputed over the merged
+// population rather than summed from two finished rates (ADR-0006, ADR-0011,
+// ADR-0040 §4). A nil map leaves every repository standing alone.
+func (s *Store) Refresh(source EventSource, discovered Discovery, rollup metrics.RepoRollup) error {
 	return lockfile.WithLock(s.lockPath, func() error {
 		entries, err := source.Entries(0)
 		if err != nil {
@@ -85,7 +134,7 @@ func (s *Store) Refresh(source EventSource, discovered Discovery) error {
 		for _, entry := range entries {
 			records = append(records, entry.Record)
 		}
-		return s.write(derive(metrics.Aggregate(records), s.available(discovered)))
+		return s.write(derive(metrics.Aggregate(records, rollup), s.available(discovered), discovered.canonical))
 	})
 }
 
@@ -105,6 +154,19 @@ func (s *Store) Refresh(source EventSource, discovered Discovery) error {
 //
 // A previous snapshot Read refuses is not carried. Fail closed: bytes that do not
 // validate are not worth preserving (plan §3.4).
+//
+// A carried entry brings no provenance of its own — it is a name from a previous
+// snapshot, not a source — so it can never create a fold; it is only ever folded by
+// one the current pass proved.
+//
+// An unmatched row is not carried, because it is not one of those names: it was
+// derived from invocations of an MCP server no discovered config key accounted for
+// (see Usage.Unmatched). Carrying it would hand the next pass a segment that looks
+// discovered, and the row would be republished as a plain server — the snapshot
+// asserting a match no config key supports, and a phantom the events could later
+// leave behind at zero invocations in `--unused`. Nothing is lost by dropping it:
+// derive rebuilds an unmatched row from the event spool, flagged, for as long as
+// the calls are there to justify it (ADR-0039 §4, plan §3.4).
 func (s *Store) available(discovered Discovery) []Primitive {
 	if discovered.ProjectScanned {
 		return discovered.Primitives
@@ -115,6 +177,9 @@ func (s *Store) available(discovered Discovery) []Primitive {
 	}
 	carried := slices.Clone(discovered.Primitives)
 	for _, usage := range previous {
+		if usage.Unmatched {
+			continue
+		}
 		carried = append(carried, Primitive{Harness: usage.Harness, Kind: usage.Kind, Name: usage.Name})
 	}
 	return carried
@@ -158,61 +223,105 @@ type primitiveFile struct {
 	Primitives  []Usage   `json:"primitives"`
 }
 
-func derive(summary metrics.Summary, available []Primitive) []Usage {
-	observed := make(map[usageKey]Usage)
-	// repos is which repositories observed each identity, in first-seen order. The
-	// join below is on the identity — discovery has no repository to join on
-	// (ADR-0002) — while the rows it produces are per repository.
-	repos := make(map[identity][]record.Hash)
-	for _, primitive := range summary.Primitives {
-		if primitive.Kind == record.KindBuiltinTool {
-			continue
-		}
-		id := identity{harness: primitive.Harness, kind: primitive.Kind, name: primitive.Name}
-		key := usageKey{identity: id, repo: primitive.Repo}
-		usage, seen := observed[key]
-		if !seen {
-			repos[id] = append(repos[id], primitive.Repo)
-		}
-		usage.Harness, usage.Kind, usage.Name, usage.Repo = primitive.Harness, primitive.Kind, primitive.Name, primitive.Repo
+// derive joins the aggregate against what discovery may write. canonical is the
+// fold discovery proved between two spellings of one primitive; it is applied to
+// both sides of the join, so the folded row exists and the events recorded under
+// either spelling land on it.
+func derive(summary metrics.Summary, available []Primitive, canonical map[identity]identity) []Usage {
+	observed := make(map[identity]Usage)
+	// repos is which repositories each identity's invocations were counted under: a
+	// set beside the row, not part of its key, because the repository is a dimension
+	// of the invocation and not the identity of an installed primitive (ADR-0002,
+	// ADR-0042). The join below is on the identity — discovery has no repository to
+	// join on (ADR-0002).
+	repos := make(map[identity]map[record.Hash]struct{})
+	// accumulate sums one aggregate row onto one identity's row. It is shared by the
+	// primitive's own row and by the MCP server roll-up below, so a server's counts
+	// are the same arithmetic its tools' are and the ratio invariants Usage.valid
+	// asserts hold on both.
+	accumulate := func(id identity, primitive metrics.PrimitiveUsage) {
+		usage := observed[id]
+		usage.Harness, usage.Kind, usage.Name = id.harness, id.kind, id.name
 		usage.Invocations += primitive.Invocations
 		usage.Failures += primitive.ErrorRate.Numerator()
 		usage.Unknown += primitive.ErrorRate.Excluded()
 		if primitive.LastUsed.After(usage.LastUsed) {
 			usage.LastUsed = primitive.LastUsed
 		}
-		observed[key] = usage
+		observed[id] = usage
+		if repos[id] == nil {
+			repos[id] = make(map[record.Hash]struct{}, len(primitive.Repos))
+		}
+		for _, repo := range primitive.Repos {
+			repos[id][repo] = struct{}{}
+		}
 	}
 
-	items := make(map[usageKey]Usage, len(available))
+	index, discovered := serverIndex(available)
+	// unnamed is which server rows this pass built from invocations of a server no
+	// discovered config key accounts for, so they can still be published below.
+	// Every other kind is published from the available side alone; an MCP server is
+	// the one case where an observed row with no discovered counterpart is the
+	// answer rather than noise, because the calls provably happened.
+	unnamed := map[identity]struct{}{}
+
+	for _, primitive := range summary.Primitives {
+		if primitive.Kind == record.KindBuiltinTool {
+			continue
+		}
+		accumulate(canonicalIdentity(canonical, identity{harness: primitive.Harness, kind: primitive.Kind, name: primitive.Name}), primitive)
+		if primitive.Kind != record.KindMCPTool || primitive.MCPServer == "" {
+			continue
+		}
+		// Deliberately not through canonicalIdentity. This roll-up is cross-kind by
+		// construction — mcp_tool events onto an mcp_server row — but no harness
+		// declaration licenses it: it is the arithmetic ADR-0039 defines, not a
+		// spelling the harness stated, so it stays its own path rather than being
+		// expressed as a canonical fold.
+		server := identity{harness: primitive.Harness, kind: record.KindMCPServer, name: serverName(index, primitive.Harness, primitive.MCPServer)}
+		accumulate(server, primitive)
+		if _, found := discovered[server]; !found {
+			unnamed[server] = struct{}{}
+		}
+	}
+
+	items := make(map[identity]Usage, len(available))
 	for _, primitive := range available {
 		if primitive.Kind == record.KindBuiltinTool {
 			continue
 		}
-		id := identity{harness: primitive.Harness, kind: primitive.Kind, name: primitive.Name}
-		seen := repos[id]
-		if len(seen) == 0 {
+		id := canonicalIdentity(canonical, identity{harness: primitive.Harness, kind: primitive.Kind, name: primitive.Name})
+		usage, invoked := observed[id]
+		if !invoked {
 			// Nothing invoked it, so it has no repository to name and belongs to the
 			// inventory grain alone.
-			usage := Usage{Harness: primitive.Harness, Kind: primitive.Kind, Name: primitive.Name}
-			// Fail closed: a name the record contract would refuse must not reach the
-			// snapshot either, whatever a caller handed us (ADR-0007, plan §3.4).
-			if !usage.valid() {
-				continue
-			}
-			items[usageKey{identity: id}] = usage
+			usage = Usage{Harness: id.harness, Kind: id.kind, Name: id.name}
+		} else {
+			usage.Repos = sortedRepos(repos[id])
+		}
+		// Fail closed: a name the record contract would refuse must not reach the
+		// snapshot either, whatever a caller handed us (ADR-0007, plan §3.4).
+		if !usage.valid() {
 			continue
 		}
-		for _, repo := range seen {
-			key := usageKey{identity: id, repo: repo}
-			usage := observed[key]
-			usage.Harness, usage.Kind, usage.Name, usage.Repo = primitive.Harness, primitive.Kind, primitive.Name, repo
-			if !usage.valid() {
-				continue
-			}
-			items[key] = usage
-		}
+		items[id] = usage
 	}
+	// The observed server rows the available side could not publish, because no
+	// discovered config key names them. Published last and flagged, so `--unused` is
+	// not the only place a heavily used server shows up (plan §3.3, §12).
+	for id := range unnamed {
+		if _, published := items[id]; published {
+			continue
+		}
+		usage := observed[id]
+		usage.Repos = sortedRepos(repos[id])
+		usage.Unmatched = true
+		if !usage.valid() {
+			continue
+		}
+		items[id] = usage
+	}
+
 	result := make([]Usage, 0, len(items))
 	for _, usage := range items {
 		result = append(result, usage)
@@ -221,9 +330,24 @@ func derive(summary metrics.Summary, available []Primitive) []Usage {
 		if left.Invocations != right.Invocations {
 			return -cmp.Compare(left.Invocations, right.Invocations)
 		}
-		return cmp.Or(cmp.Compare(string(left.Harness), string(right.Harness)), cmp.Compare(string(left.Kind), string(right.Kind)), cmp.Compare(string(left.Name), string(right.Name)), cmp.Compare(string(left.Repo), string(right.Repo)))
+		return cmp.Or(cmp.Compare(string(left.Harness), string(right.Harness)), cmp.Compare(string(left.Kind), string(right.Kind)), cmp.Compare(string(left.Name), string(right.Name)))
 	})
 	return result
+}
+
+// sortedRepos is the set of repositories a row was counted under, in ascending
+// order rather than first-seen order, so no ordering of the spool changes the bytes
+// a refresh publishes.
+func sortedRepos(set map[record.Hash]struct{}) []record.Hash {
+	if len(set) == 0 {
+		return nil
+	}
+	repos := make([]record.Hash, 0, len(set))
+	for repo := range set {
+		repos = append(repos, repo)
+	}
+	slices.SortFunc(repos, func(left, right record.Hash) int { return cmp.Compare(string(left), string(right)) })
+	return repos
 }
 
 // identity is a primitive as discovery knows it: the inventory grain, which
@@ -234,11 +358,21 @@ type identity struct {
 	name    record.Identifier
 }
 
-// usageKey is one snapshot row: an identity in one repository, or — for a
-// primitive with no invocations — in none.
-type usageKey struct {
-	identity
-	repo record.Hash
+// canonicalIdentity applies the fold discovery proved for one primitive: the two
+// discovered spellings of one skill collapse onto one row, and usage recorded under
+// either spelling accumulates there.
+//
+// Both sides of the join go through it. Folding discovery alone would leave an event
+// recorded under the bare spelling with no row to land on and drop it from the
+// snapshot — the opposite of what the fold is for. The fold carries the kind discovery
+// proved: where a session listing declared the kind the harness invokes the primitive
+// under, that declaration is the kind, and where nothing declared it the kind is the
+// one discovery already had — nothing here picks one (ADR-0041, ADR-0005).
+func canonicalIdentity(canonical map[identity]identity, id identity) identity {
+	if to, folded := canonical[id]; folded {
+		return to
+	}
+	return id
 }
 
 func (s *Store) write(primitives []Usage) error {
@@ -261,18 +395,33 @@ func (u Usage) valid() bool {
 	if !validKind(u.Kind) {
 		return false
 	}
+	// Unmatched only ever describes an observed MCP server: a row of another kind,
+	// or one with no invocations, cannot be unmatched, and a snapshot claiming
+	// otherwise is refused rather than repaired (fail closed, plan §3.4).
+	if u.Unmatched && (u.Kind != record.KindMCPServer || u.Invocations == 0) {
+		return false
+	}
 	if u.Unknown > u.Invocations || u.Failures > u.Invocations-u.Unknown {
 		return false
 	}
-	// Repo belongs to the invocation grain (ADR-0002): a row with invocations
-	// carries the salted id they were recorded under, and a row with none has no
-	// repository to name. Validated to the record contract's own rule so the
-	// snapshot cannot hold a repository field a record could not (ADR-0007).
-	if (u.Repo == "") != (u.Invocations == 0) {
+	// Repos belongs to the invocation grain (ADR-0002): a row with invocations names
+	// every repository they happened in, and a row with none has none to name.
+	if (len(u.Repos) == 0) != (u.Invocations == 0) {
 		return false
 	}
-	if u.Repo != "" && !record.ValidRepo(u.Repo) {
-		return false
+	for index, repo := range u.Repos {
+		// Validated to the record contract's own rule so the snapshot cannot hold a
+		// repository field a record could not (ADR-0007, ADR-0019 §3).
+		if !record.ValidRepo(repo) {
+			return false
+		}
+		// Strictly ascending: sorted, and therefore duplicate-free. That is what makes
+		// two refreshes of one spool byte-identical whatever order the records arrived
+		// in, and what keeps a project counted once in the cell. A file that breaks it
+		// is refused, not repaired (fail closed, plan §3.4).
+		if index > 0 && repo <= u.Repos[index-1] {
+			return false
+		}
 	}
 	return (u.Invocations == 0 && u.LastUsed.IsZero()) || (u.Invocations > 0 && !u.LastUsed.IsZero())
 }

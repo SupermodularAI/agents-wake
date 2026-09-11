@@ -83,7 +83,7 @@ func PlanUninstall(paths config.Paths, claudeDir, executable string) (UninstallP
 		resolved = filepath.Clean(executable)
 	}
 	return UninstallPlan{
-		SettingsFile: filepath.Join(claudeDir, settingsFileName),
+		SettingsFile: SettingsFilePath(claudeDir),
 		DataDir:      paths.DataDir,
 		ConfigDir:    paths.ConfigDir,
 		Executable:   resolved,

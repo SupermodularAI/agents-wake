@@ -53,17 +53,24 @@ wake report
 ```
 
 `wake report` prints usage for the primitives you've used, one row per
-primitive, with a REPO column naming the repository it was used in — the
-readable label from your local project map, never the path. The unused list
-has no such column: a repository is a property of an invocation, and an unused
-primitive has none. Add `--unused` to see primitives that are available but
-never invoked, or both flags together for the full picture. A bare `--unused`
-swaps the OVERVIEW too — invocation counts and outcomes describe activity, so
-the overview above an unused list is instead a count of unused primitives by
-kind. In a terminal the tables are lime-bordered and colored; piped or
-redirected — a script, another program, an agent reading the output — it's
-plain ASCII text instead, so nothing downstream ever has to parse around a
-color code.
+primitive, with a PROJECT column naming the project each invocation is
+attributed to — the readable label from your local project map, never the
+path. An invocation is attributed to the project its own working directory
+resolved to, and a linked worktree is attributed to the repository it belongs
+to. So an agent driving work from one project into another checkout has that
+work counted under the driver. That is rare, and the rate is measured rather
+than asserted: on a real Claude Code corpus on 2026-09-08, of the 69 sessions
+that did resolvable file-changing work, 1 (1.4 %) did all of it in another
+project and 11 (15.9 %) touched more than one. The column is a partial answer,
+not a wrong one. The unused list has no such column: a repository is a
+property of an invocation, and an unused primitive has none. Add `--unused`
+to see primitives that are available but never invoked, or both flags
+together for the full picture. A bare `--unused` swaps the OVERVIEW too —
+invocation counts and outcomes describe activity, so the overview above an
+unused list is instead a count of unused primitives by kind. In a terminal
+the tables are lime-bordered and colored; piped or redirected — a script,
+another program, an agent reading the output — it's plain ASCII text instead,
+so nothing downstream ever has to parse around a color code.
 
 `wake init` explains what it will change before doing so. It consents the
 current project and installs Wake-owned Claude Code session hooks, and
@@ -95,6 +102,13 @@ encloses — including any you consented with a plain `wake init` before the
 boundary existed, so the number is what is under the boundary rather than what
 the boundary found.
 
+Git worktrees are their own projects to Wake: run `wake init` inside a worktree
+the way you would in any checkout. It gets its own identity, and it records which
+repository it belongs to, so `wake report` and the dashboard count its activity
+under that repository instead of showing it as a separate one. If the parent
+checkout has not been consented, the worktree simply stands on its own; nothing is
+attributed to a project you never consented.
+
 Open the local dashboard when you want a browser view:
 
 ```sh
@@ -113,8 +127,8 @@ wake doctor              # Inspect collection and hook health
 wake update              # Install the newest release, verifying its checksum
 wake update --check      # Report whether a newer release exists; download nothing
 wake remove              # Remove the Claude Code integration; keep local data
-wake remove --purge      # ...and delete collected data; ~/.config/wake is kept
-wake uninstall           # Remove everything, including ~/.config/wake and the binary
+wake remove --purge      # ...and delete collected data; asks first; ~/.config/wake is kept
+wake uninstall           # Remove everything, including ~/.config/wake and the binary; asks first
 ```
 
 | Command | Purpose |
@@ -125,12 +139,12 @@ wake uninstall           # Remove everything, including ~/.config/wake and the b
 | `wake serve` | Open the local dashboard. |
 | `wake init` | Enable collection for the current project. |
 | `wake init --full` | Enable collection and import existing history now. |
-| `wake init --global [path]` | Consent every project under a directory (your home directory when no path is given), registering each repository under its own identity as sessions run in it. Records the boundary; consents no root of its own. |
+| `wake init --global [path]` | Consent every project under a directory (your home directory when no path is given), registering each repository under its own identity as sessions run in it, and linked worktrees of those repositories wherever on disk they live. Records the boundary; consents no root of its own. |
 | `wake init --global --full` | ...and import the existing Claude Code history under that boundary in the same call. |
 | `wake ingest` | Import activity for consented projects. |
 | `wake doctor` | Show collection and hook health. |
-| `wake remove` | Remove Wake-owned Claude Code hooks. `--purge` also deletes collected data; `~/.config/wake` is kept either way, so a later `wake init` keeps the same repository identity. |
-| `wake uninstall` | Irreversible. Removes the integration, all collected data, `~/.config/wake` (configuration and the identity salt) and the binary itself — plus the symlink you invoked it through, if the `wake` on your PATH is a link. It prints every path before deleting anything, and removes nothing at all if it cannot take its hook entry out of `settings.json` first. |
+| `wake remove` | Remove Wake-owned Claude Code hooks. `--purge` also deletes collected data; `~/.config/wake` is kept either way, so a later `wake init` keeps the same repository identity. `--purge` prints the paths it will delete and asks before deleting; run unattended it refuses and deletes nothing unless `--yes` is passed. Plain `wake remove` is not gated. |
+| `wake uninstall` | Irreversible. Removes the integration, all collected data, `~/.config/wake` (configuration and the identity salt) and the binary itself — plus the symlink you invoked it through, if the `wake` on your PATH is a link. It prints every path before deleting anything, and removes nothing at all if it cannot take its hook entry out of `settings.json` first. It asks for confirmation after printing them, and when standard input is not a terminal it refuses with a non-zero exit rather than deleting, unless `--yes` was given. To keep your configuration and identity salt, use `wake remove --purge` instead. |
 | `wake update` | Download the newest release, verify its SHA-256 against the published `checksums.txt`, and replace this binary in place. Refuses and changes nothing if the checksum does not match. |
 | `wake update --check` | Report whether a newer release exists and stop there — it downloads nothing. On a build with no release tag it says so rather than guessing. |
 | `wake remote` | Configure and control delivery to a remote endpoint — see [Remote Delivery](#remote-delivery) below. |
@@ -152,8 +166,8 @@ review. Its default design keeps the sensitive path local:
   and counters. Invalid or path-shaped values are dropped rather than stored.
 - Repository identity is a salted, per-machine HMAC. The readable project map
   stays local with restrictive permissions; its labels are what `wake report`
-  and the dashboard show in their REPO column. When you turn remote delivery on,
-  a payload carries that hash and the repository's readable label; the
+  and the dashboard show in their PROJECT column. When you turn remote delivery
+  on, a payload carries that hash and the repository's readable label; the
   repository path never leaves the machine.
 - Every binary ships the remote-delivery capability and it is off until you run
   `wake remote set [url]` and `wake remote on`. Until you do, no endpoint is
@@ -184,9 +198,16 @@ wake remote flush
 wake remote status
 ```
 
+The endpoint must be an `https://` URL, unless its host is a loopback address
+(`localhost`, `127.0.0.0/8`, `::1`) — a self-hosted collector on your own machine
+may be plain `http://`. Anything else is refused, because the credential travels
+in the `Authorization` header and `http://` to another host puts it on the
+network in the clear. Loopback is judged from the host as written; no name is
+resolved.
+
 | Command | Purpose |
 | --- | --- |
-| `wake remote set [url]` | Configure the delivery endpoint. At a terminal it prompts for the URL if you did not pass one, shows the destination's bare host and asks you to confirm it, then asks for the public key (shown) and the secret key (not shown). Piped or in CI it is unchanged: the URL is an argument and the joined `public:secret` credential is read whole from standard input, never as an argument. Neither path ever echoes the secret key or the joined credential, and neither ever prints the full URL. |
+| `wake remote set [url]` | Configure the delivery endpoint. At a terminal it prompts for the URL if you did not pass one, shows the destination's bare host and asks you to confirm it, then asks for the public key (shown) and the secret key (not shown). Piped or in CI it is unchanged: the URL is an argument and the joined `public:secret` credential is read whole from standard input, never as an argument. Neither path ever echoes the secret key or the joined credential, and neither ever prints the full URL. The URL must be `https://`, or `http://` to a loopback host. |
 | `wake remote on` | Start delivering records to the configured endpoint. |
 | `wake remote off` | Stop delivering; the endpoint is kept, so nothing needs re-entering to resume. |
 | `wake remote flush` | Deliver everything pending now. Add `--dry-run` to print the exact payload the next flush would send, without sending it. |
