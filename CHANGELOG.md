@@ -111,6 +111,17 @@ called out under Changed.
 
 ### Fixed
 
+- Delivery no longer re-sends batches the receiver already accepted. The watermark
+  advanced in memory per batch and reached disk once, after the whole flush, so a
+  flush killed partway — a detached child, a host restart — lost every acceptance it
+  was holding and posted all of them again on the next run. A response whose 2xx
+  arrived but whose body then failed to drain was counted as a rejection for the same
+  reason, and re-sent every time. Each accepted batch now persists its own position
+  before the run continues. Delivery stays at-least-once by design: a duplicate
+  carries the same deterministic span id and is collapsible after the fact, while a
+  skipped batch is a silent undercount nothing downstream could ever notice — so where
+  the two trade off, this path still chooses the re-send.
+
 - The `ERRORS` cell says what its percentage was computed over. It printed a bare
   `1 (100.0%)` beside a `CALLS` column reading 2, inviting a reader to bind the rate
   to the calls next to it; the real denominator is the calls that were rated at all.
