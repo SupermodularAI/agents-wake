@@ -75,6 +75,7 @@ func TestDoctorOutputOnAFreshInstall(t *testing.T) {
 		"global boundary registrations refused: 0\n" +
 		"refused calls: 0\n" +
 		"refused subagent runs: 0\n" +
+		"pending subagent runs: 0\n" +
 		"pending calls: 0\n" +
 		"interrupted calls: 0\n" +
 		"ambiguous skill runs: 0\n" +
