@@ -92,7 +92,15 @@ import (
 // repository was skipped" for a scan that never asked, which is the failure the bump to
 // 2 avoided. Same remedy, and the same cost — one scan's diagnostics, on a file that is
 // derived and non-precious (ADR-0014).
-const reportVersion = 9
+//
+// Bumped to 10 when the scan gained the pending-subagent-run counter (DG-115): a
+// version-9 file carries no such count, and read as this format it would report 0 — an
+// empty carry — for a measurement nobody took. That is the failure the bump to 2
+// avoided, and it is the one this counter exists to close: a user whose runs are sitting
+// unresolved in the carry would see a healthy scan and a confident zero.
+// Same remedy, and the same cost — one scan's diagnostics, on a file that is derived
+// and non-precious (ADR-0014).
+const reportVersion = 10
 
 // reportFileMode is the mode the counter file is written with. It holds no path and
 // no label, but it is state about this user's machine and the rest of the local
@@ -207,6 +215,42 @@ type Scan struct {
 	// release will ever name them. So it is deliberately not one of Diagnose's "collects
 	// nothing" reasons: a state word driven by this counter could never change again.
 	RefusedSubagentRuns int `json:"refused_subagent_runs"`
+	// PendingSubagentRuns counts the subagent runs the last scan's closing walk still
+	// held unresolved: anchored — by that scan, or by an earlier one whose carry it
+	// restored — and not judged, because no scan has observed the session that would
+	// judge them close. Not lost collection and not an invocation count: the carry is
+	// what lets a later scan resolve them (ADR-0015). It is deliberately not one of
+	// Diagnose's "collects nothing" reasons.
+	//
+	// It is a separate counter from PendingCalls and never folded into it. An
+	// unterminated tool call resolves when its result is written; a subagent run
+	// resolves when its session closes (ADR-0036 §2, ADR-0023). Two boundaries, two
+	// populations, and one integer summing unlike populations is what hides the one
+	// that matters (ADR-0047 §1).
+	//
+	// It counts pending *runs* only, never the carried children beside them: a child is
+	// a derived record awaiting a parent, not an unobserved invocation, and summing the
+	// two would be the same conflation one line up.
+	//
+	// It is the unresolved set the last scan's closing walk held, not the work that scan
+	// newly did: the set includes runs earlier scans anchored and this one restored from
+	// the carry, and with no incremental cursor (T020, T102) every scan re-reads the whole
+	// history. Reading it as "this scan deferred N runs" would overstate it. It is not the
+	// size of pending.json either — that file's merge is union-only and also holds
+	// resolved runs and the carried children, so that is the larger number.
+	//
+	// It is not a count of work waiting to be collected, and on an old machine it is
+	// mostly not that. A run leaves the set only when a scan observes its session close,
+	// and nothing else evicts it: pending.json's merge is union-only, so a resolved run
+	// stays in the carry file and every later scan restores it. While the transcripts are
+	// still there that costs nothing — the scan observes the session again and judges the
+	// run again — but once the harness has pruned them the restored run can never be
+	// judged, because SessionState.Closed reports false for a session it never observed.
+	// From then on it is counted by every scan with its record already in the store
+	// (activation's TestThePendingCarryReadmitsARunItAlreadyResolved). So the number does
+	// not fall back to zero by itself and grows over a machine's life; read it as the
+	// size of the carry's unresolved set, never as outstanding work.
+	PendingSubagentRuns int `json:"pending_subagent_runs"`
 	// PendingCalls counts tool calls the last scan found unterminated whose session is
 	// still inside the staleness window: a number that is not final yet, not collection
 	// that was lost (ADR-0015). It is deliberately not one of Diagnose's

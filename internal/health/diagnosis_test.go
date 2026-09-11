@@ -207,6 +207,7 @@ func TestDiagnoseOnlyEverReturnsAKnownState(t *testing.T) {
 		{Scan: Scan{At: scannedAt, EventsWritten: 1, BoundarySkipped: 2}},
 		{Scan: Scan{At: scannedAt, EventsWritten: 1, BoundaryRefused: 2}},
 		{Scan: Scan{At: scannedAt, EventsWritten: 1, RefusedSubagentRuns: 2}},
+		{Scan: Scan{At: scannedAt, EventsWritten: 1, PendingSubagentRuns: 2}},
 	}
 	failures := []error{nil, errors.New("refused")}
 
@@ -257,6 +258,42 @@ func TestDiagnoseDoesNotLetARefusedSubagentRunBlindTheIntegrationState(t *testin
 	got := Diagnose(Report{Scan: Scan{At: scannedAt, Transcripts: 2, EventsWritten: 4, RefusedSubagentRuns: 1}}, nil, nil)
 	if got.State != StateCollecting {
 		t.Errorf("State = %q, want %q", got.State, StateCollecting)
+	}
+}
+
+// A subagent run the closing walk could not judge is not lost collection: the run is
+// carried to the next scan and the carry is what lets a later scan resolve it — a number
+// that is not final yet, in exactly the sense an unterminated call is (ADR-0015). That is
+// the whole reason for the exclusion, and it does not rest on the number being
+// short-lived, because it is not: nothing evicts a run from the carry but a scan
+// observing its session close, so a run whose transcripts the harness has pruned is
+// counted from then on whether or not it had already resolved and been written
+// (activation's TestThePendingCarryHoldsARunWhoseTranscriptsTheHarnessPruned and
+// TestThePendingCarryReadmitsARunItAlreadyResolved). This counter is not a transient that
+// falls back to zero by itself.
+//
+// The second case is the one that proves the exclusion — the first could be carried by
+// its events-written value alone.
+func TestDiagnoseDoesNotLetAPendingSubagentRunBlindTheIntegrationState(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		scan Scan
+		want State
+	}{
+		{"alongside events written", Scan{Transcripts: 2, EventsWritten: 4, PendingSubagentRuns: 5}, StateCollecting},
+		{"with nothing written", Scan{Transcripts: 1, PendingSubagentRuns: 5}, StateCollectsZero},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			c.scan.At = scannedAt
+
+			got := Diagnose(Report{Scan: c.scan}, nil, nil)
+			if got.State == StateCollectsNothing {
+				t.Error("a pending subagent run was reported as lost collection")
+			}
+			if got.State != c.want {
+				t.Errorf("State = %q, want %q", got.State, c.want)
+			}
+		})
 	}
 }
 

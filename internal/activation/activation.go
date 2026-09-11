@@ -618,6 +618,29 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 	// folding it into that arm would put every machine that runs subagents permanently
 	// into "collects nothing" while thousands of records are written (health.Diagnose).
 	scan.RefusedSubagentRuns = final.RefusedSubagentRuns
+	// The unresolved runs the closing walk still holds: anchored — by this scan, or by an
+	// earlier one whose carry this scan restored — and not judged, because their sessions
+	// were not observed closed. Read off the same Pending() call storePending already
+	// uses — one read, post-Close, never a second one.
+	//
+	// Not the size of pending.json. That file's merge is union-only, so it also holds
+	// runs already resolved and written to the store, and the carried children beside
+	// them; this number is the walk's own unresolved set and is the smaller of the two.
+	// The two converge from below, though, and that is what keeps this number from being
+	// a count of outstanding work: a resolved run the file still holds is restored by
+	// every later scan, and once the harness has pruned the transcripts that would judge
+	// it, it is unresolved again for good. health.Scan.PendingSubagentRuns documents what
+	// a reader may take from the number.
+	//
+	// len(runs) only. The children beside them are an unlike population — a derived
+	// record awaiting a parent, not an unobserved invocation — and one integer summing
+	// the two would hide whichever of them matters (ADR-0047 §1).
+	//
+	// Assigned, not added, like the four counters around it: only the closure boundary
+	// knows what stayed unresolved, so there is no per-source half to add to. A walk that
+	// returned early above never reached here and the counter reads 0, which is what
+	// every close-derived counter beside it already does.
+	scan.PendingSubagentRuns = len(runs)
 	// Two different facts, deliberately two counters. Pending is a call whose session
 	// may still be running — transient, and not a fault. Interrupted is a call whose
 	// session went quiet past the threshold, so the invocation is now in the store

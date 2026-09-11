@@ -131,6 +131,24 @@ type Diagnosis struct {
 // never finished (ADR-0015). Both are honest, and neither is a source nobody could
 // read.
 //
+// A pending subagent run is not in it either, and it is the same argument one level up.
+// A run the closing walk could not judge is carried to the next scan, not lost: it is a
+// number that is not final yet in exactly the sense an unterminated call is (ADR-0015),
+// and the carry is what makes a later scan able to resolve it. Nothing was lost, so the
+// arm does not apply — that reason carries the exclusion on its own. doctor prints the
+// counter on its own line whatever the state word says.
+//
+// What is deliberately not claimed beside it is that the number is a transient that
+// returns to zero. A run leaves the carry only when a scan observes its session close,
+// and nothing evicts it otherwise — the carry's merge is union-only, so a run stays in
+// the file after it resolves and every scan restores it, and once the harness has pruned
+// the transcripts SessionState.Closed reports false for a session it never observed, so
+// that run is judged never again and counted forever. The number therefore sits above
+// zero on a machine collecting normally, and rises: it is the size of the carry's
+// unresolved set, not a count of outstanding work. That is one more reason to keep it
+// out of the arm, on the same standing-fact grounds as the counters above, and not a
+// reason to fold it in.
+//
 // Neither boundary counter is in it, and the refused one is the interesting case.
 //
 // A directory the recorded global root encloses whose repository could not be

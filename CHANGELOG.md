@@ -33,6 +33,20 @@ called out under Changed.
   them. A machine that has not scanned reads the breakdown as `not observed`
   rather than `0`, which is not the same answer. Classification registers nothing
   and consents nothing — the directories are counted, never collected from.
+- `doctor` reports `pending subagent runs` — how many subagent runs the last scan
+  could not resolve and carried to the next one rather than dropping. It is a separate
+  line from `pending calls` and counts a different population: a tool call resolves
+  when its result is written, a subagent run when its session closes. Without it a user
+  whose runs are sitting unresolved in the carry reads a healthy scan and a confident
+  zero — around 200 runs of one long session went unreported this way before the carry
+  existed. The line counts every run the last scan still held unresolved, not the runs
+  that scan newly deferred, and it never moves the integration state word: a carried
+  run is not lost collection. It is the size of the carry's unresolved set and not a
+  count of outstanding work, so read it that way: a run leaves the set only when a scan
+  observes its session close, and nothing else evicts it, so a run whose transcripts
+  the harness has pruned is counted from then on — including one that had already
+  resolved and been written to the store before the pruning. The number does not fall
+  back to zero by itself and grows over a machine's life.
 - An MCP tool's invocation now records which server provided it. A server's tools
   are named `mcp__<server>__<tool>` by the harness, and the server segment is
   stored as the harness spells it, validated as a bounded token. Before this,

@@ -114,6 +114,65 @@ func TestDoctorReportsRefusedSubagentRunsWithoutBlindingTheState(t *testing.T) {
 	}
 }
 
+// A subagent run the scan could not resolve is carried to the next scan, not lost, so it
+// gets its own line and deliberately does not move the state word: nothing was lost, and
+// that reason carries the exclusion on its own (health.Diagnose, ADR-0015). It is not
+// excluded for being transient — it is not one. A run leaves the carry only when a scan
+// observes its session close, so this counter sits above zero on a machine collecting
+// normally (activation's TestThePendingCarryReadmitsARunItAlreadyResolved), which is one
+// more reason to keep it out of the arm rather than a reason to fold it in.
+func TestDoctorReportsPendingSubagentRunsWithoutBlindingTheState(t *testing.T) {
+	paths := isolate(t)
+	if err := health.New(paths.HealthFile).RecordScan(health.Scan{
+		At: time.Now().UTC(), Transcripts: 2, EventsWritten: 6, PendingSubagentRuns: 4,
+	}); err != nil {
+		t.Fatalf("RecordScan() error = %v", err)
+	}
+
+	out, _, err := runSplit(t, "doctor")
+	if err != nil {
+		t.Fatalf("doctor error = %v", err)
+	}
+	for _, want := range []string{"pending subagent runs: 4", "integration: collecting"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output is missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "collects nothing") {
+		t.Errorf("a pending subagent run was reported as lost collection:\n%s", out)
+	}
+}
+
+// Two lines, two populations. A tool call resolves when its result is written; a
+// subagent run resolves when its session closes. The values differ here so a merged or
+// aliased field cannot pass, and each key must own exactly one line of its own — one
+// integer summing unlike populations is what hides the one that matters (ADR-0047 §1).
+func TestDoctorDoesNotConflatePendingSubagentRunsWithPendingCalls(t *testing.T) {
+	paths := isolate(t)
+	if err := health.New(paths.HealthFile).RecordScan(health.Scan{
+		At: time.Now().UTC(), Transcripts: 2, EventsWritten: 6, PendingCalls: 2, PendingSubagentRuns: 5,
+	}); err != nil {
+		t.Fatalf("RecordScan() error = %v", err)
+	}
+
+	out, _, err := runSplit(t, "doctor")
+	if err != nil {
+		t.Fatalf("doctor error = %v", err)
+	}
+	lines := strings.Split(out, "\n")
+	for _, want := range []string{"pending calls: 2", "pending subagent runs: 5"} {
+		count := 0
+		for _, line := range lines {
+			if line == want {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf("found %d lines equal to %q, want exactly 1:\n%s", count, want, out)
+		}
+	}
+}
+
 // A call and its result whose instants came back out of order is a number that
 // could not be measured on a record that exists — not lost collection. It gets its
 // own line and deliberately does not blind the state word: with no incremental
