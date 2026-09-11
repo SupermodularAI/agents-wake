@@ -288,25 +288,52 @@ func flushLocked(p config.Paths, auth config.RemoteAuth, minInterval time.Durati
 			deliveryErr = gzipErr
 			break
 		}
-		if postErr := post(auth.Endpoint, auth.Credential, body); postErr != nil {
-			// The first non-2xx stops the run. Continuing past a failed batch
-			// and advancing over a later successful one would open a gap nothing
+		accepted, postErr := post(auth.Endpoint, auth.Credential, body)
+		if accepted {
+			// Durable here, not once at the end of the run. A flush that posts
+			// several batches and dies before a trailing write used to lose every
+			// acceptance it was holding, and the next flush posted all of them
+			// again. At-least-once delivery is the contract (ADR-0018, ADR-0027)
+			// and a re-send is still the right way to fail, but a duplicate the
+			// receiver is not guaranteed to collapse is one somebody downstream has
+			// to collapse instead — so a window that manufactures them is worth
+			// closing.
+			//
+			// Never over a stale spool: the position this run reached counts a
+			// numbering the pending rebuild will replace, and making a provisional
+			// number durable mid-flush would turn it into a permanent, silent skip
+			// — the one direction this path never fails in. It is the same reason
+			// the trailing write drops the position below.
+			state.Position = batch[len(batch)-1].Position
+			if stale == 0 {
+				if writeErr := writeDeliveryState(statePath, state); writeErr != nil {
+					// Local, not the far end's. Stopping is the conservative
+					// direction: carrying on would post batches this run cannot
+					// record, and every one of them would be re-sent.
+					deliveryErr = errors.Join(postErr, writeErr)
+					break
+				}
+			}
+			report.Batches++
+			report.Records += len(batch) - dropped
+			report.Dropped += dropped
+		}
+		if postErr != nil {
+			// The first failure stops the run. Continuing past a batch the receiver
+			// did not accept and advancing over a later one would open a gap nothing
 			// ever closes, because the watermark is a single position and cannot
 			// describe a hole.
 			deliveryErr = postErr
 			break
 		}
-		state.Position = batch[len(batch)-1].Position
-		report.Batches++
-		report.Records += len(batch) - dropped
-		report.Dropped += dropped
 	}
 
-	// Written on the failure path too, and deliberately. The partial position
-	// has to survive or the next run re-sends batches the receiver already
-	// accepted, and LastFlush has to advance or a dead endpoint is retried on
-	// every single trigger — which is what the minimum interval exists to
-	// prevent.
+	// Written on the failure path too, and deliberately. Each accepted batch has
+	// already persisted its own position above, so what is left for this write is
+	// LastFlush — which has to advance or a dead endpoint is retried on every
+	// single trigger, the thing the minimum interval exists to prevent — and the
+	// position of a batch the encoder dropped whole, which advances without a POST
+	// and so has no acceptance of its own to be written against.
 	//
 	// Except over a stale spool, where the position this run reached counts a
 	// numbering the pending rebuild will replace. It is dropped rather than written,
@@ -410,6 +437,12 @@ func gzipped(payload []byte) ([]byte, error) {
 
 // post sends one gzipped batch and reports whether the receiver accepted it.
 //
+// The bool and the error are separate answers because they can both be true at
+// once: a 2xx that arrived and a response body that then failed to drain is an
+// accepted batch on a broken connection. Acceptance is the only thing the
+// watermark may advance over, and only a status this function actually saw
+// counts as one.
+//
 // Exactly four headers are set. Content-Encoding is not extra scope: a gzipped
 // body without it is undecodable at the receiver, so it is implied by the
 // requirement rather than added to it.
@@ -417,13 +450,13 @@ func gzipped(payload []byte) ([]byte, error) {
 // No error this function returns carries the endpoint, the credential, or the
 // response body. The body is drained into io.Discard rather than read into a
 // message, because a receiver can echo the request back in its error text.
-func post(endpoint, credential string, body []byte) error {
+func post(endpoint, credential string, body []byte) (bool, error) {
 	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		// Replaced, not wrapped: NewRequest's error embeds the URL it could not
 		// parse. Unreachable in practice — config validated the endpoint as an
 		// absolute http:// or https:// URL on the way in.
-		return ErrDeliveryFailed
+		return false, ErrDeliveryFailed
 	}
 	req.Header.Set(contentTypeHeader, contentTypeJSON)
 	req.Header.Set(contentEncodingHeader, encodingGzip)
@@ -432,7 +465,7 @@ func post(endpoint, credential string, body []byte) error {
 
 	resp, err := deliveryClient.Do(req)
 	if err != nil {
-		return ErrDeliveryFailed
+		return false, ErrDeliveryFailed
 	}
 	// Drained before the status is judged, so the connection is reusable for the
 	// next batch of the same run.
@@ -442,14 +475,18 @@ func post(endpoint, credential string, body []byte) error {
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		// The status code is a number this package produced no part of, so it is
 		// safe to name and is the one thing worth naming.
-		return fmt.Errorf("status %d: %w", resp.StatusCode, ErrDeliveryRejected)
+		return false, fmt.Errorf("status %d: %w", resp.StatusCode, ErrDeliveryRejected)
 	}
 	if copyErr != nil || closeErr != nil {
-		// The batch was accepted but the exchange did not complete cleanly, so
-		// the run stops here without advancing. That costs a re-send, which the
-		// receiver collapses. Valueless for the same reason Do's error is: a
-		// transport error on this side can carry the connection's address too.
-		return ErrDeliveryFailed
+		// The 2xx already arrived, so the batch is accepted and the caller is told
+		// so: what failed is the tail of the exchange, not the delivery. The run
+		// still stops here, because a connection that broke mid-response is a poor
+		// bet for the next batch — but the acceptance is recorded first, which is
+		// what stops this from re-sending a batch the receiver already holds. A
+		// receiver is not guaranteed to collapse that duplicate for us. Valueless
+		// for the same reason Do's error is: a transport error on this side can
+		// carry the connection's address too.
+		return true, ErrDeliveryFailed
 	}
-	return nil
+	return true, nil
 }
