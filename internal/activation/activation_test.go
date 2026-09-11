@@ -96,9 +96,9 @@ func TestInitWithoutFullNeverWalksHarnessHistory(t *testing.T) {
 	original := importHistory
 	t.Cleanup(func() { importHistory = original })
 	walks := 0
-	importHistory = func(repos *config.Repos, claudeDir string, destination *store.Store, installed claudecode.Installed, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope, discover *boundaryDiscovery) (int, health.Scan, skippedByDirectory, error) {
+	importHistory = func(repos *config.Repos, claudeDir string, destination *store.Store, installed claudecode.Installed, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope, discover *boundaryDiscovery, paths config.Paths) (int, health.Scan, skippedByDirectory, error) {
 		walks++
-		return original(repos, claudeDir, destination, installed, stale, idle, scope, discover)
+		return original(repos, claudeDir, destination, installed, stale, idle, scope, discover, paths)
 	}
 
 	written, err := Init(paths, root, claudeDir, testExecutable(t), false)
@@ -1485,4 +1485,99 @@ func TestIngestCountsATypedInvocationTheMachineDoesNotHave(t *testing.T) {
 	if typed != 1 {
 		t.Errorf("typed pr-review records = %d, want 1", typed)
 	}
+}
+
+// A subagent run buffered by a whole-history import while its session is still
+// open must still resolve when that session later closes — the run happened, and
+// no boundary makes it un-happen. Without the carry it cannot: the buffer is
+// scan-local, the import's scan ends with the session open, and every later
+// hook-fired scan re-reads nothing — the run's entries predate the recorded
+// collection boundary, so the trigger's forward-only consent never re-anchors
+// it. The session closes, no number ever carries the run, and doctor has no
+// counter for the loss.
+func TestTriggerResolvesASubagentRunAnEarlierImportBuffered(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	claudeDir := filepath.Join(t.TempDir(), "claude")
+	writeFixture(t, filepath.Join(claudeDir, "settings.json"), `{}`)
+	// Stamped an hour back: before the boundary the plain init records, open
+	// under the import's default threshold, and closed under the one the trigger
+	// runs with below — the exact shape a long dispatch session leaves behind.
+	stamp := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	parent := []string{
+		`{"uuid":"parent-1","sessionId":"session-1","cwd":"` + root + `","timestamp":"` + stamp + `","entrypoint":"cli","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-parent","name":"Bash"}]}}`,
+		`{"uuid":"parent-2","sessionId":"session-1","cwd":"` + root + `","timestamp":"` + stamp + `","entrypoint":"cli","message":{"content":[{"type":"tool_result","tool_use_id":"call-parent","is_error":false}]}}`,
+	}
+	writeFixture(t, filepath.Join(claudeDir, "projects", "project", "session.jsonl"), strings.Join(parent, "\n"))
+	subagent := []string{
+		`{"uuid":"agent-1","agentId":"agent-1","sessionId":"session-1","cwd":"` + root + `","timestamp":"` + stamp + `","entrypoint":"cli","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-agent","name":"Bash"}]}}`,
+		`{"uuid":"agent-2","agentId":"agent-1","attributionAgent":"sdlc-run","sessionId":"session-1","cwd":"` + root + `","timestamp":"` + stamp + `","entrypoint":"cli","message":{"model":"sonnet","content":[{"type":"tool_result","tool_use_id":"call-agent","is_error":false}]}}`,
+	}
+	writeFixture(t, filepath.Join(claudeDir, "projects", "project", "session", "subagents", "agent-1.jsonl"), strings.Join(subagent, "\n"))
+	paths := testPaths(t)
+
+	// A plain init records the boundary now and declines the history — the
+	// promise ADR-0024 makes and the trigger below must keep.
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), false); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	// The user then asks for the history. The import anchors the run; the
+	// session is still open, so nothing resolves yet — that half is correct and
+	// is not what this test fixes.
+	if _, err := Ingest(paths, claudeDir); err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+	if got := spoolSubagentRecords(t, paths); len(got) != 0 {
+		t.Fatalf("the import resolved %d subagent records of an open session, want 0", len(got))
+	}
+
+	// The session closes, and the hook fires. The run must resolve here: it was
+	// anchored by a scan the user asked for, and the boundary is about what a
+	// hook may import uninvited — not about erasing what an import already saw.
+	if _, err := config.Set(paths, "scan.stale_call_timeout", "30m"); err != nil {
+		t.Fatalf("Set() error = %v", err)
+	}
+	if _, err := Trigger(paths, claudeDir); err != nil {
+		t.Fatalf("Trigger() error = %v", err)
+	}
+
+	runs := spoolSubagentRecords(t, paths)
+	if len(runs) != 1 || runs[0].Name != "sdlc-run" {
+		t.Fatalf("subagent records = %+v, want the one sdlc-run the import buffered", runs)
+	}
+
+	// The child the import derived inside the subagent's transcript must surface
+	// with it, parented onto the run — the carry covers both halves of the loss,
+	// not only the run's own record.
+	entries := spoolEntries(t, paths)
+	var child *record.Record
+	for i := range entries {
+		if entries[i].Record.Kind == record.KindBuiltinTool && entries[i].Record.SessionID == "session-1" && entries[i].Record.Name == "Bash" {
+			child = &entries[i].Record
+		}
+	}
+	if child == nil {
+		t.Fatalf("no call record from the subagent transcript; the carry lost the child half")
+	}
+	if child.ParentEventID != runs[0].EventID {
+		t.Errorf("child parent = %q, want the subagent record's %q (ADR-0035 §2 case 1)", child.ParentEventID, runs[0].EventID)
+	}
+}
+
+// spoolSubagentRecords reads the subagent records the spool holds.
+func spoolSubagentRecords(t *testing.T, paths config.Paths) []record.Record {
+	t.Helper()
+	entries, err := store.New(filepath.Join(paths.DataDir, eventsFile)).Entries(0)
+	if err != nil {
+		t.Fatalf("Entries() error = %v", err)
+	}
+	runs := make([]record.Record, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Record.Kind == record.KindSubagent {
+			runs = append(runs, entry.Record)
+		}
+	}
+	return runs
 }

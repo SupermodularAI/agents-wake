@@ -70,6 +70,14 @@ type Scan struct {
 	// waits here and is emitted once with its parent already set, never emitted first
 	// and corrected later.
 	deferred []deferredChild
+	// pendingChildren is the half of deferred a Close could not emit, kept apart so
+	// the deferred buffer drains like every other while the survivors stay
+	// carryable: Pending reports them and RestorePending re-defers them on the next
+	// scan. A child lands here only while its session is open — a closed session
+	// resolves or refuses every run it holds, and the precedence then always
+	// answers the child — so the tally a second Close would recount is never one a
+	// session_end was not yet written from.
+	pendingChildren []deferredChild
 	// skills indexes the invocation records this walk derived per (session, skill
 	// name), so case 2 resolves against records that exist rather than against a
 	// second, independent lookup (ADR-0035 §3, §6).
@@ -524,10 +532,25 @@ func (s *Scan) Close() Result {
 	for _, child := range s.deferred {
 		s.tally.observeOne(child.event)
 	}
-	// Drained like every other buffer this pass resolves, so a second Close resolves
-	// nothing further and reports the same totals rather than counting these twice.
-	// Nothing changes between two Closes, so a child this pass left buffered would not
-	// have been emitted by the next one either.
+	// Drained like every other buffer this pass resolves, so a second Close
+	// resolves nothing further and reports the same totals rather than counting
+	// these twice. The un-emitted half is not discarded, though: it moves to
+	// pendingChildren. A child this pass left buffered is one a later scan may
+	// still emit — its session can close after this scan ends, and the entries
+	// it was derived from are not guaranteed to be re-read then (a forward-only
+	// scan never re-reads what predates the recorded boundary), so dropping it
+	// here would lose a record the walk already derived. Pending hands the
+	// survivors to the caller, and RestorePending takes them back.
+	emittedChildren := make(map[record.Hash]struct{}, len(children))
+	for _, derived := range children {
+		emittedChildren[derived.event.EventID] = struct{}{}
+	}
+	s.pendingChildren = s.pendingChildren[:0]
+	for _, child := range s.deferred {
+		if _, done := emittedChildren[child.event.EventID]; !done {
+			s.pendingChildren = append(s.pendingChildren, child)
+		}
+	}
 	s.deferred = nil
 	for _, derived := range children {
 		result.Records = append(result.Records, derived.event)
