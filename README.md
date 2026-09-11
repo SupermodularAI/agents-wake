@@ -198,9 +198,16 @@ wake remote flush
 wake remote status
 ```
 
+The endpoint must be an `https://` URL, unless its host is a loopback address
+(`localhost`, `127.0.0.0/8`, `::1`) — a self-hosted collector on your own machine
+may be plain `http://`. Anything else is refused, because the credential travels
+in the `Authorization` header and `http://` to another host puts it on the
+network in the clear. Loopback is judged from the host as written; no name is
+resolved.
+
 | Command | Purpose |
 | --- | --- |
-| `wake remote set [url]` | Configure the delivery endpoint. At a terminal it prompts for the URL if you did not pass one, shows the destination's bare host and asks you to confirm it, then asks for the public key (shown) and the secret key (not shown). Piped or in CI it is unchanged: the URL is an argument and the joined `public:secret` credential is read whole from standard input, never as an argument. Neither path ever echoes the secret key or the joined credential, and neither ever prints the full URL. |
+| `wake remote set [url]` | Configure the delivery endpoint. At a terminal it prompts for the URL if you did not pass one, shows the destination's bare host and asks you to confirm it, then asks for the public key (shown) and the secret key (not shown). Piped or in CI it is unchanged: the URL is an argument and the joined `public:secret` credential is read whole from standard input, never as an argument. Neither path ever echoes the secret key or the joined credential, and neither ever prints the full URL. The URL must be `https://`, or `http://` to a loopback host. |
 | `wake remote on` | Start delivering records to the configured endpoint. |
 | `wake remote off` | Stop delivering; the endpoint is kept, so nothing needs re-entering to resume. |
 | `wake remote flush` | Deliver everything pending now. Add `--dry-run` to print the exact payload the next flush would send, without sending it. |

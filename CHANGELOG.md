@@ -186,6 +186,28 @@ called out under Changed.
   is consented registers with no relation and never gains one, so its invocations
   keep counting under the worktree.
 
+### Security
+
+- The delivery credential is no longer sent in the clear. `wake remote set`
+  accepted any `http://` endpoint, and the credential rides in the `Authorization`
+  header on every batch — so a plain-`http://` destination put a live third-party
+  key on the network on every flush, not once. The endpoint must now be an
+  `https://` URL, unless its host is a loopback address (`localhost`, anything in
+  `127.0.0.0/8`, `::1`), which keeps a self-hosted collector on your own machine
+  working: nothing sent over loopback crosses a network. Loopback is decided from
+  the host as written and no name is resolved, so `foo.localhost` and
+  `localhost.localdomain` are refused — a validator that consulted a resolver would
+  behave differently on two machines, and differently tomorrow.
+
+  The rule applies on read as well as on write, so a machine whose store already
+  holds a cleartext endpoint to a remote host has `remote status`, `remote on`,
+  `remote off`, `remote flush` and `doctor` all refuse and say why. **Nothing is
+  migrated, cleared, rewritten or quietly upgraded to `https://`** — the bytes you
+  wrote stay as you wrote them, and delivery is loudly refused rather than silently
+  disabled. The exit is `wake remote set <https-url>`, which replaces a stored
+  endpoint the rule refuses and keeps whatever on/off state the store held. No
+  refusal ever quotes the URL back.
+
 ## [0.2.0] - 2026-08-28
 
 Remote delivery. Wake can now ship its derived records to an OTLP/HTTP

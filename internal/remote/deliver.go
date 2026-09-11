@@ -72,7 +72,7 @@ const (
 // ADR-0028's rule is "never echo what was read", and http.Client.Do returns a
 // *url.Error that embeds the URL it failed on — so the transport's error is
 // replaced here and never wrapped. That is the same reason config's
-// isHTTPEndpoint discards url.Parse's error, and it is the single easiest
+// endpointFault discards url.Parse's error, and it is the single easiest
 // privacy regression on this path: wrapping reads as diligence and leaks the
 // endpoint into every log line a caller writes.
 //
@@ -458,7 +458,8 @@ func post(endpoint, credential string, body []byte) (bool, error) {
 	if err != nil {
 		// Replaced, not wrapped: NewRequest's error embeds the URL it could not
 		// parse. Unreachable in practice — config validated the endpoint as an
-		// absolute http:// or https:// URL on the way in.
+		// absolute https:// URL, or an http:// URL to a loopback host, on the
+		// way in.
 		return false, ErrDeliveryFailed
 	}
 	req.Header.Set(contentTypeHeader, contentTypeJSON)
