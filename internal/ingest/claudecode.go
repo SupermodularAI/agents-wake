@@ -191,6 +191,26 @@ func (s *ClaudeCodeScan) Read(reader io.Reader) (Result, error) {
 	return persist(derived, s.destination)
 }
 
+// RestorePending re-anchors the subagent runs and re-defers the children an
+// earlier scan left unresolved, so this walk resolves them when their sessions
+// close. It must run before the first Read: the deferred buffer Close drains is
+// the one the children re-enter, and the run folds are the same min-folds the
+// walk applies, so a carried value and a re-read entry merge exactly as two
+// entries of one scan would.
+//
+// The caller owns the carry's persistence; this package only forwards the
+// values, as it does for every other injected input.
+func (s *ClaudeCodeScan) RestorePending(runs []claudecode.PendingSubagentRun, children []claudecode.PendingChild) {
+	s.scan.RestorePending(runs, children)
+}
+
+// Pending reports what this walk anchored or derived but could not resolve, in
+// the form RestorePending takes back on a later scan. It reads post-Close
+// state; calling it before Close is a valid but meaningless snapshot.
+func (s *ClaudeCodeScan) Pending() ([]claudecode.PendingSubagentRun, []claudecode.PendingChild) {
+	return s.scan.Pending()
+}
+
 // Close resolves the walk's session-scoped state once, over the union of every
 // source it read, and persists the records that resolution derived: the calls the
 // staleness rule gave up on, the Shape-A skill fallbacks, one record per subagent

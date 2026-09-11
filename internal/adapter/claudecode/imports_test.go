@@ -53,6 +53,13 @@ var frozenPackageImports = map[string][]string{
 		"github.com/SupermodularAI/agents-wake/internal/record",
 		"slices",
 	},
+	// Pending carry-across-scans is derivation support, not a filesystem
+	// capability: the serialisable form is values only — bounded ids, hashes,
+	// timestamps, enums — and the caller's own file does the I/O (ADR-0019 §1).
+	"pending.go": {
+		"github.com/SupermodularAI/agents-wake/internal/record",
+		"time",
+	},
 	"session.go": {
 		"github.com/SupermodularAI/agents-wake/internal/record",
 		"time",

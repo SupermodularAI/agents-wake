@@ -487,7 +487,10 @@ var importHistory = ingestHistory
 // classifying the first walk of a two-walk scan would produce a breakdown of counters
 // the second walk goes on to replace. The caller classifies once, against the walk
 // whose counters survive (ADR-0047 §3).
-func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Store, installed claudecode.Installed, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope, discover *boundaryDiscovery) (int, health.Scan, skippedByDirectory, error) {
+//
+// paths carries the carry's home: the pending file lives under the data root beside
+// the spool, and loadPending/storePending resolve it from there.
+func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Store, installed claudecode.Installed, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope, discover *boundaryDiscovery, paths config.Paths) (int, health.Scan, skippedByDirectory, error) {
 	written := 0
 	scan := health.Scan{At: time.Now().UTC(), RefusedProjects: repos.DroppedEntries()}
 	notes := &skippedNotes{}
@@ -502,6 +505,14 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 	// The Namer is hoisted with it. It was already constant across the walk — it is
 	// derived from the one name key — so building it once is the same value.
 	transcripts := ingest.NewClaudeCodeScan(resolve, record.NewNamer(repos.NameKey()), installed, stale, idle, destination)
+	// The carry is restored before the first source is read: a run an earlier scan
+	// anchored and a re-read entry merge through the same min-folds, so the walk
+	// resolves the union exactly as one scan over both would. What the carry
+	// restores is what a forward-only scope can never re-read — the entries
+	// predating the recorded boundary — and without it a run buffered by an
+	// import while its session was open is lost the moment that scan ends.
+	pending := loadPending(paths)
+	transcripts.RestorePending(pending.Runs, pending.Children)
 	err := filepath.WalkDir(filepath.Join(claudeDir, "projects"), func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			// "Not there" arrives by this same route as "could not be read":
@@ -577,6 +588,15 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 	// directory at all this read no source, so it derives nothing and store.Append on
 	// an empty slice creates no spool — the same clean zero that arm reported before.
 	final, closeErr := transcripts.Close()
+	// The carry is republished whether or not the close appended: what stayed
+	// unresolved is independent of the write, and losing it on a failed append
+	// would re-open the loss the carry closes. A store error is joined into the
+	// scan's error rather than replacing it — the append's failure is the one the
+	// caller already surfaces.
+	runs, children := transcripts.Pending()
+	if storeErr := storePending(paths, pendingState{Version: pendingVersion, Runs: runs, Children: children}); storeErr != nil {
+		closeErr = errors.Join(closeErr, storeErr)
+	}
 	if closeErr != nil {
 		return written, scan, skippedByDirectory{}, closeErr
 	}

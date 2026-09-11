@@ -230,7 +230,7 @@ func rebuildStaleSpool(events *store.Store, scope collectionScope) (found int, r
 
 func scanBoundaryWalks(paths config.Paths, repos *config.Repos, claudeDir string, events *store.Store, installed claudecode.Installed, stale claudecode.Staleness, idle claudecode.Idleness, scope collectionScope) (int, health.Scan, error) {
 	discovery := newBoundaryDiscovery(repos)
-	written, scan, skipped, err := importHistory(repos, claudeDir, events, installed, stale, idle, scope, discovery)
+	written, scan, skipped, err := importHistory(repos, claudeDir, events, installed, stale, idle, scope, discovery, paths)
 	if err != nil {
 		// Unclassified on the way out, and correctly: the walk did not finish, so it
 		// measured nothing to classify and doctor reads the breakdown as "not observed".
@@ -266,7 +266,7 @@ func scanBoundaryWalks(paths config.Paths, repos *config.Repos, claudeDir string
 	// command's discovery picks it up, and the skip counter is what reports the gap
 	// meanwhile — the same fallibility ADR-0036 §3 puts that counter there for. Building
 	// a second set here would pay for discovery twice on the hook-fired path (ADR-0016).
-	second, secondScan, secondSkipped, err := importHistory(reopened, claudeDir, events, installed, stale, idle, scope, nil)
+	second, secondScan, secondSkipped, err := importHistory(reopened, claudeDir, events, installed, stale, idle, scope, nil, paths)
 	if err != nil {
 		return written + second, scan, err
 	}
