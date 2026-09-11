@@ -211,7 +211,36 @@ func LoadRemoteAuth(p Paths) (RemoteAuth, error) {
 // literal here, the fault is a sentinel carrying no value, and a decode failure
 // goes through parseFailure — the decoder's own message embeds the offending
 // bytes, and the bytes here are the credential (plan §4.2).
+//
+// Everything above the endpoint rule is decodeRemoteAuth's, which exists for one
+// caller; this is still the entry point every reader and every write path but
+// SetRemoteEndpoint goes through, and the one that applies the rule.
 func storedRemoteAuth(p Paths) (RemoteAuth, error) {
+	auth, err := decodeRemoteAuth(p)
+	if err != nil {
+		return RemoteAuth{}, err
+	}
+	// Validated here rather than at the caller, because the override carries no
+	// endpoint: what is checked is what the file says, which is the whole of what
+	// decides where a credential goes.
+	if err := validateRemoteAuth(auth); err != nil {
+		return RemoteAuth{}, fmt.Errorf("the remote endpoint in the credential store %w", err)
+	}
+	return auth, nil
+}
+
+// decodeRemoteAuth is storedRemoteAuth without the endpoint rule: every refusal
+// about the file itself — the config root, the type and mode, the bytes, the
+// version — and none about where the endpoint points.
+//
+// The two are separate for exactly one caller. SetRemoteEndpoint's whole job is
+// to replace the endpoint, so a stored endpoint the rule refuses is what it is
+// being run to fix rather than a reason to refuse it; every other caller reads
+// through storedRemoteAuth and gets the rule. The split is deliberately at the
+// endpoint and nowhere else: a store whose version, mode or bytes this build
+// cannot trust is never silently overwritten, because those bytes are the only
+// copy of the credential there is.
+func decodeRemoteAuth(p Paths) (RemoteAuth, error) {
 	path := remoteAuthPath(p)
 
 	if err := checkStateDir(p.ConfigDir); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -247,19 +276,11 @@ func storedRemoteAuth(p Paths) (RemoteAuth, error) {
 			stored.Version, remoteAuthVersion, errRemoteAuthWrongVersion)
 	}
 
-	auth := RemoteAuth{
+	return RemoteAuth{
 		Endpoint:   stored.Endpoint,
 		Enabled:    stored.Enabled,
 		Credential: stored.Credential,
-	}
-	// Validated here rather than at the caller, because the override carries no
-	// endpoint: what is checked is what the file says, which is the whole of what
-	// decides where a credential goes.
-	if err := validateRemoteAuth(auth); err != nil {
-		return RemoteAuth{}, fmt.Errorf("the remote endpoint in the credential store %w", err)
-	}
-
-	return auth, nil
+	}, nil
 }
 
 // withEnvCredential applies EnvRemoteAuthorization to a value read from disk.
@@ -385,8 +406,18 @@ func EndpointHost(raw string) string {
 // for the same reason `remote off` must not clear the endpoint: the state the
 // user put the machine in is theirs, and a command that quietly undoes it is the
 // hostility ADR-0018 rejects (ADR-0028).
+//
+// It reads through decodeRemoteAuth rather than storedRemoteAuth, and it is the
+// only caller that does. This is the one command whose whole job is to replace
+// the endpoint, so a stored endpoint that fails the endpoint rule — a cleartext
+// destination written by an older build, say — is precisely what it is being run
+// to fix; refusing it here would leave an affected machine with no in-tool exit
+// at all. Every other fault the store can have is still fatal, and the new value
+// is validated in full by SetRemoteAuth before anything is written. The
+// environment's credential cannot reach the file either, because this path does
+// not go through LoadRemoteAuth.
 func SetRemoteEndpoint(p Paths, endpoint, credential string) error {
-	stored, err := storedRemoteAuth(p)
+	stored, err := decodeRemoteAuth(p)
 	if err != nil {
 		return err
 	}

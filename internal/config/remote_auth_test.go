@@ -1017,3 +1017,118 @@ func TestHTTPSIsUnaffectedByTheCleartextRule(t *testing.T) {
 		})
 	}
 }
+
+// The determined consequence of applying the rule on the read path: on a machine
+// whose store already held a cleartext endpoint to a remote host, `remote on`
+// and `remote off` both refuse, because both read the store first.
+//
+// That is the intended behaviour rather than a gap. Nothing is cleared,
+// rewritten, coerced to https:// or migrated — the bytes on disk are the user's
+// and stay exactly as they wrote them, which is what the byte-identity assertion
+// below fixes in place. The exit is `wake remote set` with an https:// URL.
+func TestSetRemoteEnabledRefusesAStoredCleartextEndpoint(t *testing.T) {
+	const cleartext = "http://remote-auth-unmistakable-host.example/v1/traces"
+
+	for _, enabled := range []bool{true, false} {
+		t.Run(fmt.Sprintf("SetRemoteEnabled(%t)", enabled), func(t *testing.T) {
+			p := remoteTestPaths(t)
+			storePath := filepath.Join(p.ConfigDir, remoteAuthFileName)
+			content := fmt.Sprintf(
+				`{"version":1,"endpoint":%q,"enabled":false,"credential":%q}`+"\n", cleartext, testCredential)
+			writeRemoteAuthRaw(t, storePath, content)
+
+			err := SetRemoteEnabled(p, enabled)
+
+			if !errors.Is(err, errEndpointCleartext) {
+				t.Fatalf("SetRemoteEnabled(%t) = %v, want errEndpointCleartext", enabled, err)
+			}
+			assertDisclosesNothing(t, err, cleartext, storePath, testCredential, p.ConfigDir)
+			if got := readFileOrFail(t, storePath); got != content {
+				t.Error("the store was rewritten: a refusal must leave the bytes on disk exactly as they were")
+			}
+		})
+	}
+}
+
+// The refusal above has to have an in-tool exit, or the rule bricks the machine
+// it protects. `remote set` is the one command whose whole job is to replace the
+// endpoint, so a stored endpoint that fails the endpoint rule is precisely what
+// it is being run to fix: it reads the store for its on/off state and replaces
+// the destination regardless.
+//
+// The stored enabled flag survives the replacement, so a machine that had
+// delivery on resumes delivering — to the compliant endpoint.
+func TestSetRemoteEndpointReplacesAStoredCleartextEndpoint(t *testing.T) {
+	p := remoteTestPaths(t)
+	storePath := filepath.Join(p.ConfigDir, remoteAuthFileName)
+	writeRemoteAuthRaw(t, storePath, fmt.Sprintf(
+		`{"version":1,"endpoint":"http://remote-auth-unmistakable-host.example/v1/traces","enabled":true,"credential":%q}`+"\n",
+		testCredential))
+
+	if err := SetRemoteEndpoint(p, testEndpoint, testCredential); err != nil {
+		t.Fatalf("SetRemoteEndpoint() = %v, want the refused endpoint to be replaceable", err)
+	}
+
+	got, err := LoadRemoteAuth(p)
+	if err != nil {
+		t.Fatalf("LoadRemoteAuth() = %v", err)
+	}
+	if got.Endpoint != testEndpoint {
+		t.Errorf("Endpoint = %q, want the supplied endpoint", got.Endpoint)
+	}
+	if !got.Enabled {
+		t.Error("Enabled = false, want the stored state preserved across the replacement")
+	}
+	if got.Credential != testCredential {
+		t.Error("Credential was not replaced by the one supplied")
+	}
+}
+
+// The guard on the task above: only the endpoint rule is waived for
+// `remote set`. Every other reason the store cannot be read is still fatal, so
+// splitting decode from validation swallowed nothing — a store whose version,
+// mode or bytes this build cannot trust is not silently overwritten with a fresh
+// one, which would discard the only copy of a credential there is.
+func TestSetRemoteEndpointStillRefusesAnUnreadableStore(t *testing.T) {
+	cases := map[string]struct {
+		arrange func(t *testing.T, p Paths, storePath string)
+		want    error
+	}{
+		"a store of an unknown version": {
+			arrange: func(t *testing.T, _ Paths, storePath string) {
+				writeRemoteAuthRaw(t, storePath, storeJSON(remoteAuthVersion+1))
+			},
+			want: errRemoteAuthWrongVersion,
+		},
+		"a store anyone can read": {
+			arrange: func(t *testing.T, p Paths, storePath string) {
+				setRemoteAuthOrFail(t, p)
+				if err := os.Chmod(storePath, 0o644); err != nil {
+					t.Fatalf("Chmod() error = %v", err)
+				}
+			},
+		},
+		"a store that does not parse": {
+			arrange: func(t *testing.T, _ Paths, storePath string) {
+				writeRemoteAuthRaw(t, storePath, fmt.Sprintf(`{"version":1,"credential":%q oops}`, testCredential))
+			},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			p := remoteTestPaths(t)
+			storePath := filepath.Join(p.ConfigDir, remoteAuthFileName)
+			tc.arrange(t, p, storePath)
+
+			err := SetRemoteEndpoint(p, testEndpoint, testCredential)
+
+			if err == nil {
+				t.Fatal("SetRemoteEndpoint() = nil, want a refusal")
+			}
+			if tc.want != nil && !errors.Is(err, tc.want) {
+				t.Fatalf("SetRemoteEndpoint() = %v, want %v", err, tc.want)
+			}
+			assertDisclosesNothing(t, err, storePath, testEndpoint, testCredential, p.ConfigDir)
+		})
+	}
+}
