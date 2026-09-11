@@ -1,5 +1,7 @@
 package inventory
 
+import "github.com/SupermodularAI/agents-wake/internal/record"
+
 // ProjectScope is the consent answer for the working directory a discovery pass
 // was asked about. It is an answer, never a path: the working directory itself
 // never reaches this type (plan §3.4).
@@ -48,6 +50,12 @@ func (s Scope) allowsProject() bool { return s.Project == ProjectConsented && s.
 type Discovery struct {
 	// Primitives is everything this pass was allowed to see.
 	Primitives []Primitive
+	// Observed records, per harness, whether this discovery actually read that
+	// harness's own declaration. A harness nobody looked at renders "not observed"
+	// and never "0" (ADR-0046), and a bool beside the name is how a renderer can
+	// tell the two apart — an empty Primitives slice cannot, because a harness that
+	// was read and declares nothing produces the same emptiness.
+	Observed []HarnessObservation
 	// ProjectScanned reports that project-local discovery ran. False is the
 	// conservative answer — the zero Discovery is treated as partial — because
 	// wrongly claiming completeness deletes recorded state, while wrongly claiming
@@ -75,4 +83,14 @@ type Discovery struct {
 	// types the bare form — a wrong report turned into lost collection. One row out,
 	// both spellings still admitted in.
 	canonical map[identity]identity
+}
+
+// HarnessObservation is one harness and whether the last discovery read it.
+//
+// A pair rather than a set of names, because "which harnesses were observed" and
+// "which harnesses exist" are different questions and a renderer needs both: the
+// build's own registry answers the second, and only this answers the first.
+type HarnessObservation struct {
+	Harness  record.Identifier `json:"harness"`
+	Observed bool              `json:"observed"`
 }

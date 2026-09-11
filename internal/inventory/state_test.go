@@ -1077,3 +1077,91 @@ func TestRefreshDoesNotMatchAServerDiscoveredUnderAnotherHarness(t *testing.T) {
 		t.Fatalf("inventory = %+v, want the discovered claude-code row untouched at 0 invocations", items)
 	}
 }
+
+// The snapshot has two halves — what this machine has, and which harnesses the
+// last scan reached — written by two different calls at two different moments.
+// These assert that neither erases the other, and that a file predating the second
+// half reads as "not observed" rather than as a row of zeroes (ADR-0046).
+
+func TestRecordHarnessesKeepsThePrimitives(t *testing.T) {
+	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
+	if err := primitives.Refresh(store.New(filepath.Join(t.TempDir(), "events.ndjson")), Discovery{
+		Primitives:     []Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "pr-review"}},
+		ProjectScanned: true,
+	}, nil); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	if err := primitives.RecordHarnesses([]HarnessObservation{{Harness: "claude-code", Observed: true}}); err != nil {
+		t.Fatalf("RecordHarnesses() error = %v", err)
+	}
+
+	snapshot, err := primitives.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	if len(snapshot.Primitives) != 1 {
+		t.Fatalf("primitives = %v, want the row Refresh wrote", snapshot.Primitives)
+	}
+	if len(snapshot.Harnesses) != 1 || !snapshot.Harnesses[0].Observed {
+		t.Fatalf("harnesses = %v, want claude-code observed", snapshot.Harnesses)
+	}
+}
+
+func TestRefreshKeepsTheHarnessObservations(t *testing.T) {
+	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
+	if err := primitives.RecordHarnesses([]HarnessObservation{{Harness: "opencode", Observed: true}}); err != nil {
+		t.Fatalf("RecordHarnesses() error = %v", err)
+	}
+	if err := primitives.Refresh(store.New(filepath.Join(t.TempDir(), "events.ndjson")), Discovery{
+		Primitives:     []Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "pr-review"}},
+		ProjectScanned: true,
+	}, nil); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	snapshot, err := primitives.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	if len(snapshot.Harnesses) != 1 || snapshot.Harnesses[0].Harness != "opencode" {
+		t.Fatalf("harnesses = %v, want the observation Refresh found there", snapshot.Harnesses)
+	}
+	if len(snapshot.Primitives) != 1 {
+		t.Fatalf("primitives = %v, want the row Refresh wrote", snapshot.Primitives)
+	}
+}
+
+func TestASnapshotWithoutHarnessesReadsAsNotObserved(t *testing.T) {
+	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
+	if err := primitives.Refresh(store.New(filepath.Join(t.TempDir(), "events.ndjson")), Discovery{ProjectScanned: true}, nil); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	snapshot, err := primitives.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	if len(snapshot.Harnesses) != 0 {
+		t.Fatalf("harnesses = %v, want none recorded", snapshot.Harnesses)
+	}
+}
+
+func TestSnapshotAndReadAgree(t *testing.T) {
+	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
+	if err := primitives.Refresh(store.New(filepath.Join(t.TempDir(), "events.ndjson")), Discovery{
+		Primitives:     []Primitive{{Harness: "claude-code", Kind: record.KindSkill, Name: "pr-review"}},
+		ProjectScanned: true,
+	}, nil); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	read, err := primitives.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	snapshot, err := primitives.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	if len(read) != len(snapshot.Primitives) {
+		t.Fatalf("Read() = %d rows, Snapshot() = %d", len(read), len(snapshot.Primitives))
+	}
+}

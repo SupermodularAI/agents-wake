@@ -191,36 +191,92 @@ func (s *Store) available(discovered Discovery) []Primitive {
 // there is nothing here this build can read, and neither is a reason to fail a
 // command over derived state the next Refresh republishes.
 func (s *Store) Read() ([]Usage, error) {
+	snapshot, err := s.Snapshot()
+	return snapshot.Primitives, err
+}
+
+// Snapshot is the persisted inventory plus what the last scan actually read.
+//
+// The two halves answer different questions, and both renderers need both: the
+// primitives are what this machine has, and the harness observations are which
+// harnesses the scan reached. A harness with no primitive rows could be one that
+// declares none or one nobody looked at, and only the second half separates them
+// (ADR-0046).
+type Snapshot struct {
+	Harnesses  []HarnessObservation
+	Primitives []Usage
+}
+
+// Snapshot reads both halves in one pass, on Read's terms: a missing file and one
+// written by another version of this format are both an empty answer rather than a
+// failed command.
+func (s *Store) Snapshot() (Snapshot, error) {
+	file, err := s.readFile()
+	if err != nil {
+		return Snapshot{}, err
+	}
+	return Snapshot{Harnesses: file.Harnesses, Primitives: file.Primitives}, nil
+}
+
+// RecordHarnesses stamps which harnesses the last scan read, leaving the primitive
+// rows exactly as they are.
+//
+// A separate write from Refresh because the two answer different questions and are
+// produced at different moments: Refresh republishes what discovery found, and this
+// republishes what the scan reached. A harness whose store is unreadable was
+// discovered and not read, and only that distinction makes "not observed" honest.
+//
+// It takes the same lock Refresh does and is read-modify-write, so neither erases
+// the other's half.
+func (s *Store) RecordHarnesses(observed []HarnessObservation) error {
+	return lockfile.WithLock(s.lockPath, func() error {
+		file, err := s.readFile()
+		if err != nil {
+			return err
+		}
+		file.Harnesses = observed
+		return s.writeFile(file)
+	})
+}
+
+// readFile is Read's decode, shared by both halves.
+func (s *Store) readFile() (primitiveFile, error) {
 	raw, err := os.ReadFile(s.path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
+		return primitiveFile{}, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("reading primitive inventory: %w", err)
+		return primitiveFile{}, fmt.Errorf("reading primitive inventory: %w", err)
 	}
 	var snapshot primitiveFile
 	if err := json.Unmarshal(raw, &snapshot); err != nil || snapshot.RefreshedAt.IsZero() {
-		return nil, errors.New("invalid primitive inventory")
+		return primitiveFile{}, errors.New("invalid primitive inventory")
 	}
 	// A snapshot this build does not write is not a corrupt one: the row grain
 	// changed, so a file from another version says nothing this build can read. It
 	// is derived, regenerable local state — the next Refresh republishes it — so it
 	// answers like a missing snapshot rather than failing `wake report`.
 	if snapshot.Version != primitiveFileVersion {
-		return nil, nil
+		return primitiveFile{}, nil
 	}
 	for _, usage := range snapshot.Primitives {
 		if !usage.valid() {
-			return nil, errors.New("invalid primitive inventory")
+			return primitiveFile{}, errors.New("invalid primitive inventory")
 		}
 	}
-	return snapshot.Primitives, nil
+	return snapshot, nil
 }
 
 type primitiveFile struct {
 	Version     int       `json:"version"`
 	RefreshedAt time.Time `json:"refreshed_at"`
-	Primitives  []Usage   `json:"primitives"`
+	// Harnesses is which harnesses the last scan read. The version stays 3: a file
+	// written before this field existed decodes with it nil, which is "no harness
+	// observation recorded", which every renderer treats as not observed — the
+	// correct answer for a scan that predates the field. Bumping would throw away
+	// every counter on upgrade to say the same thing.
+	Harnesses  []HarnessObservation `json:"harnesses,omitempty"`
+	Primitives []Usage              `json:"primitives"`
 }
 
 // derive joins the aggregate against what discovery may write. canonical is the
@@ -375,8 +431,28 @@ func canonicalIdentity(canonical map[identity]identity, id identity) identity {
 	return id
 }
 
+// write republishes the primitive rows, carrying the harness observations the
+// file already holds: Refresh answers what discovery found and has nothing to say
+// about what the scan reached, so it must not erase the other half.
 func (s *Store) write(primitives []Usage) error {
-	snapshot := primitiveFile{Version: primitiveFileVersion, RefreshedAt: time.Now().UTC(), Primitives: primitives}
+	held, err := s.readFile()
+	if err != nil {
+		// A snapshot this build refuses is not worth preserving half of either
+		// (fail closed): the observations go back to unrecorded, which reads as
+		// not observed until the next scan stamps them.
+		held = primitiveFile{}
+	}
+	return s.writeFile(primitiveFile{Primitives: primitives, Harnesses: held.Harnesses})
+}
+
+// writeFile publishes one snapshot, stamping the version and the refresh instant.
+func (s *Store) writeFile(file primitiveFile) error {
+	snapshot := primitiveFile{
+		Version:     primitiveFileVersion,
+		RefreshedAt: time.Now().UTC(),
+		Harnesses:   file.Harnesses,
+		Primitives:  file.Primitives,
+	}
 	raw, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encoding primitive inventory: %w", err)

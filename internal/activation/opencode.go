@@ -135,16 +135,12 @@ func pageSessions(db *sqlitex.DB, walk *ingest.OpenCodeScan, counters *openCodeC
 	last := ""
 	for {
 		read, err := db.Page(sessionQuery, []any{last}, sqlitex.MaxRowsPerPage, func(row sqlitex.Row) error {
-			session := opencode.Session{}
-			if scanErr := row.Scan(&session.ID, &session.Directory, &session.Version,
-				&session.TokensInput, &session.TokensOutput, &session.TokensReasoning,
-				&session.TokensCacheRead, &session.TokensCacheWrite, &session.UpdatedMS); scanErr != nil {
-				counters.ParseErrors++
-				return nil
+			session, usable := scanSession(row, counters)
+			if usable {
+				last = session.ID
+				counters.Sessions++
+				walk.Session(session)
 			}
-			last = session.ID
-			counters.Sessions++
-			walk.Session(session)
 			return nil
 		})
 		if errors.Is(err, sqlitex.ErrRowCap) {
@@ -166,22 +162,12 @@ func pageParts(db *sqlitex.DB, walk *ingest.OpenCodeScan, counters *openCodeCoun
 	last := ""
 	for {
 		read, err := db.Page(partQuery, []any{last}, sqlitex.MaxRowsPerPage, func(row sqlitex.Row) error {
-			part := opencode.ToolPart{}
-			// The end instant is the one column that is legitimately absent: a part
-			// the harness has not finished has no end, and nil here is what makes
-			// HasEnd false rather than a duration of zero.
-			var end *int64
-			if scanErr := row.Scan(&part.ID, &part.SessionID, &part.UpdatedMS,
-				&part.Tool, &part.Status, &part.StartMS, &end); scanErr != nil {
-				counters.ParseErrors++
-				return nil
+			part, usable := scanPart(row, counters)
+			if usable {
+				last = part.ID
+				counters.Parts++
+				walk.Part(part)
 			}
-			last = part.ID
-			counters.Parts++
-			if end != nil {
-				part.EndMS, part.HasEnd = *end, true
-			}
-			walk.Part(part)
 			return nil
 		})
 		if errors.Is(err, sqlitex.ErrRowCap) {
@@ -194,4 +180,36 @@ func pageParts(db *sqlitex.DB, walk *ingest.OpenCodeScan, counters *openCodeCoun
 			return nil
 		}
 	}
+}
+
+// scanSession and scanPart read one row, or count it as a parse error and report
+// it unusable. A row this build cannot decode is skipped and never fatal: one
+// malformed row is not a reason to collect nothing from the rest, and the count is
+// what keeps the skip visible rather than silent (plan §3.3, §12).
+func scanSession(row sqlitex.Row, counters *openCodeCounters) (opencode.Session, bool) {
+	session := opencode.Session{}
+	if err := row.Scan(&session.ID, &session.Directory, &session.Version,
+		&session.TokensInput, &session.TokensOutput, &session.TokensReasoning,
+		&session.TokensCacheRead, &session.TokensCacheWrite, &session.UpdatedMS); err != nil {
+		counters.ParseErrors++
+		return opencode.Session{}, false
+	}
+	return session, true
+}
+
+func scanPart(row sqlitex.Row, counters *openCodeCounters) (opencode.ToolPart, bool) {
+	part := opencode.ToolPart{}
+	// The end instant is the one projected column that is legitimately absent: a
+	// part the harness has not finished has no end, and nil here is what makes
+	// HasEnd false rather than a duration of zero.
+	var end *int64
+	if err := row.Scan(&part.ID, &part.SessionID, &part.UpdatedMS,
+		&part.Tool, &part.Status, &part.StartMS, &end); err != nil {
+		counters.ParseErrors++
+		return opencode.ToolPart{}, false
+	}
+	if end != nil {
+		part.EndMS, part.HasEnd = *end, true
+	}
+	return part, true
 }

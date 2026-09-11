@@ -73,7 +73,9 @@ func ClaudeCodeInScope(scope Scope, names record.Namer) Discovery {
 	if scanned {
 		claudeCodeProject(scope.ClaudeDir, scope.Root, add, origins)
 	}
-	return Discovery{Primitives: sortedPrimitives(items), ProjectScanned: scanned, canonical: origins.canonicalNames(names, items)}
+	return Discovery{Primitives: sortedPrimitives(items), ProjectScanned: scanned,
+		Observed:  []HarnessObservation{{Harness: claudeCode, Observed: true}},
+		canonical: origins.canonicalNames(names, items)}
 }
 
 // ClaudeCodeAcrossRepos discovers global primitives once, then project-local
@@ -101,7 +103,9 @@ func ClaudeCodeAcrossRepos(claudeDir string, roots []string, names record.Namer)
 	for _, root := range roots {
 		claudeCodeProject(claudeDir, root, add, origins)
 	}
-	return Discovery{Primitives: sortedPrimitives(items), ProjectScanned: true, canonical: origins.canonicalNames(names, items)}
+	return Discovery{Primitives: sortedPrimitives(items), ProjectScanned: true,
+		Observed:  []HarnessObservation{{Harness: claudeCode, Observed: true}},
+		canonical: origins.canonicalNames(names, items)}
 }
 
 // claudeCodeGlobal scans the harness's own directory and its installed plugins.
