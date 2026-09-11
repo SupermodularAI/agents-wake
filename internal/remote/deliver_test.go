@@ -900,7 +900,10 @@ func TestNoErrorPathLeaksTheEndpointOrCredential(t *testing.T) {
 		"closed listener": func(t *testing.T, p config.Paths) {
 			t.Helper()
 			shortTimeouts(t)
-			enable(t, p, "http://"+endpointToken+"/v1/traces")
+			// https:// because config no longer stores an http:// endpoint to a
+			// host that is not loopback. What this case needs is a host nothing
+			// answers on, and .invalid never resolves under either scheme.
+			enable(t, p, "https://"+endpointToken+"/v1/traces")
 		},
 		"rejected batch": func(t *testing.T, p config.Paths) {
 			t.Helper()
@@ -923,7 +926,7 @@ func TestNoErrorPathLeaksTheEndpointOrCredential(t *testing.T) {
 		},
 		"a credential store this build refuses": func(t *testing.T, p config.Paths) {
 			t.Helper()
-			enable(t, p, "http://"+endpointToken+"/v1/traces")
+			enable(t, p, "https://"+endpointToken+"/v1/traces")
 			corruptCredentialStore(t, p)
 		},
 	}
