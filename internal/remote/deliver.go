@@ -227,10 +227,12 @@ func flushLocked(p config.Paths, auth config.RemoteAuth, minInterval time.Durati
 	// spent by the first flush after the bump, which can come before the rebuild, and
 	// a spool that grew never puts head under the position. Delivering from the
 	// beginning and leaving the file saying "delivered through nothing" is the
-	// backward direction this whole path is built on — it costs a re-send the
-	// receiver collapses on a span id derived from the deterministic event id
-	// (ADR-0004, ADR-0018, ADR-0027), where recording a provisional position would
-	// skip every record beneath it permanently and silently.
+	// backward direction this whole path is built on — it costs a re-send, and a
+	// re-sent record is the same span, derived from the deterministic event id
+	// (ADR-0004, ADR-0018, ADR-0027), so the duplicate is visible in the data and
+	// anyone reading the receiver's store can collapse it. Recording a provisional
+	// position would skip every record beneath it permanently and silently, and a
+	// skip is neither visible nor repairable.
 	//
 	// Forward delivery keeps running throughout: the records this build can read are
 	// sent on every flush until the rebuild lands.
@@ -243,11 +245,12 @@ func flushLocked(p config.Paths, auth config.RemoteAuth, minInterval time.Durati
 	}
 	// Self-heal after a rebuild. `ingest --rebuild` calls store.Discard and
 	// re-derives the spool, so positions shift; a watermark past head means the
-	// store shrank under it. Reset and re-send rather than clamp: at-least-once
-	// is free because span_id is derived from the deterministic event_id, so the
-	// receiver collapses what it already holds (ADR-0004, ADR-0018, ADR-0027),
-	// whereas clamping to head would skip every record between the new head and
-	// the stale position, permanently and silently.
+	// store shrank under it. Reset and re-send rather than clamp: at-least-once is
+	// the published contract (ADR-0018, ADR-0027) and span_id derives from the
+	// deterministic event_id (ADR-0004), so a re-sent record is the same span and
+	// the duplicate is one a reader of the receiver's store can collapse — a
+	// receiver is not guaranteed to do it for us. Clamping to head would skip every
+	// record between the new head and the stale position, permanently and silently.
 	if state.Position > head {
 		state.Position = 0
 	}
@@ -352,7 +355,7 @@ func flushLocked(p config.Paths, auth config.RemoteAuth, minInterval time.Durati
 // A zero or negative interval turns the gate off entirely rather than meaning
 // "no time may pass at all". A LastFlush in the future — a clock that moved
 // backwards, or a state file somebody edited — counts as due rather than as
-// suppressed: flushing early costs one extra POST the receiver deduplicates,
+// suppressed: flushing early costs one extra POST — a duplicate, not a loss —
 // while suppressing would stop delivery until real time caught up, which is a
 // silent outage.
 func suppressed(lastFlush, now time.Time, minInterval time.Duration) bool {

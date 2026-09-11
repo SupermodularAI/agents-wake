@@ -422,9 +422,9 @@ func TestAFailedDurableWriteStopsTheRun(t *testing.T) {
 
 // TestWatermarkPastHeadResetsAndResends covers `ingest --rebuild`: store.Discard
 // re-derives the spool, so a watermark past head means the store shrank. Reset
-// and re-send rather than clamp — at-least-once is free because the receiver
-// deduplicates on a span id derived from the deterministic event id, whereas
-// clamping would skip records permanently.
+// and re-send rather than clamp — a re-sent record is the same span, derived from
+// the deterministic event id, so the duplicate is repairable by whoever reads the
+// receiver's store, whereas clamping would skip records permanently.
 func TestWatermarkPastHeadResetsAndResends(t *testing.T) {
 	paths := testPaths(t)
 	receiver, endpoint := serve(t, http.StatusOK)
@@ -462,10 +462,10 @@ func TestWatermarkPastHeadResetsAndResends(t *testing.T) {
 // Position > head cannot either, because the spool grew rather than shrank.
 //
 // The assertion is the one readDeliveryState's doc comment makes: every record the
-// user consented to send reaches the wire. Re-sending is free, because the receiver
-// collapses a duplicate on a span id derived from the deterministic event id
-// (ADR-0004, ADR-0018, ADR-0027); a skip is permanent and nothing downstream ever
-// notices.
+// user consented to send reaches the wire. Re-sending costs a duplicate that carries
+// the same span id, derived from the deterministic event id (ADR-0004, ADR-0018,
+// ADR-0027), and is therefore collapsible after the fact; a skip is permanent and
+// nothing downstream ever notices.
 func TestAStaleSpoolStrandsNothingWhenTheRebuildArrivesLater(t *testing.T) {
 	paths := testPaths(t)
 	receiver, endpoint := serve(t, http.StatusOK)

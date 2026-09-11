@@ -495,8 +495,9 @@ func traceID(r record.Record) string {
 
 // spanID is where the record's EventID goes. EventID is mapped onto the wire by
 // derivation into spanId, not copied into a wake.* attribute — the span id is
-// the identity a receiver deduplicates on, which is precisely the job ADR-0004
-// gives the event id, so a second copy would be redundant, not safer.
+// the identity a receiver would deduplicate on, and the one a consumer that needs
+// exact counts must collapse on when its receiver does not — which is precisely the
+// job ADR-0004 gives the event id, so a second copy would be redundant, not safer.
 //
 // Truncating is safe because record.Validate has already run and guarantees 64
 // lowercase hex characters. A span id is 8 bytes: the first 16 hex chars.

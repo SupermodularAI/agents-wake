@@ -72,9 +72,9 @@ func TestDeliveryStateMissingFileIsZero(t *testing.T) {
 }
 
 // TestDeliveryStateUnreadableResetsToZero asserts the direction every fault
-// falls in. Re-sending is free (the receiver deduplicates on a span id derived
-// from the deterministic event id), while a cursor that failed *forward* would
-// skip records permanently.
+// falls in. Re-sending costs a duplicate that carries the same, deterministically
+// derived span id, while a cursor that failed *forward* would skip records
+// permanently.
 func TestDeliveryStateUnreadableResetsToZero(t *testing.T) {
 	cases := map[string]string{
 		"garbage": "not json at all",
@@ -104,7 +104,8 @@ func TestDeliveryStateUnreadableResetsToZero(t *testing.T) {
 // spool holds, and a schema bump discards every record the spool held, so a
 // position carried across one indexes records that no longer exist — and the
 // rebuild self-heal in Flush cannot notice, because the rebuilt spool is about
-// the same length. Failing backward re-sends, which the receiver collapses.
+// the same length. Failing backward re-sends, which is a duplicate somebody can
+// collapse; failing forward is a silent skip.
 func TestDeliveryStateForgetsAPositionFromAnotherSchemaVersion(t *testing.T) {
 	paths := testPaths(t)
 	path := deliveryStatePath(paths)
