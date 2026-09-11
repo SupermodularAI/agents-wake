@@ -1619,11 +1619,65 @@ func TestScanReportsTheDepthOfThePendingCarry(t *testing.T) {
 		t.Fatalf("Trigger() error = %v", err)
 	}
 
-	// The session has closed and the run resolved, so the carry is empty. That the
-	// counter falls back to zero on a healthy machine is the second, independent
-	// reason it stays out of doctor's "collects nothing" arm.
+	// A scan has now observed the session close, so the run resolved and left the
+	// unresolved set. That — a scan seeing the close — is what empties the set; the
+	// counter does not fall back to zero on its own, which the pruned-transcript test
+	// below pins.
 	if got := scanOf(t, paths).PendingSubagentRuns; got != 0 {
 		t.Errorf("PendingSubagentRuns = %d after the session closed, want 0", got)
+	}
+}
+
+// A run whose transcripts the harness pruned before any scan observed its session
+// close stays in the carry, and this pins that: SessionState.Closed reports false for
+// a session it never observed, so the restored run is never judged and never leaves
+// the pending set. The counter therefore does not reach zero by itself — it reaches
+// zero when a scan observes the session close, which is a different statement and the
+// one the doc comments around this counter now make.
+//
+// It is the same fixture as the test above, with one step added: the harness's own
+// cleanupPeriodDays removes the project's transcripts between the two scans.
+func TestThePendingCarryHoldsARunWhoseTranscriptsTheHarnessPruned(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	claudeDir := filepath.Join(t.TempDir(), "claude")
+	writeFixture(t, filepath.Join(claudeDir, "settings.json"), `{}`)
+	stamp := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	parent := []string{
+		`{"uuid":"parent-1","sessionId":"session-1","cwd":"` + root + `","timestamp":"` + stamp + `","entrypoint":"cli","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-parent","name":"Bash"}]}}`,
+		`{"uuid":"parent-2","sessionId":"session-1","cwd":"` + root + `","timestamp":"` + stamp + `","entrypoint":"cli","message":{"content":[{"type":"tool_result","tool_use_id":"call-parent","is_error":false}]}}`,
+	}
+	writeFixture(t, filepath.Join(claudeDir, "projects", "project", "session.jsonl"), strings.Join(parent, "\n"))
+	subagent := []string{
+		`{"uuid":"agent-1","agentId":"agent-1","sessionId":"session-1","cwd":"` + root + `","timestamp":"` + stamp + `","entrypoint":"cli","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-agent","name":"Bash"}]}}`,
+		`{"uuid":"agent-2","agentId":"agent-1","attributionAgent":"sdlc-run","sessionId":"session-1","cwd":"` + root + `","timestamp":"` + stamp + `","entrypoint":"cli","message":{"model":"sonnet","content":[{"type":"tool_result","tool_use_id":"call-agent","is_error":false}]}}`,
+	}
+	writeFixture(t, filepath.Join(claudeDir, "projects", "project", "session", "subagents", "agent-1.jsonl"), strings.Join(subagent, "\n"))
+	paths := testPaths(t)
+
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), false); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	if _, err := Ingest(paths, claudeDir); err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+	if scan := scanOf(t, paths); scan.PendingSubagentRuns != 1 {
+		t.Fatalf("PendingSubagentRuns = %d after the import, want 1", scan.PendingSubagentRuns)
+	}
+
+	// The harness prunes the project's transcripts on its own schedule. Nothing is
+	// left for the next scan to observe the session in.
+	if err := os.RemoveAll(filepath.Join(claudeDir, "projects", "project")); err != nil {
+		t.Fatalf("RemoveAll() error = %v", err)
+	}
+	if _, err := Trigger(paths, claudeDir); err != nil {
+		t.Fatalf("Trigger() error = %v", err)
+	}
+
+	if got := scanOf(t, paths).PendingSubagentRuns; got != 1 {
+		t.Errorf("PendingSubagentRuns = %d after the transcripts were pruned, want 1 — a run whose session is never observed closed stays in the carry", got)
 	}
 }
 
