@@ -231,10 +231,17 @@ type Scan struct {
 	// a derived record awaiting a parent, not an unobserved invocation, and summing the
 	// two would be the same conflation one line up.
 	//
-	// Like every counter here it is the depth of the carry as of the last scan, not the
-	// work that scan newly did: the carry includes runs earlier scans anchored, and with
-	// no incremental cursor (T020, T102) every scan re-reads the whole history. Reading
-	// it as "this scan deferred N runs" would overstate it.
+	// It is the unresolved set the last scan's closing walk held, not the work that scan
+	// newly did: the set includes runs earlier scans anchored and this one restored from
+	// the carry, and with no incremental cursor (T020, T102) every scan re-reads the whole
+	// history. Reading it as "this scan deferred N runs" would overstate it. It is not the
+	// size of pending.json either — that file's merge is union-only and also holds
+	// resolved runs and the carried children, so that is the larger number.
+	//
+	// It does not fall back to zero by itself. A run leaves the set when a scan observes
+	// its session close; a run whose transcripts the harness pruned before that is never
+	// judged closed and stays in the set indefinitely, so a non-zero reading is not
+	// necessarily transient.
 	PendingSubagentRuns int `json:"pending_subagent_runs"`
 	// PendingCalls counts tool calls the last scan found unterminated whose session is
 	// still inside the staleness window: a number that is not final yet, not collection

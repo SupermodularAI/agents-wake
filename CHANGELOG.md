@@ -39,10 +39,12 @@ called out under Changed.
   counts a different population: a tool call resolves when its result is written, a
   subagent run when its session closes. Without it a user whose runs are sitting in
   the carry reads a healthy scan and a confident zero — around 200 runs of one long
-  session went unreported this way before the carry existed. The line is the depth of
-  the carry as of the last scan, not the runs that scan newly deferred, and it never
-  moves the integration state word: the carry empties on a healthy machine, so a
-  state word following it would be reporting a transient.
+  session went unreported this way before the carry existed. The line counts every run
+  the last scan still held unresolved, not the runs that scan newly deferred, and it
+  never moves the integration state word: a carried run is not lost collection. A run
+  leaves the count when a scan observes its session close, so a count that does not
+  fall means sessions no scan has seen close — one still running, or one whose
+  transcripts the harness pruned first.
 - An MCP tool's invocation now records which server provided it. A server's tools
   are named `mcp__<server>__<tool>` by the harness, and the server segment is
   stored as the harness spells it, validated as a bounded token. Before this,

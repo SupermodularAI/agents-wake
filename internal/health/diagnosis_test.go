@@ -264,11 +264,12 @@ func TestDiagnoseDoesNotLetARefusedSubagentRunBlindTheIntegrationState(t *testin
 // A subagent run the scan anchored and could not resolve is not lost collection: its
 // session was still open when the walk closed, so the run is carried to the next scan
 // and the carry is what lets that scan resolve it — a number that is not final yet, in
-// exactly the sense an unterminated call is (ADR-0015). It is also weaker than the
-// standing facts around it, and that is the second, independent reason: unlike a
-// refused subagent run this counter reaches zero on a healthy machine, because a
-// machine with no open session has an empty carry, so a state word following it would
-// be reporting a transient.
+// exactly the sense an unterminated call is (ADR-0015). That is the whole reason for
+// the exclusion, and it does not rest on the number being short-lived: a run whose
+// transcripts the harness pruned before any scan observed its session close stays in
+// the carry indefinitely (activation's
+// TestThePendingCarryHoldsARunWhoseTranscriptsTheHarnessPruned), so this counter is
+// not a transient that falls back to zero by itself.
 //
 // The second case is the one that proves the exclusion — the first could be carried by
 // its events-written value alone.

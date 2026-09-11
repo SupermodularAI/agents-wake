@@ -618,9 +618,14 @@ func ingestHistory(repos *config.Repos, claudeDir string, destination *store.Sto
 	// folding it into that arm would put every machine that runs subagents permanently
 	// into "collects nothing" while thousands of records are written (health.Diagnose).
 	scan.RefusedSubagentRuns = final.RefusedSubagentRuns
-	// The depth of the carry this scan leaves behind: runs it anchored and could not
-	// resolve because their sessions are still open. Read off the same Pending() call
-	// storePending already uses — one read, post-Close, never a second one.
+	// The unresolved runs the closing walk still holds: anchored — by this scan, or by an
+	// earlier one whose carry this scan restored — and not judged, because their sessions
+	// were not observed closed. Read off the same Pending() call storePending already
+	// uses — one read, post-Close, never a second one.
+	//
+	// Not the size of pending.json. That file's merge is union-only, so it also holds
+	// runs already resolved and written to the store, and the carried children beside
+	// them; this number is the walk's own unresolved set and is the smaller of the two.
 	//
 	// len(runs) only. The children beside them are an unlike population — a derived
 	// record awaiting a parent, not an unobserved invocation — and one integer summing

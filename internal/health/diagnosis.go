@@ -134,13 +134,18 @@ type Diagnosis struct {
 // A pending subagent run is not in it either, and it is the same argument one level up.
 // A run whose session was still open when the walk closed is carried to the next scan,
 // not lost: it is a number that is not final yet in exactly the sense an unterminated
-// call is (ADR-0015), and the carry is what makes the next scan able to resolve it. It
-// is also weaker than the standing facts above, which is the second, independent reason
-// — unlike a refused subagent run or a refused boundary registration, this counter can
-// reach zero on a healthy machine, because a machine with no open session has an empty
-// carry. So it fails the arm's test twice over: nothing was lost, and a state word
-// following it would be reporting a transient. doctor prints it on its own line whatever
-// the state word says.
+// call is (ADR-0015), and the carry is what makes the next scan able to resolve it.
+// Nothing was lost, so the arm does not apply — that reason carries the exclusion on
+// its own. doctor prints the counter on its own line whatever the state word says.
+//
+// What is deliberately not claimed beside it is that the number is a transient that
+// returns to zero. A run leaves the carry when a scan observes its session close, and
+// a run whose transcripts the harness pruned before that never gets there:
+// SessionState.Closed reports false for a session it never observed, so the run is
+// never judged and stays carried indefinitely. This counter can therefore sit above
+// zero on a machine collecting normally — which is one more reason to keep it out of
+// the arm, on the same standing-fact grounds as the counters above, not a reason to
+// fold it in.
 //
 // Neither boundary counter is in it, and the refused one is the interesting case.
 //
