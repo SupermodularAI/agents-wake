@@ -19,9 +19,13 @@ func init() { commands = append(commands, newInitCmd) }
 func newInitCmd() *cobra.Command {
 	var full bool
 	var global bool
-	cmd := &cobra.Command{Use: "init", Short: "Enable local Claude Code collection for this project", Long: "Enable local Claude Code collection for this project.\n" +
+	cmd := &cobra.Command{Use: "init", Short: "Enable local collection for this project", Long: "Enable local collection for this project.\n" +
 		"\n" +
-		"Collection is forward-only: existing Claude Code history is not imported\n" +
+		"Every harness this build reads is collected under one consent: there is no\n" +
+		"per-harness switch, and a harness this machine does not have is reported as\n" +
+		"not observed rather than as zero.\n" +
+		"\n" +
+		"Collection is forward-only: existing history is not imported\n" +
 		"unless --full is given, and the session triggers init installs collect only\n" +
 		"what happens from now on.\n" +
 		"\n" +
@@ -102,7 +106,7 @@ func newInitCmd() *cobra.Command {
 		// false, instead of every other print below, which says the same thing
 		// whichever way it's dressed.
 		if pretty {
-			if _, bannerErr := fmt.Fprintf(cmd.OutOrStdout(), "%s %s\n", style.Heading(pretty, "wake"), style.Paint(pretty, style.Dim, "enabling Claude Code collection")); bannerErr != nil {
+			if _, bannerErr := fmt.Fprintf(cmd.OutOrStdout(), "%s %s\n", style.Heading(pretty, "wake"), style.Paint(pretty, style.Dim, "enabling local collection")); bannerErr != nil {
 				return bannerErr
 			}
 		}
@@ -189,7 +193,7 @@ func newInitCmd() *cobra.Command {
 		if _, discloseErr := fmt.Fprintf(cmd.OutOrStdout(), "%s\n%s\n\n%s\n", style.Heading(pretty, "Wake will modify:"), strings.Join(listed, "\n"), strings.Join(sentences, "\n\n")); discloseErr != nil {
 			return discloseErr
 		}
-		label := "Enabling Claude Code collection"
+		label := "Enabling local collection"
 		switch {
 		case global && full:
 			label = "Importing Claude Code history under the collection boundary"
@@ -214,14 +218,18 @@ func newInitCmd() *cobra.Command {
 		// Two lines, because one number cannot carry both meanings: written is a count
 		// of terminal events (ADR-0015), and reporting 0 of them on a path that never
 		// looked would read as an import that found nothing.
-		confirmation := "Claude Code collection enabled; collection starts now. Run \"wake init --full\" or \"wake ingest\" to import existing history.\n"
+		// No harness is named. Consent is per repository and every harness this
+		// build reads collects under it, so naming one would be false on a machine
+		// that runs two — and would tell a user who only runs the other one that
+		// nothing was enabled for them.
+		confirmation := "Collection enabled; collection starts now. Run \"wake init --full\" or \"wake ingest\" to import existing history.\n"
 		switch {
 		case global && full:
 			confirmation = fmt.Sprintf("Collection boundary recorded; imported %s.\n", terminalEvents(written))
 		case global:
 			confirmation = fmt.Sprintf("Collection boundary recorded at %s; every project under it is consented and registered as it is used.\n", boundary)
 		case full:
-			confirmation = fmt.Sprintf("Claude Code collection enabled; imported %s.\n", terminalEvents(written))
+			confirmation = fmt.Sprintf("Collection enabled; imported %s.\n", terminalEvents(written))
 		}
 		check := style.Paint(pretty, style.Green, "✓")
 		if pretty {
@@ -230,7 +238,7 @@ func newInitCmd() *cobra.Command {
 		_, err = fmt.Fprint(cmd.OutOrStdout(), confirmation)
 		return err
 	}}
-	cmd.Flags().BoolVar(&full, "full", false, "also import this project's existing Claude Code history now")
+	cmd.Flags().BoolVar(&full, "full", false, "also import this project's existing agent history now")
 	cmd.Flags().BoolVarP(&global, "global", "g", false, "consent every project under a directory, given as a path after --global (your home directory when no path is given), registering each as it is used")
 	return cmd
 }

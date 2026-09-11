@@ -5,8 +5,10 @@
 [![License](https://img.shields.io/github/license/SupermodularAI/agents-wake?cacheSeconds=3600)](LICENSE)
 
 Wake is a local CLI for understanding which agent primitives a developer uses,
-which ones fail, and which ones are never used. It currently supports Claude
-Code and collects only from projects the developer explicitly enables.
+which ones fail, and which ones are never used. It currently reads Claude Code
+and opencode — autodetected, with no per-harness switch — and collects only from
+projects the developer explicitly enables. A harness this machine does not have
+is reported as *not observed*, never as zero.
 
 ![wake report](docs/wake_report.gif)
 
@@ -76,6 +78,12 @@ so nothing downstream ever has to parse around a color code.
 current project and installs Wake-owned Claude Code session hooks, and
 collection starts from that moment. Existing hooks are preserved.
 
+One consent covers every harness Wake reads: the project you consent is the
+project it collects from, in Claude Code and in opencode alike, and nothing else
+has to be enabled. The hooks are Claude Code's own because that is the harness
+that offers them; opencode is read whenever a scan runs, which those same hooks
+also trigger on a machine that runs both.
+
 On a terminal, `init`, `ingest`, `remove`, `uninstall`, `report` and `serve`
 all show a lime spinner while their real work runs — importing history,
 rebuilding the event store, refreshing the primitive inventory, removing the
@@ -85,8 +93,8 @@ one of them is the same plain, deterministic text instead.
 Existing history is not imported by default, and nothing imports it later on
 its own: the session hooks collect only what happens after `wake init`. When
 you want the history, ask for it — `wake init --full` imports this project's
-Claude Code history in the same call, and `wake ingest` does it afterwards for
-a project that is already consented.
+existing agent history in the same call, and `wake ingest` does it afterwards
+for a project that is already consented.
 
 If you'd rather consent a whole tree once than run `wake init` in every
 project, `wake init -g ~/Developer` consents everything under a directory;
@@ -140,7 +148,7 @@ wake uninstall           # Remove everything, including ~/.config/wake and the b
 | `wake init` | Enable collection for the current project. |
 | `wake init --full` | Enable collection and import existing history now. |
 | `wake init --global [path]` | Consent every project under a directory (your home directory when no path is given), registering each repository under its own identity as sessions run in it, and linked worktrees of those repositories wherever on disk they live. Records the boundary; consents no root of its own. |
-| `wake init --global --full` | ...and import the existing Claude Code history under that boundary in the same call. |
+| `wake init --global --full` | ...and import the existing agent history under that boundary in the same call. |
 | `wake ingest` | Import activity for consented projects. |
 | `wake doctor` | Show collection and hook health. |
 | `wake remove` | Remove Wake-owned Claude Code hooks. `--purge` also deletes collected data; `~/.config/wake` is kept either way, so a later `wake init` keeps the same repository identity. `--purge` prints the paths it will delete and asks before deleting; run unattended it refuses and deletes nothing unless `--yes` is passed. Plain `wake remove` is not gated. |
@@ -159,9 +167,10 @@ review. Its default design keeps the sensitive path local:
 - Collection requires explicit, per-project consent. A fresh install collects
   nothing, and consent starts collection from the moment it is given: importing
   a project's existing history is a separate, explicit request.
-- Wake reads Claude Code transcripts to derive measurements, but it never
-  persists prompts, tool arguments, code, repository paths, or repository
-  labels in its event records.
+- Wake reads each harness's own storage to derive measurements — Claude Code's
+  transcripts and opencode's local database, the latter read-only and never
+  written to — but it never persists prompts, tool arguments, tool output,
+  code, repository paths, or repository labels in its event records.
 - Records are structurally limited to identifiers, hashes, timestamps, enums,
   and counters. Invalid or path-shaped values are dropped rather than stored.
 - Repository identity is a salted, per-machine HMAC. The readable project map

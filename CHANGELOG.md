@@ -9,6 +9,34 @@ called out under Changed.
 
 ## [Unreleased]
 
+### Added
+
+- opencode is read alongside Claude Code, autodetected and with no new
+  configuration: a scan reads a harness when `scan.harnesses` names it and that
+  harness's store is on the machine. One consent covers both — the project table
+  is the only consent mechanism, and opencode's session directories resolve
+  through it exactly as a transcript's working directory does. Invocations carry
+  an exact duration, because opencode records both instants itself, and the
+  session grain carries opencode's own five token totals rather than an estimate.
+- `doctor` answers per harness: whether this scan looked at a harness at all, and
+  — where it did — whether it collected nothing or collected zero. A harness
+  nobody read prints `not observed` on every line and never `0`.
+- `report` names which harnesses the scan read and which it did not, and the
+  dashboard's observed / not-observed line is now derived from what the build
+  actually reads. It previously named OpenCode, Codex, Cursor and pi in a
+  hardcoded sentence — an absence claimed about harnesses that build could not
+  have observed.
+
+### Changed
+
+- `wake init` no longer names a single harness in its output or its help. Consent
+  is per repository and every harness Wake reads collects under it, so naming one
+  would be false on a machine that runs two.
+- `modernc.org/sqlite` is a new direct dependency, confined to `internal/sqlitex`
+  and pure Go, so the four release targets still cross-compile with
+  `CGO_ENABLED=0`. A test walks the whole module and asserts that one file
+  imports the driver and one package imports `database/sql`.
+
 ## [0.3.0] - 2026-09-11
 
 ### Added

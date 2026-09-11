@@ -93,7 +93,7 @@ func TestInitRegistersTheEnclosingRepositoryRootFromASubdirectory(t *testing.T) 
 	for _, want := range []string{
 		paths.ConfigFile,
 		filepath.Join(claudeHome(t), "settings.json"),
-		"Claude Code collection enabled",
+		"Collection enabled",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("init output is missing %q; got:\n%s", want, out)
@@ -192,7 +192,7 @@ func TestInitDisclosesAndImportsHistoryOnlyWithFull(t *testing.T) {
 		"Existing Claude Code history will be imported now.",
 		// Two: the transcript's one call, and the session_end for its long-silent
 		// session id (ADR-0034).
-		"Claude Code collection enabled; imported 2 terminal events.",
+		"Collection enabled; imported 2 terminal events.",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("init --full output is missing %q; got:\n%s", want, out)
