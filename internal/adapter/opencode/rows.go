@@ -26,10 +26,14 @@ type ToolPart struct {
 	// Status is data.state.status, mapped by outcome.go and never guessed at.
 	Status string
 	// StartMS and EndMS are data.state.time.start / .end, epoch milliseconds.
-	// HasEnd is false where the harness reported no end instant.
-	StartMS int64
-	EndMS   int64
-	HasEnd  bool
+	// HasStart is false where the harness reported no start instant, and HasEnd
+	// false where it reported no end. Neither absence is ever substituted for: a
+	// part with no start has no instant to stamp a record with, and an epoch put
+	// there would be a measurement nothing measured.
+	StartMS  int64
+	HasStart bool
+	EndMS    int64
+	HasEnd   bool
 	// UpdatedMS is part.time_updated: the row's own liveness, used only by the
 	// staleness rule and never written to a record.
 	UpdatedMS int64

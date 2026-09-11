@@ -44,6 +44,7 @@ func toolPart(id, tool, status string) ToolPart {
 		Status:    status,
 		StartMS:   start,
 		EndMS:     start + 250,
+		HasStart:  true,
 		HasEnd:    true,
 		UpdatedMS: start,
 	}

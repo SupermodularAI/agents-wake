@@ -71,7 +71,20 @@ func (s *Scan) Session(registered Session) { s.sessions[registered.ID] = registe
 // A part whose session was never registered derives nothing and is counted as
 // refused: its directory is unknown, so its consent is unknown, and an unknown
 // consent is a refusal rather than an assumption (fail closed).
+//
+// A part the harness recorded no start instant for is refused on the same terms,
+// and before anything else reads it. Its instant is what the record is stamped
+// with, what consent is judged at, and what a duration is measured from, so
+// substituting one would put a number nothing measured into all three — and a
+// substituted epoch is a valid-looking 1970 record that no counter would mark,
+// which is inferring structure and counting on (plan §3.3, §12). It is the answer
+// the first adapter already gives an entry with no timestamp. Terminal or not:
+// buffering it would only defer the same substitution to Close.
 func (s *Scan) Part(part ToolPart) {
+	if !part.HasStart {
+		s.result.Refused++
+		return
+	}
 	from, registered := s.sessions[part.SessionID]
 	if !registered {
 		s.result.Refused++

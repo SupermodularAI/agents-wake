@@ -58,10 +58,16 @@ const sessionQuery = `SELECT id, coalesce(directory,''), coalesce(version,''),
 // 11,435 rows — which is irrelevant here because the walk reads every row on every
 // scan and ADR-0015 makes a cursor an optimisation, never a correctness mechanism.
 // The measurement is recorded so nobody later mistakes id for a time ordering.
+//
+// Neither instant is coalesced, and the start is the one that matters: every other
+// coalesce here degrades into a value a validator visibly refuses, while a start
+// coalesced to 0 is a plausible 1970 that passes every gate and fabricates a
+// duration out of the end instant. Absent has to stay distinguishable from the
+// epoch, so it arrives as NULL and the reader refuses the row (plan §3.3, §12).
 const partQuery = `SELECT p.id, coalesce(p.session_id,''), coalesce(p.time_updated,0),
        coalesce(json_extract(p.data,'$.tool'),'')         AS tool,
        coalesce(json_extract(p.data,'$.state.status'),'') AS status,
-       coalesce(json_extract(p.data,'$.state.time.start'),0) AS start_ms,
+       json_extract(p.data,'$.state.time.start')          AS start_ms,
        json_extract(p.data,'$.state.time.end')            AS end_ms
   FROM part AS p
  WHERE p.id > ?
@@ -224,14 +230,20 @@ func scanSession(row sqlitex.Row, counters *openCodeCounters) (opencode.Session,
 
 func scanPart(row sqlitex.Row, counters *openCodeCounters) (opencode.ToolPart, string, bool) {
 	part := opencode.ToolPart{}
-	// The end instant is the one projected column that is legitimately absent: a
-	// part the harness has not finished has no end, and nil here is what makes
-	// HasEnd false rather than a duration of zero.
-	var end *int64
+	// Both instants are legitimately absent and neither is substituted for. A part
+	// the harness has not finished has no end, and nil is what makes HasEnd false
+	// rather than a duration of zero; a part it recorded no start for has no time
+	// at all, and nil is what makes HasStart false rather than the epoch. The
+	// reader refuses the second and counts it, which is what keeps the loss visible
+	// instead of writing a 1970 record nothing measured.
+	var start, end *int64
 	if err := row.Scan(&part.ID, &part.SessionID, &part.UpdatedMS,
-		&part.Tool, &part.Status, &part.StartMS, &end); err != nil {
+		&part.Tool, &part.Status, &start, &end); err != nil {
 		counters.ParseErrors++
 		return opencode.ToolPart{}, part.ID, false
+	}
+	if start != nil {
+		part.StartMS, part.HasStart = *start, true
 	}
 	if end != nil {
 		part.EndMS, part.HasEnd = *end, true

@@ -68,6 +68,7 @@ func hostilePart(payload string) ToolPart {
 		Status:    payload,
 		StartMS:   start,
 		EndMS:     start + 1,
+		HasStart:  true,
 		HasEnd:    true,
 		UpdatedMS: start,
 	}

@@ -37,6 +37,7 @@ func openCodePart(id, tool, status string) opencode.ToolPart {
 		Status:    status,
 		StartMS:   openCodeInstant.UnixMilli(),
 		EndMS:     openCodeInstant.UnixMilli() + 100,
+		HasStart:  true,
 		HasEnd:    true,
 		UpdatedMS: openCodeInstant.UnixMilli(),
 	}

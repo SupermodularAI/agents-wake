@@ -149,3 +149,45 @@ func TestHarnessNamesTheSlugEveryRecordCarries(t *testing.T) {
 		t.Fatalf("Harness() = %q, want opencode", scan.Harness())
 	}
 }
+
+// TestAPartWithNoStartInstantIsRefused pins the rule that separates an instant the
+// harness recorded from one nothing recorded. A part whose state.time.start is
+// absent has no time of its own, and a substituted epoch would be a measurement
+// nothing measured — indistinguishable, once written, from a call that really
+// happened on 1 January 1970. It is refused and counted instead, which is what
+// makes the loss visible to doctor rather than silent (plan §3.3, §12), and it is
+// the answer the first adapter already gives an entry with no timestamp
+// (internal/adapter/claudecode/reader.go, transcriptEntry.valid).
+func TestAPartWithNoStartInstantIsRefused(t *testing.T) {
+	part := toolPart("prt_abc", "bash", "completed")
+	part.StartMS, part.HasStart = 0, false
+
+	result := walk(consents, NewServers(nil), part)
+
+	if len(result.Records) != 0 {
+		t.Fatalf("records = %d, want 0: a part with no start instant has no time to stamp", len(result.Records))
+	}
+	if result.Refused != 1 {
+		t.Fatalf("refused = %d, want 1: the loss has to be counted, not silent", result.Refused)
+	}
+}
+
+// A part with no start instant is refused whether or not its status is terminal:
+// buffering it would only defer the same fabrication to Close.
+func TestAPendingPartWithNoStartInstantIsRefusedRatherThanBuffered(t *testing.T) {
+	part := toolPart("prt_abc", "bash", "running")
+	part.StartMS, part.HasStart = 0, false
+
+	scan := NewScan(consents, NewServers(nil), adapter.Staleness{Timeout: time.Hour, Now: past}, adapter.Idleness{})
+	scan.Session(session("ses_abc"))
+	scan.Part(part)
+	result := scan.Close()
+
+	if len(result.Records) != 0 || result.Refused != 1 {
+		t.Fatalf("records = %d, refused = %d, want 0 and 1", len(result.Records), result.Refused)
+	}
+	if scan.Buffered() != 0 || result.Pending != 0 || result.Interrupted != 0 {
+		t.Fatalf("buffered = %d, pending = %d, interrupted = %d, want 0, 0 and 0",
+			scan.Buffered(), result.Pending, result.Interrupted)
+	}
+}

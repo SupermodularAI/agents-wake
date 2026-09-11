@@ -63,6 +63,17 @@ func toolPartRow(id, tool, status string) string {
 		sqlQuote(id), openCodeInstant.UnixMilli(), openCodeInstant.UnixMilli(), sqlQuote(data))
 }
 
+// toolPartRowWithoutStart is the same row with no state.time.start key: the shape
+// a harness that stopped writing the instant, or never wrote it for this state,
+// leaves behind.
+func toolPartRowWithoutStart(id, tool, status string) string {
+	data := fmt.Sprintf(`{"type":"tool","tool":%s,"callID":"bash:1","state":{"status":%s,`+
+		`"time":{"end":%d}}}`,
+		sqlQuote(tool), sqlQuote(status), openCodeInstant.UnixMilli()+250)
+	return fmt.Sprintf(`insert into part values (%s, 'msg_1', 'ses_abc', %d, %d, %s)`,
+		sqlQuote(id), openCodeInstant.UnixMilli(), openCodeInstant.UnixMilli(), sqlQuote(data))
+}
+
 // sqlQuote is a SQL string literal for a fixture statement. It is not quote()
 // from hooks_test.go, which quotes for JSON.
 func sqlQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "''") + "'" }
@@ -611,5 +622,42 @@ func TestAPageThatNeverAdvancesEndsTheWalk(t *testing.T) {
 	}
 	if visited != sqlitex.MaxRowsPerPage {
 		t.Fatalf("visited = %d rows, want %d: the stalled page is read once", visited, sqlitex.MaxRowsPerPage)
+	}
+}
+
+// TestAToolPartWithNoStartInstantIsRefusedAndVisible drives the defect end to end,
+// on the whole-history path wake ingest and wake init --full both take. A start
+// instant coalesced to 0 would write a record stamped 1970-01-01T00:00:00Z — which
+// record.Validate admits, because it is not the zero time — carrying a duration of
+// roughly 56 years, while every counter stayed 0 and doctor called the harness
+// healthy. Inferring the instant and counting on is exactly what plan §3.3 and §12
+// forbid: the loss has to fail visibly per harness.
+func TestAToolPartWithNoStartInstantIsRefusedAndVisible(t *testing.T) {
+	paths := testPaths(t)
+	root := t.TempDir()
+	repos := consentedRepos(t, paths, root)
+	storePath := openCodeFixture(t, root, toolPartRowWithoutStart("prt_1", "bash", "completed"))
+	spool := filepath.Join(t.TempDir(), "events.ndjson")
+
+	written, counters, err := runOpenCode(t, repos, storePath, spool)
+	if err != nil {
+		t.Fatalf("ingestOpenCode() error = %v", err)
+	}
+	if written != 0 {
+		t.Fatalf("written = %d, want 0: no record carries an instant nothing recorded", written)
+	}
+	if counters.RefusedCalls != 1 {
+		t.Fatalf("refused calls = %d, want 1", counters.RefusedCalls)
+	}
+	state := health.DiagnoseHarness(health.HarnessScan{
+		Observed: counters.Observed, Unreadable: counters.Unreadable, ParseErrors: counters.ParseErrors,
+		RefusedCalls: counters.RefusedCalls, UnknownOutcomes: counters.UnknownOutcomes,
+		EventsWritten: counters.EventsWritten,
+	})
+	if state != health.StateCollectsNothing {
+		t.Fatalf("state = %q, want %q: blindness has to reach doctor", state, health.StateCollectsNothing)
+	}
+	if body, readErr := os.ReadFile(spool); readErr == nil && strings.Contains(string(body), "1970-01-01") {
+		t.Fatal("a record was written stamped at the epoch")
 	}
 }
