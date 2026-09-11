@@ -564,6 +564,26 @@ func TestNoRemoteAuthErrorLeaksTheEndpointOrTheCredential(t *testing.T) {
 			},
 		},
 		{
+			name: "a stored endpoint that is cleartext to a remote host",
+			run: func(t *testing.T, p Paths, storePath string) error {
+				writeRemoteAuthRaw(t, storePath, fmt.Sprintf(
+					`{"version":1,"endpoint":%q,"enabled":true,"credential":%q}`,
+					strings.Replace(testEndpoint, "https://", "http://", 1), testCredential))
+				_, err := LoadRemoteAuth(p)
+				return err
+			},
+		},
+		{
+			name: "an endpoint that is cleartext to a remote host",
+			run: func(_ *testing.T, p Paths, _ string) error {
+				return SetRemoteAuth(p, RemoteAuth{
+					Endpoint:   strings.Replace(testEndpoint, "https://", "http://", 1),
+					Enabled:    true,
+					Credential: testCredential,
+				})
+			},
+		},
+		{
 			name: "enabling without an endpoint",
 			run: func(_ *testing.T, p Paths, _ string) error {
 				return SetRemoteAuth(p, RemoteAuth{Enabled: true, Credential: testCredential})
@@ -849,14 +869,15 @@ func TestEndpointHostIsHostAndPortOrNothing(t *testing.T) {
 		raw  string
 		want string
 	}{
-		"userinfo, port and path": {"https://user:pw@api.example.com:4318/v1/traces", "api.example.com:4318"},
-		"query string":            {"https://api.example.com/otel?key=sk-lf-secret", "api.example.com"},
-		"plain http":              {"http://127.0.0.1:4318/v1/traces", "127.0.0.1:4318"},
-		"empty":                   {"", ""},
-		"not a URL at all":        {"pk-lf-dg74:sk-lf-dg74", ""},
-		"wrong scheme":            {"ftp://api.example.com/v1/traces", ""},
-		"scheme with no host":     {"https:///v1/traces", ""},
-		"control character":       {"http://a\x7f.example.com", ""},
+		"userinfo, port and path":    {"https://user:pw@api.example.com:4318/v1/traces", "api.example.com:4318"},
+		"query string":               {"https://api.example.com/otel?key=sk-lf-secret", "api.example.com"},
+		"plain http":                 {"http://127.0.0.1:4318/v1/traces", "127.0.0.1:4318"},
+		"cleartext to a remote host": {"http://api.example.com/v1/traces", ""},
+		"empty":                      {"", ""},
+		"not a URL at all":           {"pk-lf-dg74:sk-lf-dg74", ""},
+		"wrong scheme":               {"ftp://api.example.com/v1/traces", ""},
+		"scheme with no host":        {"https:///v1/traces", ""},
+		"control character":          {"http://a\x7f.example.com", ""},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -868,6 +889,130 @@ func TestEndpointHostIsHostAndPortOrNothing(t *testing.T) {
 				if got != "" && strings.Contains(got, forbidden) {
 					t.Errorf("EndpointHost() = %q, which carries %q", got, forbidden)
 				}
+			}
+		})
+	}
+}
+
+// The credential rides in the Authorization header on every batch, so an
+// endpoint whose scheme is http:// and whose host is anything but loopback puts
+// it on the network in the clear on every flush. The write path refuses it, and
+// a refusal writes nothing.
+//
+// The last three cases are the whole of "no DNS lookup": a host that merely
+// starts with a loopback literal, a name that resolves to loopback on most
+// machines, and a subdomain of localhost are all refused, because the rule reads
+// the literal host and consults no resolver.
+func TestSetRemoteAuthRejectsACleartextEndpointToARemoteHost(t *testing.T) {
+	for _, endpoint := range []string{
+		"http://remote-auth-unmistakable-host.example/v1/traces",
+		"http://remote-auth-unmistakable-host.example:4318/v1/traces",
+		"http://user:pw@remote-auth-unmistakable-host.example/v1/traces",
+		"http://[2001:db8::1]:4318/v1/traces",
+		"http://127.0.0.1.remote-auth-unmistakable-host.example/v1/traces",
+		"http://localhost.localdomain:3000/v1/traces",
+		"http://foo.localhost:3000/v1/traces",
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			p := remoteTestPaths(t)
+			storePath := filepath.Join(p.ConfigDir, remoteAuthFileName)
+
+			err := SetRemoteAuth(p, RemoteAuth{Endpoint: endpoint, Enabled: true, Credential: testCredential})
+
+			if !errors.Is(err, errEndpointCleartext) {
+				t.Fatalf("SetRemoteAuth() = %v, want errEndpointCleartext", err)
+			}
+			assertDisclosesNothing(t, err, endpoint, storePath, testCredential, p.ConfigDir)
+			assertNoStore(t, storePath)
+		})
+	}
+}
+
+// A self-hosted collector on this machine is an ordinary development setup and
+// nothing it receives crosses a network, so http:// to a loopback host stays
+// storable. The host is compared case-insensitively, and every address in
+// 127.0.0.0/8 counts, not just 127.0.0.1.
+func TestSetRemoteAuthAcceptsCleartextToLoopback(t *testing.T) {
+	for _, endpoint := range []string{
+		"http://localhost:3000/api/public/otel/v1/traces",
+		"http://LOCALHOST:3000/v1/traces",
+		"http://127.0.0.1:4318/v1/traces",
+		"http://127.9.9.9:4318/v1/traces",
+		"http://[::1]:4318/v1/traces",
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			p := remoteTestPaths(t)
+
+			if err := SetRemoteAuth(p, RemoteAuth{Endpoint: endpoint, Enabled: true, Credential: testCredential}); err != nil {
+				t.Fatalf("SetRemoteAuth() = %v, want a loopback endpoint to be storable", err)
+			}
+			got, err := LoadRemoteAuth(p)
+			if err != nil {
+				t.Fatalf("LoadRemoteAuth() = %v", err)
+			}
+			if got.Endpoint != endpoint {
+				t.Errorf("LoadRemoteAuth().Endpoint = %q, want %q", got.Endpoint, endpoint)
+			}
+		})
+	}
+}
+
+// The rule applies on the way out as well as on the way in. A store written by
+// an older build — or by hand — holding a cleartext endpoint to a remote host is
+// refused on read rather than delivered to, and the refusal names no value.
+func TestLoadRemoteAuthRejectsAStoredCleartextEndpoint(t *testing.T) {
+	const remote = "http://remote-auth-unmistakable-host.example/v1/traces"
+	const loopback = "http://127.0.0.1:4318/v1/traces"
+
+	t.Run("cleartext to a remote host", func(t *testing.T) {
+		p := remoteTestPaths(t)
+		storePath := filepath.Join(p.ConfigDir, remoteAuthFileName)
+		writeRemoteAuthRaw(t, storePath, fmt.Sprintf(
+			`{"version":1,"endpoint":%q,"enabled":true,"credential":%q}`+"\n", remote, testCredential))
+
+		_, err := LoadRemoteAuth(p)
+
+		if !errors.Is(err, errEndpointCleartext) {
+			t.Fatalf("LoadRemoteAuth() = %v, want errEndpointCleartext", err)
+		}
+		assertDisclosesNothing(t, err, storePath, remote, testCredential)
+	})
+
+	t.Run("cleartext to loopback", func(t *testing.T) {
+		p := remoteTestPaths(t)
+		storePath := filepath.Join(p.ConfigDir, remoteAuthFileName)
+		writeRemoteAuthRaw(t, storePath, fmt.Sprintf(
+			`{"version":1,"endpoint":%q,"enabled":true,"credential":%q}`+"\n", loopback, testCredential))
+
+		got, err := LoadRemoteAuth(p)
+		if err != nil {
+			t.Fatalf("LoadRemoteAuth() = %v, want a loopback store to keep loading", err)
+		}
+		if got.Endpoint != loopback {
+			t.Errorf("LoadRemoteAuth().Endpoint = %q, want %q", got.Endpoint, loopback)
+		}
+	})
+}
+
+// The rule narrows http:// and nothing else: an https:// endpoint is storable
+// whatever its host, including one carrying userinfo, a port and a path.
+func TestHTTPSIsUnaffectedByTheCleartextRule(t *testing.T) {
+	for _, endpoint := range []string{
+		testEndpoint,
+		"https://user:pw@api.example.com:4318/v1/traces",
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			p := remoteTestPaths(t)
+
+			if err := SetRemoteAuth(p, RemoteAuth{Endpoint: endpoint, Enabled: true, Credential: testCredential}); err != nil {
+				t.Fatalf("SetRemoteAuth() = %v, want https:// to be unaffected", err)
+			}
+			got, err := LoadRemoteAuth(p)
+			if err != nil {
+				t.Fatalf("LoadRemoteAuth() = %v", err)
+			}
+			if got.Endpoint != endpoint {
+				t.Errorf("LoadRemoteAuth().Endpoint = %q, want %q", got.Endpoint, endpoint)
 			}
 		})
 	}

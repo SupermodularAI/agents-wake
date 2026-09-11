@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -70,7 +71,7 @@ const remoteAuthFileMode = fs.FileMode(0o600)
 // user's shell.
 const EnvRemoteAuthorization = "WAKE_REMOTE_AUTHORIZATION"
 
-// The two ways an endpoint can be one this build refuses to store, and the one
+// The three ways an endpoint can be one this build refuses to store, and the one
 // way a store can be a version it refuses to read.
 //
 // They are sentinels phrased as the tail of a sentence — the construction
@@ -78,8 +79,14 @@ const EnvRemoteAuthorization = "WAKE_REMOTE_AUTHORIZATION"
 // field's role and this file names the fault, and neither half quotes the value.
 // The rejected endpoint is not echoed and url.Parse's own error is never
 // wrapped, because it embeds the URL it failed on.
+//
+// errEndpointCleartext names the remedy as well as the rule, because a refusal a
+// user cannot act on is a refusal that gets worked around. The command it names
+// is a string and not a call: internal/cli depends on this package and never the
+// reverse (ADR-0001).
 var (
 	errEndpointNotHTTP        = errors.New("is not an absolute http:// or https:// URL")
+	errEndpointCleartext      = errors.New(`must be an https:// URL unless its host is a loopback address, because http:// to any other host puts the credential on the network in the clear; run "wake remote set" with an https:// URL`)
 	errEndpointRequiredWhenOn = errors.New("must be set before remote delivery can be enabled")
 	errRemoteAuthWrongVersion = errors.New("is a version this build does not read")
 )
@@ -98,9 +105,10 @@ var (
 // so a field added later has to be justified there (ADR-0007).
 type RemoteAuth struct {
 	// Endpoint is the OTLP/HTTP JSON traces endpoint records are posted to
-	// (ADR-0027). Absolute, http:// or https://, validated on the way in and
-	// again on the way out — validateRemoteAuth is the one spelling of that rule,
-	// so a value this build never wrote cannot arrive through the file.
+	// (ADR-0027). Absolute; https://, or http:// only to a loopback host,
+	// validated on the way in and again on the way out — validateRemoteAuth is
+	// the one spelling of that rule, so a value this build never wrote cannot
+	// arrive through the file.
 	Endpoint string
 	// Enabled is whether delivery happens at all. False with an endpoint set is
 	// a legitimate state — it is how delivery is turned off without discarding
@@ -195,7 +203,9 @@ func LoadRemoteAuth(p Paths) (RemoteAuth, error) {
 // The endpoint is validated here as well as in SetRemoteAuth. The write path
 // only governs stores this build wrote; a store it did not write is the one worth
 // checking, and ADR-0027 makes OTLP/HTTP the only surface a credential may be
-// posted to.
+// posted to. The scheme-and-host rule is part of what is re-checked on the way
+// out, so a store holding a cleartext endpoint to a remote host is refused here
+// rather than delivered to.
 //
 // No refusal names the file, the endpoint or the credential. The role is a fixed
 // literal here, the fault is a sentinel carrying no value, and a decode failure
@@ -273,8 +283,12 @@ func withEnvCredential(a RemoteAuth) RemoteAuth {
 // in validateRemoteAuth, which the read path applies too. ADR-0027 makes
 // OTLP/HTTP JSON the only integration surface, so an endpoint that is not
 // absolute http:// or https:// is a credential posted somewhere no decision
-// permits. The check is deliberately scheme and host only: no reachability
-// probe, no assertion about the OTLP path, nothing that reads the network.
+// permits — and an http:// endpoint to anything but a loopback host is that
+// credential posted in the clear, on every batch, since it rides in the
+// Authorization header. The check is deliberately scheme and host only: no
+// reachability probe, no assertion about the OTLP path, nothing that reads the
+// network — the loopback test reads the literal host as written and consults no
+// resolver.
 //
 // The config root is checked too, for the reason OpenRepos gives: publishing a
 // credential at 0600 into a directory anyone else can write into is publishing a
@@ -347,13 +361,14 @@ func RemoteEndpointHost(p Paths) (string, error) {
 // so the rule about what a host may carry is spelled once and cannot drift into
 // a third shape.
 //
-// The scheme is checked here as well as in validateRemoteAuth, so an empty
-// result is a usable refusal: a caller can decline a typed value before anything
-// reaches the store, rather than confirming a destination the write path will
-// reject. url.Parse's error is discarded for the reason isHTTPEndpoint discards
-// it — it embeds the URL it failed on.
+// The endpoint rule is applied here as well as in validateRemoteAuth — the same
+// predicate, so the two cannot drift — and that is what makes an empty result a
+// usable refusal: a caller can decline a typed value before anything reaches the
+// store, rather than confirming a destination the write path will reject.
+// url.Parse's error is discarded for the reason endpointFault discards it — it
+// embeds the URL it failed on.
 func EndpointHost(raw string) string {
-	if !isHTTPEndpoint(raw) {
+	if !isStorableEndpoint(raw) {
 		return ""
 	}
 	u, err := url.Parse(raw)
@@ -410,19 +425,60 @@ func validateRemoteAuth(a RemoteAuth) error {
 	if a.Enabled && a.Endpoint == "" {
 		return errEndpointRequiredWhenOn
 	}
-	if a.Endpoint != "" && !isHTTPEndpoint(a.Endpoint) {
-		return errEndpointNotHTTP
+	if a.Endpoint != "" {
+		if err := endpointFault(a.Endpoint); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-// isHTTPEndpoint reports whether raw is an absolute http:// or https:// URL with
-// a host. url.Parse's error is discarded rather than returned: it embeds the URL
-// it failed on, and the caller reports the fault without the value.
-func isHTTPEndpoint(raw string) bool {
+// endpointFault reports why raw is not a destination this build will store, or
+// nil when it is one.
+//
+// Two faults, in the order they can be decided: not an absolute http:// or
+// https:// URL with a host at all, and — for http:// — a host that is not
+// loopback, which would put the Authorization header on the network in the clear
+// on every batch.
+//
+// url.Parse's error is discarded rather than returned: it embeds the URL it
+// failed on, and the caller reports the fault without the value.
+func endpointFault(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return false
+		return errEndpointNotHTTP
 	}
-	return (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return errEndpointNotHTTP
+	}
+	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
+		return errEndpointCleartext
+	}
+	return nil
+}
+
+// isStorableEndpoint is endpointFault as a predicate, for the one caller that
+// has no error to return.
+func isStorableEndpoint(raw string) bool { return endpointFault(raw) == nil }
+
+// isLoopbackHost reports whether host — the literal host of a URL, with any port
+// and any IPv6 brackets already stripped by url.URL.Hostname — is a loopback
+// destination.
+//
+// It is decided from what was written and never from a resolver: a name that
+// resolves to loopback today may not tomorrow, and a validator that reads the
+// network behaves differently on two machines. That is also why net/netip is
+// used rather than net — netip.ParseAddr is a pure value parse with no resolver
+// and no I/O, so the property is visible in the import list.
+//
+// The rule is the literal label "localhost", matched case-insensitively, and any
+// address netip calls loopback: all of 127.0.0.0/8, ::1, and the IPv4-in-IPv6
+// form. A wider match — foo.localhost, localhost.localdomain, a trailing dot —
+// is a wider surface for no benefit, so those are refused.
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	addr, err := netip.ParseAddr(host)
+	return err == nil && addr.IsLoopback()
 }
