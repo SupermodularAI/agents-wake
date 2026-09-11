@@ -1566,18 +1566,22 @@ func TestTriggerResolvesASubagentRunAnEarlierImportBuffered(t *testing.T) {
 	}
 }
 
-// The carry has a depth, and until this counter existed nothing reported it: a user
-// whose subagent runs were sitting in the carry read a healthy scan and a confident
-// zero, and found the gap only in the backend. This is the same fixture as the test
-// above — copied rather than shared, because that test is the merged regression for the
-// carry itself and is not to be touched — read through the counter instead of through
-// the spool.
-func TestScanReportsTheDepthOfThePendingCarry(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "project")
+// writeCarryFixture writes the one-session, one-subagent-run history the three counter
+// tests below read: a parent transcript and a subagent transcript, both stamped an hour
+// back, so the session is open under the import's default staleness threshold and closed
+// under the 30m one those tests set before their second scan.
+//
+// It is a copy of the fixture TestTriggerResolvesASubagentRunAnEarlierImportBuffered
+// builds inline, deliberately not shared with it: that test is the merged regression for
+// the carry mechanism itself and is not to be touched. Shared only between the counter
+// tests here, which read the same history through health.Scan rather than the spool.
+func writeCarryFixture(t *testing.T) (root, claudeDir string) {
+	t.Helper()
+	root = filepath.Join(t.TempDir(), "project")
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatalf("MkdirAll() error = %v", err)
 	}
-	claudeDir := filepath.Join(t.TempDir(), "claude")
+	claudeDir = filepath.Join(t.TempDir(), "claude")
 	writeFixture(t, filepath.Join(claudeDir, "settings.json"), `{}`)
 	stamp := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
 	parent := []string{
@@ -1590,6 +1594,15 @@ func TestScanReportsTheDepthOfThePendingCarry(t *testing.T) {
 		`{"uuid":"agent-2","agentId":"agent-1","attributionAgent":"sdlc-run","sessionId":"session-1","cwd":"` + root + `","timestamp":"` + stamp + `","entrypoint":"cli","message":{"model":"sonnet","content":[{"type":"tool_result","tool_use_id":"call-agent","is_error":false}]}}`,
 	}
 	writeFixture(t, filepath.Join(claudeDir, "projects", "project", "session", "subagents", "agent-1.jsonl"), strings.Join(subagent, "\n"))
+	return root, claudeDir
+}
+
+// The carry holds runs no scan has resolved, and until this counter existed nothing
+// reported them: a user whose subagent runs were sitting there read a healthy scan and a
+// confident zero, and found the gap only in the backend. Read through the counter rather
+// than through the spool, on the same history as the merged regression above.
+func TestScanReportsTheUnresolvedSubagentRunsTheCarryHolds(t *testing.T) {
+	root, claudeDir := writeCarryFixture(t)
 	paths := testPaths(t)
 
 	if _, err := Init(paths, root, claudeDir, testExecutable(t), false); err != nil {
@@ -1638,23 +1651,7 @@ func TestScanReportsTheDepthOfThePendingCarry(t *testing.T) {
 // It is the same fixture as the test above, with one step added: the harness's own
 // cleanupPeriodDays removes the project's transcripts between the two scans.
 func TestThePendingCarryHoldsARunWhoseTranscriptsTheHarnessPruned(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "project")
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		t.Fatalf("MkdirAll() error = %v", err)
-	}
-	claudeDir := filepath.Join(t.TempDir(), "claude")
-	writeFixture(t, filepath.Join(claudeDir, "settings.json"), `{}`)
-	stamp := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
-	parent := []string{
-		`{"uuid":"parent-1","sessionId":"session-1","cwd":"` + root + `","timestamp":"` + stamp + `","entrypoint":"cli","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-parent","name":"Bash"}]}}`,
-		`{"uuid":"parent-2","sessionId":"session-1","cwd":"` + root + `","timestamp":"` + stamp + `","entrypoint":"cli","message":{"content":[{"type":"tool_result","tool_use_id":"call-parent","is_error":false}]}}`,
-	}
-	writeFixture(t, filepath.Join(claudeDir, "projects", "project", "session.jsonl"), strings.Join(parent, "\n"))
-	subagent := []string{
-		`{"uuid":"agent-1","agentId":"agent-1","sessionId":"session-1","cwd":"` + root + `","timestamp":"` + stamp + `","entrypoint":"cli","message":{"model":"sonnet","content":[{"type":"tool_use","id":"call-agent","name":"Bash"}]}}`,
-		`{"uuid":"agent-2","agentId":"agent-1","attributionAgent":"sdlc-run","sessionId":"session-1","cwd":"` + root + `","timestamp":"` + stamp + `","entrypoint":"cli","message":{"model":"sonnet","content":[{"type":"tool_result","tool_use_id":"call-agent","is_error":false}]}}`,
-	}
-	writeFixture(t, filepath.Join(claudeDir, "projects", "project", "session", "subagents", "agent-1.jsonl"), strings.Join(subagent, "\n"))
+	root, claudeDir := writeCarryFixture(t)
 	paths := testPaths(t)
 
 	if _, err := Init(paths, root, claudeDir, testExecutable(t), false); err != nil {
@@ -1678,6 +1675,67 @@ func TestThePendingCarryHoldsARunWhoseTranscriptsTheHarnessPruned(t *testing.T) 
 
 	if got := scanOf(t, paths).PendingSubagentRuns; got != 1 {
 		t.Errorf("PendingSubagentRuns = %d after the transcripts were pruned, want 1 — a run whose session is never observed closed stays in the carry", got)
+	}
+}
+
+// A run the carry readmits after it has already been collected. This is the case that
+// fixes the counter's meaning: scan 2 observes the session close, resolves the run and
+// writes its record to the store, and the counter falls to 0 — but pending.json's merge
+// is union-only, so the resolved run is still in the file. Once the harness prunes the
+// transcripts, every later scan restores that run, finds no session to judge it by, and
+// counts it again, for good.
+//
+// So a non-zero reading is not a count of work waiting to be collected: it is the size
+// of the unresolved set the carry holds, which on a machine old enough for the harness's
+// own cleanup to have run includes runs whose records are already in the store. The doc
+// comments around this counter say exactly that, and this test is what holds them to it.
+func TestThePendingCarryReadmitsARunItAlreadyResolved(t *testing.T) {
+	root, claudeDir := writeCarryFixture(t)
+	paths := testPaths(t)
+
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), false); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	if _, err := Ingest(paths, claudeDir); err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+
+	// The session closes and a scan observes it, so the run resolves and its record is
+	// written. The counter reads the clean zero that resolution earns.
+	if _, err := config.Set(paths, "scan.stale_call_timeout", "30m"); err != nil {
+		t.Fatalf("Set() error = %v", err)
+	}
+	if _, err := Trigger(paths, claudeDir); err != nil {
+		t.Fatalf("Trigger() error = %v", err)
+	}
+	if got := scanOf(t, paths).PendingSubagentRuns; got != 0 {
+		t.Fatalf("PendingSubagentRuns = %d after the session closed, want 0", got)
+	}
+	if got := spoolSubagentRecords(t, paths); len(got) != 1 {
+		t.Fatalf("subagent records after the session closed = %d, want 1 — the run is collected", len(got))
+	}
+
+	// The harness prunes the closed session's transcripts on its own schedule, after the
+	// run was collected. Nothing is left for a later scan to observe the session in.
+	if err := os.RemoveAll(filepath.Join(claudeDir, "projects", "project")); err != nil {
+		t.Fatalf("RemoveAll() error = %v", err)
+	}
+	if _, err := Trigger(paths, claudeDir); err != nil {
+		t.Fatalf("Trigger() error = %v", err)
+	}
+	if got := scanOf(t, paths).PendingSubagentRuns; got != 1 {
+		t.Errorf("PendingSubagentRuns = %d after the collected run's transcripts were pruned, want 1 — the carry readmits it", got)
+	}
+	// And it does not leave again: the run is now counted on every scan for the life of
+	// the machine, while its record sits in the store.
+	if _, err := Trigger(paths, claudeDir); err != nil {
+		t.Fatalf("Trigger() error = %v", err)
+	}
+	if got := scanOf(t, paths).PendingSubagentRuns; got != 1 {
+		t.Errorf("PendingSubagentRuns = %d on the scan after that, want 1 — nothing evicts a readmitted run", got)
+	}
+	if got := spoolSubagentRecords(t, paths); len(got) != 1 {
+		t.Errorf("subagent records = %d, want the 1 already collected — a readmitted run is counted, not re-derived", len(got))
 	}
 }
 
