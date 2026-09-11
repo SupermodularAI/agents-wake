@@ -553,3 +553,125 @@ func TestRenderNamesTheProjectColumnAndNeverTheSessionGrain(t *testing.T) {
 		t.Errorf("the PROJECT column's copy names the session grain:\n%s", section)
 	}
 }
+
+// The report names which harnesses the scan read and which it did not, because a
+// harness with no rows below could be one that has nothing or one nobody looked
+// at, and only this line tells them apart (ADR-0046).
+
+func renderWith(t *testing.T, options Options, available ...inventory.Usage) string {
+	t.Helper()
+	var out strings.Builder
+	if err := Render(&out, metrics.Summary{}, available, options); err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	return out.String()
+}
+
+func TestRenderNamesTheHarnessesRead(t *testing.T) {
+	out := renderWith(t, Options{Harnesses: []inventory.HarnessObservation{
+		{Harness: "claude-code", Observed: true},
+		{Harness: "opencode", Observed: true},
+	}}, inventory.Usage{Harness: "claude-code", Kind: record.KindSkill, Name: "pr-review"})
+
+	if !strings.Contains(out, "Harnesses read: claude-code, opencode") {
+		t.Fatalf("output is missing the harnesses-read line:\n%s", out)
+	}
+	if strings.Contains(out, "Not observed:") {
+		t.Fatalf("a scan that read everything named something unobserved:\n%s", out)
+	}
+}
+
+func TestRenderNamesTheHarnessesNotObserved(t *testing.T) {
+	out := renderWith(t, Options{Harnesses: []inventory.HarnessObservation{
+		{Harness: "claude-code", Observed: true},
+		{Harness: "opencode", Observed: false},
+	}}, inventory.Usage{Harness: "claude-code", Kind: record.KindSkill, Name: "pr-review"})
+
+	if !strings.Contains(out, "Harnesses read: claude-code") {
+		t.Errorf("output is missing the harnesses-read line:\n%s", out)
+	}
+	if !strings.Contains(out, "Not observed: opencode") {
+		t.Errorf("output is missing the not-observed line:\n%s", out)
+	}
+	// Never a zero for the harness nobody read.
+	if strings.Contains(out, "opencode 0") {
+		t.Errorf("an unobserved harness was rendered as a count:\n%s", out)
+	}
+}
+
+func TestRenderWithNoHarnessObservationSaysNotObserved(t *testing.T) {
+	out := renderWith(t, Options{}, inventory.Usage{Harness: "claude-code", Kind: record.KindSkill, Name: "pr-review"})
+	if !strings.Contains(out, "Harnesses read: not observed") {
+		t.Fatalf("a report with no scan record claimed a scan:\n%s", out)
+	}
+}
+
+func TestBothHarnessesAppearInTheUsageTable(t *testing.T) {
+	out := renderWith(t, Options{
+		Usage: true,
+		Harnesses: []inventory.HarnessObservation{
+			{Harness: "claude-code", Observed: true},
+			{Harness: "opencode", Observed: true},
+		},
+	},
+		inventory.Usage{Harness: "claude-code", Kind: record.KindSkill, Name: "pr-review", Invocations: 3, LastUsed: time.Now().UTC()},
+		inventory.Usage{Harness: "opencode", Kind: record.KindMCPTool, Name: "atlassian_search", Invocations: 5, LastUsed: time.Now().UTC()},
+	)
+
+	for _, want := range []string{"pr-review", "atlassian_search", "claude-code", "opencode"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the usage table is missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestTheTablesHaveTheSameColumnsWithTwoHarnesses(t *testing.T) {
+	// A kind a harness cannot have contributes no row, and therefore no column: both
+	// tables are keyed by primitive, not by kind, so a second harness adds rows and
+	// never an empty column (plan §4.5). Asserted by comparing header lines, so a
+	// later per-harness column fails here.
+	one := renderWith(t, Options{Usage: true, Unused: true,
+		Harnesses: []inventory.HarnessObservation{{Harness: "claude-code", Observed: true}}},
+		inventory.Usage{Harness: "claude-code", Kind: record.KindSkill, Name: "pr-review", Invocations: 3, LastUsed: time.Now().UTC()},
+		inventory.Usage{Harness: "claude-code", Kind: record.KindSubagent, Name: "explorer"},
+	)
+	two := renderWith(t, Options{Usage: true, Unused: true,
+		Harnesses: []inventory.HarnessObservation{
+			{Harness: "claude-code", Observed: true},
+			{Harness: "opencode", Observed: true},
+		}},
+		inventory.Usage{Harness: "claude-code", Kind: record.KindSkill, Name: "pr-review", Invocations: 3, LastUsed: time.Now().UTC()},
+		inventory.Usage{Harness: "claude-code", Kind: record.KindSubagent, Name: "explorer"},
+		inventory.Usage{Harness: "opencode", Kind: record.KindMCPTool, Name: "atlassian_search", Invocations: 5, LastUsed: time.Now().UTC()},
+		inventory.Usage{Harness: "opencode", Kind: record.KindMCPServer, Name: "notion"},
+	)
+
+	if got, want := headerLines(two), headerLines(one); !slicesEqual(got, want) {
+		t.Fatalf("table headers changed with a second harness:\ngot  %v\nwant %v", got, want)
+	}
+}
+
+// headerLines returns each table's column names, in order, with the padding
+// dropped: a longer primitive name widens a column, and the claim here is about
+// which columns exist rather than how wide they are.
+func headerLines(out string) []string {
+	headers := []string{}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "PRIMITIVE") && strings.Contains(line, "TYPE") {
+			headers = append(headers, strings.Join(strings.Fields(line), " "))
+		}
+	}
+	return headers
+}
+
+func slicesEqual(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}

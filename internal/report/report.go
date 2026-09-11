@@ -41,7 +41,19 @@ type Options struct {
 	// package reads no config and no file. A nil map is valid — every repository then
 	// stands alone.
 	Rollup metrics.RepoRollup
+	// Harnesses is which harnesses the last scan read, as the inventory snapshot
+	// recorded them. It is a field on Options rather than a parameter so Render's
+	// exported signature is unchanged and every existing caller still compiles; it
+	// is here at all because a harness with no rows could be one that has nothing
+	// or one nobody looked at, and only this tells them apart (ADR-0046).
+	Harnesses []inventory.HarnessObservation
 }
+
+// unobserved is the one phrase this package uses where observation did not happen.
+// One literal rather than two, so the harness line and the last-observed line can
+// never drift apart — and defined here rather than imported from internal/health,
+// which this package depends on nowhere else.
+const unobserved = "not observed"
 
 // Print reads the local event and primitive stores and writes current metrics.
 func Print(writer io.Writer, source *store.Store, primitives *inventory.Store, options Options) error {
@@ -53,11 +65,12 @@ func Print(writer io.Writer, source *store.Store, primitives *inventory.Store, o
 	for _, entry := range entries {
 		records = append(records, entry.Record)
 	}
-	available, err := primitives.Read()
+	snapshot, err := primitives.Snapshot()
 	if err != nil {
 		return err
 	}
-	return Render(writer, metrics.Aggregate(records, options.Rollup), available, options)
+	options.Harnesses = snapshot.Harnesses
+	return Render(writer, metrics.Aggregate(records, options.Rollup), snapshot.Primitives, options)
 }
 
 // Render writes one readable report. Its content is identical whatever the
@@ -79,6 +92,9 @@ func Render(writer io.Writer, summary metrics.Summary, available []inventory.Usa
 		return err
 	}
 	if err := lastObserved(writer, summary); err != nil {
+		return err
+	}
+	if err := harnessesObserved(writer, options.Harnesses); err != nil {
 		return err
 	}
 
@@ -111,11 +127,43 @@ func Render(writer io.Writer, summary metrics.Summary, available []inventory.Usa
 // row of USED PRIMITIVES below them. The timestamp has no such mismatch — it
 // is worth keeping on its own.
 func lastObserved(writer io.Writer, summary metrics.Summary) error {
-	observed := "not observed"
+	observed := unobserved
 	if !summary.LastObserved.IsZero() {
 		observed = summary.LastObserved.UTC().Format(time.RFC3339)
 	}
 	_, err := fmt.Fprintf(writer, "Last observed: %s\n", observed)
+	return err
+}
+
+// harnessesObserved says which harnesses the last scan read and which it did not.
+//
+// Two lines rather than one, and the second is the whole point: a harness nobody
+// read has no rows in the tables below, and without this line that emptiness reads
+// as "you never use it" rather than as "nobody looked" (ADR-0046). A removal
+// recommendation built on the first reading would be wrong.
+//
+// The names come from the scan's own record, so a build with no reader for a
+// harness cannot name it here at all. A snapshot with no record of any scan says
+// so rather than naming none, which would claim a scan read nothing.
+func harnessesObserved(writer io.Writer, harnesses []inventory.HarnessObservation) error {
+	read, missed := []string{}, []string{}
+	for _, harness := range harnesses {
+		if harness.Observed {
+			read = append(read, string(harness.Harness))
+			continue
+		}
+		missed = append(missed, string(harness.Harness))
+	}
+	if len(read) == 0 {
+		read = append(read, unobserved)
+	}
+	if _, err := fmt.Fprintf(writer, "Harnesses read: %s\n", strings.Join(read, ", ")); err != nil {
+		return err
+	}
+	if len(missed) == 0 {
+		return nil
+	}
+	_, err := fmt.Fprintf(writer, "Not observed: %s\n", strings.Join(missed, ", "))
 	return err
 }
 

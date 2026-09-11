@@ -349,7 +349,7 @@ func TestViewLabelsAnUnmatchedServer(t *testing.T) {
 	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
 	result := view(metrics.Aggregate(nil, nil), []inventory.Usage{
 		{Harness: "claude-code", Kind: record.KindMCPServer, Name: "linear-server", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 3, Unmatched: true, LastUsed: at},
-	}, repolabel.Labels{})
+	}, nil, repolabel.Labels{})
 
 	if len(result.Usage) != 1 || len(result.Unused) != 0 {
 		t.Fatalf("view() = %+v, want the used server in Usage", result)
@@ -368,7 +368,7 @@ func TestViewMarksASubagentRowWithNoRatedPopulationAsUnrated(t *testing.T) {
 	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
 	result := view(metrics.Aggregate(nil, nil), []inventory.Usage{
 		{Harness: "claude-code", Kind: record.KindSubagent, Name: "explorer", Repos: []record.Hash{"0123456789abcdef0123456789abcdef"}, Invocations: 3, Unknown: 3, LastUsed: at},
-	}, repolabel.Labels{})
+	}, nil, repolabel.Labels{})
 
 	if len(result.Usage) != 1 {
 		t.Fatalf("view() = %+v, want the used subagent in Usage", result)
@@ -416,4 +416,84 @@ func TestHandlerNamesTheProjectColumnAndNeverTheSessionGrain(t *testing.T) {
 	if strings.Contains(body, ">Repo<") {
 		t.Errorf("dashboard still headers the column Repo: %s", body)
 	}
+}
+
+// The dashboard's observed / not-observed line is derived from what the build
+// actually reads, not hardcoded. Nothing asserted the old sentence — it appeared
+// only in the template — which is exactly why these three exist: the new line has
+// to be asserted where the old one never was.
+
+// renderDashboard serves one page and returns its HTML.
+func renderDashboard(t *testing.T, harnesses []inventory.HarnessObservation, available ...inventory.Usage) string {
+	t.Helper()
+	var out strings.Builder
+	if err := page.Execute(&out, view(metrics.Aggregate(nil, nil), available, harnesses, repolabel.Labels{})); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	return out.String()
+}
+
+func TestTheDashboardNamesObservedHarnesses(t *testing.T) {
+	html := renderDashboard(t, []inventory.HarnessObservation{
+		{Harness: "claude-code", Observed: true},
+		{Harness: "opencode", Observed: true},
+	}, inventory.Usage{Harness: "opencode", Kind: record.KindMCPTool, Name: "atlassian_search", Invocations: 2, LastUsed: time.Now()})
+
+	if !strings.Contains(html, "Usage observed:</strong> claude-code, opencode") {
+		t.Fatalf("the observed line does not name both harnesses:\n%s", noteLine(html))
+	}
+	if !strings.Contains(html, "Not observed:</strong> none") {
+		t.Fatalf("the unobserved half rendered blank rather than saying none:\n%s", noteLine(html))
+	}
+}
+
+func TestTheDashboardNamesUnobservedHarnessesAndNeverZero(t *testing.T) {
+	html := renderDashboard(t, []inventory.HarnessObservation{
+		{Harness: "claude-code", Observed: true},
+		{Harness: "opencode", Observed: false},
+	}, inventory.Usage{Harness: "claude-code", Kind: record.KindSkill, Name: "pr-review", Invocations: 2, LastUsed: time.Now()})
+
+	note := noteLine(html)
+	if !strings.Contains(note, "Not observed:</strong> opencode") {
+		t.Fatalf("the note does not name the unobserved harness:\n%s", note)
+	}
+	if !strings.Contains(note, "never represented as zero") {
+		t.Fatalf("the note dropped the claim it exists to make:\n%s", note)
+	}
+	// The harness nobody read contributes no row, so it can carry no count.
+	if strings.Contains(html, ">opencode<") {
+		t.Fatalf("an unobserved harness appears as a table row:\n%s", html)
+	}
+}
+
+func TestTheDashboardSaysNothingAboutAHarnessTheBuildDoesNotRead(t *testing.T) {
+	// The old sentence named codex, cursor and pi, which this build has no reader
+	// for: it was claiming an absence it could not have observed.
+	html := renderDashboard(t, []inventory.HarnessObservation{{Harness: "claude-code", Observed: true}})
+	for _, absent := range []string{"codex", "Codex", "cursor", "Cursor", "pi "} {
+		if strings.Contains(html, absent) {
+			t.Errorf("the dashboard names %q, which this build has no reader for", absent)
+		}
+	}
+}
+
+func TestTheDashboardSubtitleNamesNoSingleHarness(t *testing.T) {
+	// There is one spool for every harness, and record.Harness is what
+	// distinguishes the rows — so naming one harness in the subtitle is false the
+	// moment a second is read.
+	html := renderDashboard(t, nil)
+	if strings.Contains(html, "Claude Code event store") {
+		t.Errorf("the subtitle still names one harness:\n%s", html)
+	}
+}
+
+// noteLine returns the observation paragraph, for a failure message that is one
+// line rather than a whole page.
+func noteLine(html string) string {
+	for _, line := range strings.Split(html, "\n") {
+		if strings.Contains(line, "Usage observed:") {
+			return strings.TrimSpace(line)
+		}
+	}
+	return "(no note line rendered)"
 }
