@@ -403,3 +403,58 @@ func TestTheStateWordIsUnaffectedByTheSkippedBreakdown(t *testing.T) {
 		})
 	}
 }
+
+// The per-harness state word is Diagnose's rule applied to one harness, and the
+// point of it being separate is that one harness's blindness must not move the
+// machine-wide word (plan §12).
+
+func TestAHarnessNobodyReadIsNotObserved(t *testing.T) {
+	if got := DiagnoseHarness(HarnessScan{}); got != StateNotObserved {
+		t.Fatalf("DiagnoseHarness(zero) = %q, want %q", got, StateNotObserved)
+	}
+}
+
+func TestAHarnessWithAnUnreadableStoreCollectsNothing(t *testing.T) {
+	if got := DiagnoseHarness(HarnessScan{Observed: true, Unreadable: 1}); got != StateCollectsNothing {
+		t.Fatalf("DiagnoseHarness(unreadable) = %q, want %q", got, StateCollectsNothing)
+	}
+}
+
+func TestAHarnessWithAnUnknownOutcomeCollectsNothing(t *testing.T) {
+	// The format-drift arm: a harness that renamed its statuses stops collecting
+	// while every other counter still reads healthy.
+	got := DiagnoseHarness(HarnessScan{Observed: true, EventsWritten: 500, UnknownOutcomes: 3})
+	if got != StateCollectsNothing {
+		t.Fatalf("DiagnoseHarness(drifted) = %q, want %q", got, StateCollectsNothing)
+	}
+}
+
+func TestAHarnessThatReadAndWroteNothingCollectsZero(t *testing.T) {
+	if got := DiagnoseHarness(HarnessScan{Observed: true, Sources: 12}); got != StateCollectsZero {
+		t.Fatalf("DiagnoseHarness(empty) = %q, want %q", got, StateCollectsZero)
+	}
+}
+
+func TestAHarnessThatWroteIsCollecting(t *testing.T) {
+	got := DiagnoseHarness(HarnessScan{Observed: true, Sources: 12, EventsWritten: 40, PendingCalls: 3, Skipped: 2})
+	if got != StateCollecting {
+		t.Fatalf("DiagnoseHarness(healthy) = %q, want %q", got, StateCollecting)
+	}
+}
+
+func TestAnOpenCodeFailureDoesNotMoveTheMachineWideState(t *testing.T) {
+	// Adapters fail independently and soft. A blind opencode store is reported on
+	// opencode's own line and changes nothing about the machine-wide word.
+	report := Report{Scan: Scan{
+		At:            time.Now().UTC(),
+		EventsWritten: 5,
+		ClaudeCode:    HarnessScan{Observed: true, EventsWritten: 5},
+		OpenCode:      HarnessScan{Observed: true, Unreadable: 1},
+	}}
+	if got := Diagnose(report, nil, nil).State; got != StateCollecting {
+		t.Fatalf("Diagnose() = %q, want %q", got, StateCollecting)
+	}
+	if got := DiagnoseHarness(report.Scan.OpenCode); got != StateCollectsNothing {
+		t.Fatalf("DiagnoseHarness(opencode) = %q, want %q", got, StateCollectsNothing)
+	}
+}

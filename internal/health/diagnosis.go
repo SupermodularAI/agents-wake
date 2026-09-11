@@ -268,3 +268,36 @@ func collectionScope(scope Scope) CollectionScope {
 		return CollectionScopeUnrecorded
 	}
 }
+
+// StateNotObserved is the per-harness state for a harness this scan did not read.
+// It is the same phrase SkippedUnobserved uses, because it is the same rule
+// (ADR-0046): where observation did not happen, say so rather than say zero.
+const StateNotObserved State = State(SkippedUnobserved)
+
+// DiagnoseHarness is Diagnose's rule applied to one harness.
+//
+// It is deliberately not folded into Diagnose. Adapters fail independently and
+// soft (plan §12), so an unreadable opencode store must never move the
+// machine-wide state word and make Claude Code look broken — and the machine-wide
+// word must not go quiet because one harness is healthy either.
+//
+// The arms are Diagnose's own, narrowed to what a harness can answer for: a source
+// nobody could read, a row that would not parse, an invocation nothing could name,
+// and a status this build does not recognise all mean the numbers are missing
+// something and nobody knows how much. Everything read and nothing found means the
+// numbers are complete and the answer is zero.
+//
+// UnknownOutcomes is in the first arm and has no counterpart in Diagnose, because
+// no other harness's statuses are a closed measured set. It is the drift signal for
+// a harness whose vocabulary can change under it.
+func DiagnoseHarness(scan HarnessScan) State {
+	switch {
+	case !scan.Observed:
+		return StateNotObserved
+	case scan.Unreadable > 0 || scan.ParseErrors > 0 || scan.RefusedCalls > 0 || scan.UnknownOutcomes > 0:
+		return StateCollectsNothing
+	case scan.EventsWritten == 0:
+		return StateCollectsZero
+	}
+	return StateCollecting
+}
