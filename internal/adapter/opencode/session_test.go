@@ -137,3 +137,45 @@ func TestSessionEndsAreDerivedInAStableOrder(t *testing.T) {
 		}
 	}
 }
+
+// withoutLastActivity is a session row the harness recorded no time_updated for.
+func withoutLastActivity(id string) Session {
+	registered := session(id)
+	registered.UpdatedMS, registered.HasUpdated = 0, false
+	return registered
+}
+
+// A session's last-activity instant is the session grain's whole timestamp and the
+// idleness comparison's whole input. Coalescing an absent one to the epoch makes
+// every such session instantly, permanently "finished" and stamps its session_end
+// at 1970 — a record nothing measured, deduplicated forever by ADR-0004. It is
+// refused and counted instead.
+func TestASessionWithNoLastActivityInstantDerivesNoSessionEnd(t *testing.T) {
+	scan := NewScan(consents, NewServers(nil), adapter.Staleness{}, adapter.Idleness{Timeout: time.Hour, Now: past})
+	scan.Session(withoutLastActivity("ses_abc"))
+	result := scan.Close()
+
+	if len(result.Records) != 0 {
+		t.Fatalf("records = %d, want 0: no session_end carries an instant nothing recorded", len(result.Records))
+	}
+	if result.Refused != 1 {
+		t.Fatalf("refused = %d, want 1: the loss has to be counted, not silent", result.Refused)
+	}
+}
+
+// The same absence must not make the staleness rule give up on the session's
+// parts: "no instant" is not "silent for long enough", and interrupted is a
+// permanent verdict.
+func TestAPartOfASessionWithNoLastActivityInstantStaysPending(t *testing.T) {
+	scan := NewScan(consents, NewServers(nil), adapter.Staleness{Timeout: time.Hour, Now: past}, adapter.Idleness{})
+	scan.Session(withoutLastActivity("ses_abc"))
+	scan.Part(toolPart("prt_abc", "bash", "running"))
+	result := scan.Close()
+
+	if result.Interrupted != 0 || len(result.Records) != 0 {
+		t.Fatalf("interrupted = %d, records = %d, want 0 and 0", result.Interrupted, len(result.Records))
+	}
+	if result.Pending != 1 {
+		t.Fatalf("pending = %d, want 1", result.Pending)
+	}
+}

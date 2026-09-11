@@ -34,9 +34,12 @@ type ToolPart struct {
 	HasStart bool
 	EndMS    int64
 	HasEnd   bool
-	// UpdatedMS is part.time_updated: the row's own liveness, used only by the
-	// staleness rule and never written to a record.
-	UpdatedMS int64
+	// UpdatedMS is part.time_updated: the row's own liveness, never written to a
+	// record. HasUpdated is false where the harness recorded none — modelled rather
+	// than coalesced, on the same rule as the two instants above, so nothing that
+	// later reads it is handed an epoch nothing recorded.
+	UpdatedMS  int64
+	HasUpdated bool
 }
 
 // Session is the allowlisted subset of one opencode `session` row: a directory the
@@ -55,7 +58,13 @@ type Session struct {
 	TokensReasoning  int64
 	TokensCacheRead  int64
 	TokensCacheWrite int64
-	UpdatedMS        int64
+	// UpdatedMS is session.time_updated, the session's last activity. HasUpdated is
+	// false where the harness reported none, and no value is substituted: it is
+	// both the session grain's whole timestamp and the idleness comparison's whole
+	// input, so an epoch put here would stamp a record nothing measured and call
+	// every such session finished the moment it was read.
+	UpdatedMS  int64
+	HasUpdated bool
 }
 
 // serverSeparator is what opencode puts between an MCP server's spelling and the

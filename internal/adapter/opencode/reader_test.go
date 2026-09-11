@@ -32,21 +32,23 @@ func session(id string) Session {
 		TokensCacheRead:  19,
 		TokensCacheWrite: 23,
 		UpdatedMS:        time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC).UnixMilli(),
+		HasUpdated:       true,
 	}
 }
 
 func toolPart(id, tool, status string) ToolPart {
 	start := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC).UnixMilli()
 	return ToolPart{
-		ID:        id,
-		SessionID: "ses_abc",
-		Tool:      tool,
-		Status:    status,
-		StartMS:   start,
-		EndMS:     start + 250,
-		HasStart:  true,
-		HasEnd:    true,
-		UpdatedMS: start,
+		ID:         id,
+		SessionID:  "ses_abc",
+		Tool:       tool,
+		Status:     status,
+		StartMS:    start,
+		EndMS:      start + 250,
+		HasStart:   true,
+		HasEnd:     true,
+		UpdatedMS:  start,
+		HasUpdated: true,
 	}
 }
 

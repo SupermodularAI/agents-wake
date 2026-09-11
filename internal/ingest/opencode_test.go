@@ -22,24 +22,26 @@ func openCodeConsents(string, time.Time) (record.Hash, bool) { return openCodeRe
 
 func openCodeSession(id string) opencode.Session {
 	return opencode.Session{
-		ID:        id,
-		Directory: "/home/dev/project",
-		Version:   "1.18.30",
-		UpdatedMS: openCodeInstant.UnixMilli(),
+		ID:         id,
+		Directory:  "/home/dev/project",
+		Version:    "1.18.30",
+		UpdatedMS:  openCodeInstant.UnixMilli(),
+		HasUpdated: true,
 	}
 }
 
 func openCodePart(id, tool, status string) opencode.ToolPart {
 	return opencode.ToolPart{
-		ID:        id,
-		SessionID: "ses_abc",
-		Tool:      tool,
-		Status:    status,
-		StartMS:   openCodeInstant.UnixMilli(),
-		EndMS:     openCodeInstant.UnixMilli() + 100,
-		HasStart:  true,
-		HasEnd:    true,
-		UpdatedMS: openCodeInstant.UnixMilli(),
+		ID:         id,
+		SessionID:  "ses_abc",
+		Tool:       tool,
+		Status:     status,
+		StartMS:    openCodeInstant.UnixMilli(),
+		EndMS:      openCodeInstant.UnixMilli() + 100,
+		HasStart:   true,
+		HasEnd:     true,
+		UpdatedMS:  openCodeInstant.UnixMilli(),
+		HasUpdated: true,
 	}
 }
 

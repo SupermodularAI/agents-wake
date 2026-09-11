@@ -295,6 +295,56 @@ func TestTheWalkSelectsNoFreeTextColumn(t *testing.T) {
 	}
 }
 
+// TestNoInstantIsCoalesced is a source-level assertion, for the reason the two
+// above it are: what it forbids is a query somebody writes later. Coalescing an
+// instant substitutes the epoch for an absence, and the epoch is the one
+// substitution that passes every validator and renders as a real measurement.
+func TestNoInstantIsCoalesced(t *testing.T) {
+	for _, query := range []string{sessionQuery, partQuery} {
+		for _, argument := range coalesced(query) {
+			for _, instant := range []string{"time_updated", "$.state.time.start", "$.state.time.end"} {
+				if strings.Contains(argument, instant) {
+					t.Errorf("a query coalesces %q: an absent instant must stay distinguishable from the epoch", instant)
+				}
+			}
+		}
+	}
+}
+
+// coalesced is every argument list a query hands coalesce(), matched by counting
+// parentheses rather than by line, because one line carries several calls and a
+// coalesced instant can nest a json_extract inside itself.
+func coalesced(query string) []string {
+	arguments := []string{}
+	for rest := query; ; {
+		open := strings.Index(rest, "coalesce(")
+		if open < 0 {
+			return arguments
+		}
+		rest = rest[open+len("coalesce("):]
+		depth, end := 1, -1
+		for i, r := range rest {
+			switch r {
+			case '(':
+				depth++
+			case ')':
+				depth--
+			}
+			if depth == 0 {
+				end = i
+			}
+			if end >= 0 {
+				break
+			}
+		}
+		if end < 0 {
+			return append(arguments, rest)
+		}
+		arguments = append(arguments, rest[:end])
+		rest = rest[end:]
+	}
+}
+
 func readSource(t *testing.T, name string) string {
 	t.Helper()
 	source, err := os.ReadFile(name)
@@ -659,5 +709,42 @@ func TestAToolPartWithNoStartInstantIsRefusedAndVisible(t *testing.T) {
 	}
 	if body, readErr := os.ReadFile(spool); readErr == nil && strings.Contains(string(body), "1970-01-01") {
 		t.Fatal("a record was written stamped at the epoch")
+	}
+}
+
+// TestASessionWithNoLastActivityInstantIsRefusedAndVisible is the same rule one
+// column over: session.time_updated is the session grain's whole timestamp and the
+// idleness comparison's whole input, so a coalesced 0 made a session with no
+// recorded activity both instantly finished and stamped at 1970.
+func TestASessionWithNoLastActivityInstantIsRefusedAndVisible(t *testing.T) {
+	paths := testPaths(t)
+	root := t.TempDir()
+	repos := consentedRepos(t, paths, root)
+	path := filepath.Join(t.TempDir(), "opencode.db")
+	storePath := writeFixtureStore(t, path, []string{
+		`create table session (id text primary key, directory text, version text,
+			tokens_input integer, tokens_output integer, tokens_reasoning integer,
+			tokens_cache_read integer, tokens_cache_write integer, cost real, time_updated integer)`,
+		`create table part (id text primary key, message_id text, session_id text,
+			time_created integer, time_updated integer, data text)`,
+		fmt.Sprintf(`insert into session values ('ses_abc', %s, '1.18.30', 11, 13, 17, 19, 23, 0.42, NULL)`,
+			sqlQuote(root)),
+	})
+	spool := filepath.Join(t.TempDir(), "events.ndjson")
+
+	written, counters, err := ingestOpenCode(repos, storePath, opencode.NewServers(nil), store.New(spool),
+		adapter.Staleness{}, adapter.Idleness{Timeout: time.Hour, Now: openCodeInstant.Add(2 * time.Hour)},
+		wholeHistory, nil)
+	if err != nil {
+		t.Fatalf("ingestOpenCode() error = %v", err)
+	}
+	if written != 0 {
+		t.Fatalf("written = %d, want 0: no session_end carries an instant nothing recorded", written)
+	}
+	if counters.RefusedCalls != 1 {
+		t.Fatalf("refused calls = %d, want 1", counters.RefusedCalls)
+	}
+	if body, readErr := os.ReadFile(spool); readErr == nil && strings.Contains(string(body), "1970-01-01") {
+		t.Fatal("a session_end was written stamped at the epoch")
 	}
 }

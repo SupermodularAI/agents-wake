@@ -56,21 +56,23 @@ func hostileSession(payload string) Session {
 		TokensCacheRead:  math.MaxInt64,
 		TokensCacheWrite: math.MaxInt64,
 		UpdatedMS:        time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC).UnixMilli(),
+		HasUpdated:       true,
 	}
 }
 
 func hostilePart(payload string) ToolPart {
 	start := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC).UnixMilli()
 	return ToolPart{
-		ID:        payload,
-		SessionID: payload,
-		Tool:      payload,
-		Status:    payload,
-		StartMS:   start,
-		EndMS:     start + 1,
-		HasStart:  true,
-		HasEnd:    true,
-		UpdatedMS: start,
+		ID:         payload,
+		SessionID:  payload,
+		Tool:       payload,
+		Status:     payload,
+		StartMS:    start,
+		EndMS:      start + 1,
+		HasStart:   true,
+		HasEnd:     true,
+		UpdatedMS:  start,
+		HasUpdated: true,
 	}
 }
 

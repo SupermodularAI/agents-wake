@@ -33,12 +33,23 @@ func sessionEndSourceEvent(sessionID record.Identifier) record.Identifier {
 // Sorted rather than map order, for the reason Close states: two scans over the
 // same rows have to produce byte-identical store contents, and a session id is
 // unique per row so the order is total.
+//
+// A session the harness recorded no last activity for is refused and counted
+// rather than judged. Its instant is both the comparison's input and the record's
+// whole timestamp, so substituting one would call the session finished the moment
+// it was read and stamp the result at 1970 — a record nothing measured, and one
+// ADR-0004's derived id makes permanent. Blindness counted is what doctor needs to
+// see (plan §3.3, §12).
 func (s *Scan) resolveFinishedSessions() {
 	if !s.idle.Enabled() {
 		return
 	}
 	finished := make([]string, 0, len(s.sessions))
 	for id, registered := range s.sessions {
+		if !registered.HasUpdated {
+			s.result.Refused++
+			continue
+		}
 		// Strictly greater than the threshold, matching the staleness rule's own
 		// comparison: a session silent for exactly the threshold is still open.
 		if s.idle.Now.Sub(time.UnixMilli(registered.UpdatedMS)) > s.idle.Timeout {

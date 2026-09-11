@@ -38,9 +38,15 @@ type openCodeCounters struct {
 // unindexed column of a multi-gigabyte store is exactly what ADR-0009 forbids.
 // `cost` is not selected — record.Record has no field for it, so reading it would
 // be reading something nothing can carry.
+//
+// time_updated is not coalesced, for the reason partQuery states about its start
+// instant: it is the session grain's whole timestamp and the idleness rule's whole
+// input, so a 0 substituted for an absent value is a session declared finished on
+// no evidence and stamped at the epoch. It arrives as NULL and the reader refuses
+// the session grain (plan §3.3, §12).
 const sessionQuery = `SELECT id, coalesce(directory,''), coalesce(version,''),
        coalesce(tokens_input,0), coalesce(tokens_output,0), coalesce(tokens_reasoning,0),
-       coalesce(tokens_cache_read,0), coalesce(tokens_cache_write,0), coalesce(time_updated,0)
+       coalesce(tokens_cache_read,0), coalesce(tokens_cache_write,0), time_updated
   FROM session
  WHERE id > ?
  ORDER BY id
@@ -59,12 +65,14 @@ const sessionQuery = `SELECT id, coalesce(directory,''), coalesce(version,''),
 // scan and ADR-0015 makes a cursor an optimisation, never a correctness mechanism.
 // The measurement is recorded so nobody later mistakes id for a time ordering.
 //
-// Neither instant is coalesced, and the start is the one that matters: every other
+// No instant is coalesced, and the start is the one that matters: every other
 // coalesce here degrades into a value a validator visibly refuses, while a start
 // coalesced to 0 is a plausible 1970 that passes every gate and fabricates a
 // duration out of the end instant. Absent has to stay distinguishable from the
 // epoch, so it arrives as NULL and the reader refuses the row (plan §3.3, §12).
-const partQuery = `SELECT p.id, coalesce(p.session_id,''), coalesce(p.time_updated,0),
+// The row's own time_updated follows the same rule even though nothing reads it
+// yet, so a later reader cannot inherit a substituted epoch.
+const partQuery = `SELECT p.id, coalesce(p.session_id,''), p.time_updated,
        coalesce(json_extract(p.data,'$.tool'),'')         AS tool,
        coalesce(json_extract(p.data,'$.state.status'),'') AS status,
        json_extract(p.data,'$.state.time.start')          AS start_ms,
@@ -219,11 +227,19 @@ func pageParts(db *sqlitex.DB, walk *ingest.OpenCodeScan, counters *openCodeCoun
 // returned with it is the zero one.
 func scanSession(row sqlitex.Row, counters *openCodeCounters) (opencode.Session, string, bool) {
 	session := opencode.Session{}
+	// The last-activity instant is legitimately absent and never substituted for:
+	// nil is what makes HasUpdated false rather than the epoch. The session's other
+	// columns stay usable, so its parts are still resolved against its directory —
+	// only the session grain the missing instant would have stamped is refused.
+	var updated *int64
 	if err := row.Scan(&session.ID, &session.Directory, &session.Version,
 		&session.TokensInput, &session.TokensOutput, &session.TokensReasoning,
-		&session.TokensCacheRead, &session.TokensCacheWrite, &session.UpdatedMS); err != nil {
+		&session.TokensCacheRead, &session.TokensCacheWrite, &updated); err != nil {
 		counters.ParseErrors++
 		return opencode.Session{}, session.ID, false
+	}
+	if updated != nil {
+		session.UpdatedMS, session.HasUpdated = *updated, true
 	}
 	return session, session.ID, true
 }
@@ -236,11 +252,14 @@ func scanPart(row sqlitex.Row, counters *openCodeCounters) (opencode.ToolPart, s
 	// at all, and nil is what makes HasStart false rather than the epoch. The
 	// reader refuses the second and counts it, which is what keeps the loss visible
 	// instead of writing a 1970 record nothing measured.
-	var start, end *int64
-	if err := row.Scan(&part.ID, &part.SessionID, &part.UpdatedMS,
+	var updated, start, end *int64
+	if err := row.Scan(&part.ID, &part.SessionID, &updated,
 		&part.Tool, &part.Status, &start, &end); err != nil {
 		counters.ParseErrors++
 		return opencode.ToolPart{}, part.ID, false
+	}
+	if updated != nil {
+		part.UpdatedMS, part.HasUpdated = *updated, true
 	}
 	if start != nil {
 		part.StartMS, part.HasStart = *start, true

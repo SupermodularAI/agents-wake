@@ -146,8 +146,11 @@ func (s *Scan) resolveStaleParts() {
 		from := s.sessions[part.SessionID]
 		// Strictly greater, matching the first adapter's rule: a session silent for
 		// exactly the threshold is still open, which errs toward not writing a
-		// record that cannot be taken back.
-		if s.stale.Enabled() && s.stale.Now.Sub(time.UnixMilli(from.UpdatedMS)) > s.stale.Timeout {
+		// record that cannot be taken back. A session with no last-activity instant
+		// is never silent for long enough: "no instant" is not a measurement of
+		// silence, and interrupted is a verdict that cannot be taken back either.
+		if s.stale.Enabled() && from.HasUpdated &&
+			s.stale.Now.Sub(time.UnixMilli(from.UpdatedMS)) > s.stale.Timeout {
 			stale = append(stale, part)
 			continue
 		}
