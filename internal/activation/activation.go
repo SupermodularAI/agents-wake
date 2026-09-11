@@ -11,6 +11,7 @@ import (
 
 	"github.com/SupermodularAI/agents-wake/internal/adapter"
 	"github.com/SupermodularAI/agents-wake/internal/adapter/claudecode"
+	"github.com/SupermodularAI/agents-wake/internal/adapter/opencode"
 	"github.com/SupermodularAI/agents-wake/internal/config"
 	"github.com/SupermodularAI/agents-wake/internal/health"
 	"github.com/SupermodularAI/agents-wake/internal/ingest"
@@ -200,18 +201,10 @@ func initEpilogue(paths config.Paths, repos *config.Repos, claudeDir, command, i
 		// reason it always was (ADR-0004, ADR-0015).
 		return 0, refreshInventory(paths, events, discovered)
 	}
-	stale, idle := thresholds(paths)
-	written, scan, err := scanWithBoundary(paths, repos, claudeDir, events, installedFrom(discovered), stale, idle, wholeHistory)
-	// The counters are recorded whether the scan succeeded or not: a partial
-	// activation — hooks written, history import failed — is reported through
-	// doctor rather than repaired silently, and the counters are the report.
-	if recordErr := counters.RecordScan(scan); recordErr != nil && err == nil {
-		err = recordErr
-	}
-	if err != nil {
-		return written, err
-	}
-	return written, refreshInventory(paths, events, discovered)
+	// The same collection `wake ingest` performs, with the same scope: `init --full`
+	// and a plain `init` followed by `wake ingest` leave byte-identical stores, and
+	// that only stays true while there is one implementation of the walk set.
+	return collect(paths, repos, claudeDir, events, discovered, wholeHistory)
 }
 
 // Ingest imports available transcripts for consented repositories only.
@@ -248,15 +241,194 @@ func ingestScoped(paths config.Paths, claudeDir string, scope collectionScope) (
 	// Through the sequencer, so a user-asked scan picks up a repository the boundary
 	// encloses that no scan has seen a session in yet — requirement 6's "not only the
 	// ones present when --global ran".
+	return collect(paths, repos, claudeDir, events, discovered, scope)
+}
+
+// collect runs every harness this build reads and this machine has, folds their
+// counters into one scan record, and republishes the inventory.
+//
+// It is one function rather than two because `wake init --full` and `wake ingest`
+// are the same collection with different scopes: a second copy of this would be a
+// second answer to "which harnesses does a scan read", and the two would drift
+// exactly where nobody looks.
+func collect(paths config.Paths, repos *config.Repos, claudeDir string, events *store.Store,
+	discovered inventory.Discovery, scope collectionScope) (int, error) {
 	stale, idle := thresholds(paths)
-	written, scan, err := scanWithBoundary(paths, repos, claudeDir, events, installedFrom(discovered), stale, idle, scope)
+	// Which harnesses this scan may read at all. The key filters and presence
+	// detects; neither is consent, which stays decided by the project table.
+	enabled := selected(paths)
+
+	// opencode's own declaration, read before either walk so the servers the reader
+	// matches tool names against are the ones this machine configured (ADR-0039,
+	// ADR-0041). A resolution error means the harness is not observed, never an
+	// error that breaks the command.
+	// A resolution error leaves the path empty, which the reader and the discovery
+	// both read as "this machine has none" — not observed, never zero. Swallowed
+	// deliberately and named here rather than checked: there is nothing a caller
+	// could do with "the home directory could not be resolved" that differs from
+	// what an absent store already does.
+	openCodeConfig, configErr := config.OpenCodeConfigFile()
+	if configErr != nil {
+		openCodeConfig = ""
+	}
+	openCodeStore, storeErr := config.OpenCodeStore()
+	if storeErr != nil {
+		openCodeStore = ""
+	}
+	openCodeDiscovered := inventory.OpenCodeServers(openCodeConfig, record.NewNamer(repos.NameKey()))
+
+	written, scan, err := 0, health.Scan{At: time.Now().UTC(), Scope: scope.health()}, error(nil)
+	if enabled[claudecode.Harness()] {
+		written, scan, err = scanWithBoundary(paths, repos, claudeDir, events, installedFrom(discovered), stale, idle, scope)
+	}
+	scan.ClaudeCode = claudeCodeSection(scan, enabled[claudecode.Harness()] && present(filepath.Join(claudeDir, "projects")))
+
+	if enabled[opencode.Harness()] && err == nil {
+		openCodeWritten, counters, openCodeErr := scanOpenCode(paths, openCodeStore, openCodeDiscovered, events, stale, idle, scope)
+		// Adapters fail independently and soft (plan §12): a harness that could not
+		// be read is reported in its own counters, and the only thing that reaches
+		// the caller is Wake's own store failing to accept a write.
+		written += openCodeWritten
+		scan.EventsWritten += openCodeWritten
+		scan.OpenCode = openCodeSection(counters)
+		if openCodeErr != nil {
+			err = openCodeErr
+		}
+	}
+
+	// The counters are recorded whether the scan succeeded or not: a partial
+	// activation is reported through doctor rather than repaired silently, and the
+	// counters are the report.
 	if recordErr := health.New(paths.HealthFile).RecordScan(scan); recordErr != nil && err == nil {
 		err = recordErr
 	}
 	if err != nil {
 		return written, err
 	}
-	return written, refreshInventory(paths, events, discovered)
+	// The merge happens after both consumers have taken what they need:
+	// installedFrom above is fed the Claude-Code-only discovery, so its doc's claim
+	// that "this discovery is Claude Code's own" stays true.
+	if err := refreshInventory(paths, events, inventory.Merge(discovered, openCodeDiscovered)); err != nil {
+		return written, err
+	}
+	// Which harnesses this scan actually reached, stamped beside the primitives so
+	// a renderer can tell a harness that declares nothing from one nobody looked at
+	// (ADR-0046). One entry per harness this build reads, so a build with no reader
+	// for a harness cannot name it at all.
+	return written, inventory.New(paths.PrimitivesFile).RecordHarnesses(observedHarnesses(scan))
+}
+
+// scanOpenCode runs the opencode walk against a freshly opened project table.
+//
+// Reopened rather than reusing the caller's snapshot, and it runs after the Claude
+// Code walks rather than before: those walks may register a repository the global
+// boundary encloses, and a directory registered by a Claude Code session is already
+// consented by the time opencode's sessions are resolved. The reverse order would
+// collect from opencode one scan later than from Claude Code for the same
+// repository, for no reason anybody could see.
+//
+// A project table that cannot be reopened leaves the harness unobserved rather
+// than failing the command: the Claude Code walk has already written its records,
+// and one harness's failure is not the other's (plan §12).
+func scanOpenCode(paths config.Paths, storePath string, discovered inventory.Discovery, events *store.Store,
+	stale adapter.Staleness, idle adapter.Idleness, scope collectionScope) (int, openCodeCounters, error) {
+	repos, reopenErr := config.OpenRepos(paths)
+	if reopenErr != nil {
+		// Unobserved rather than failed: consent could not be answered, so nothing
+		// may be collected — and the Claude Code walk has already written its
+		// records, which one harness's failure must not undo.
+		return 0, openCodeCounters{}, nil //nolint:nilerr // reported as blindness, never as a broken command
+	}
+	return ingestOpenCode(repos, storePath, serversFrom(discovered), events, stale, idle, scope, nil)
+}
+
+// serversFrom folds one discovery into the MCP server set the opencode reader
+// matches tool names against.
+//
+// Filtered by harness rather than assumed, unlike installedFrom's fold: this one
+// may be handed a merged discovery, and a Claude Code server spelling would make
+// an opencode builtin resolve to a server this harness never configured.
+func serversFrom(discovered inventory.Discovery) opencode.Servers {
+	configured := make([]record.Identifier, 0, len(discovered.Primitives))
+	for _, primitive := range discovered.Primitives {
+		if primitive.Harness != opencode.Harness() || primitive.Kind != record.KindMCPServer {
+			continue
+		}
+		configured = append(configured, primitive.Name)
+	}
+	return opencode.NewServers(configured)
+}
+
+// claudeCodeSection is the per-harness half of this scan for Claude Code, folded
+// from the machine-wide counters the walk reports.
+//
+// Every counter above it on health.Scan keeps its machine-wide meaning — six tests
+// and one state machine read those — so this reads them rather than replacing
+// them. RefusedSubagentRuns, the typed-invocation skips and the ambiguous runs stay
+// machine-wide only: they are this harness's vocabulary, and a permanent zero on
+// the other harness's line is the empty column plan §4.5 forbids.
+func claudeCodeSection(scan health.Scan, observed bool) health.HarnessScan {
+	if !observed {
+		return health.HarnessScan{}
+	}
+	return health.HarnessScan{
+		Observed:         true,
+		Sources:          scan.Transcripts,
+		Unreadable:       scan.Unreadable,
+		ParseErrors:      scan.ParseErrors,
+		RefusedCalls:     scan.RefusedCalls,
+		PendingCalls:     scan.PendingCalls,
+		InterruptedCalls: scan.InterruptedCalls,
+		// Claude Code's outcome vocabulary is not a closed measured set the way
+		// opencode's statuses are, so there is no drift counter to fill here. Zero
+		// is the honest answer rather than an unmeasured one.
+		Skipped:         scan.Skipped,
+		OutOfOrderPairs: scan.OutOfOrderPairs,
+		EventsWritten:   scan.EventsWritten,
+	}
+}
+
+// openCodeSection is the same fold for opencode, whose counters are already per
+// harness.
+func openCodeSection(counters openCodeCounters) health.HarnessScan {
+	return health.HarnessScan{
+		Observed:         counters.Observed,
+		Sources:          counters.Parts,
+		Unreadable:       counters.Unreadable,
+		ParseErrors:      counters.ParseErrors,
+		RefusedCalls:     counters.RefusedCalls,
+		PendingCalls:     counters.PendingCalls,
+		InterruptedCalls: counters.Interrupted,
+		UnknownOutcomes:  counters.UnknownOutcomes,
+		Skipped:          counters.Skipped,
+		OutOfOrderPairs:  counters.OutOfOrderPairs,
+		EventsWritten:    counters.EventsWritten,
+	}
+}
+
+// observedHarnesses is one entry per harness this build reads, saying whether this
+// scan reached it. Driven by the registry rather than by a literal, so the answer
+// is about what the binary can do rather than about what somebody wrote down.
+func observedHarnesses(scan health.Scan) []inventory.HarnessObservation {
+	sections := map[record.Identifier]health.HarnessScan{
+		claudecode.Harness(): scan.ClaudeCode,
+		opencode.Harness():   scan.OpenCode,
+	}
+	observed := make([]inventory.HarnessObservation, 0, len(sections))
+	for _, harness := range adapter.Harnesses() {
+		observed = append(observed, inventory.HarnessObservation{
+			Harness: harness, Observed: sections[harness].Observed,
+		})
+	}
+	return observed
+}
+
+// present reports whether a harness's own storage is on this machine. It is the
+// detection half of "the key filters, presence detects", and it stats rather than
+// reads: whether a directory has anything in it is the walk's question.
+func present(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // Trigger is the scan the Claude Code hook causes, and it is single-flight: a

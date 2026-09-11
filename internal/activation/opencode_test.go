@@ -11,6 +11,9 @@ import (
 	"github.com/SupermodularAI/agents-wake/internal/adapter"
 	"github.com/SupermodularAI/agents-wake/internal/adapter/opencode"
 	"github.com/SupermodularAI/agents-wake/internal/config"
+	"github.com/SupermodularAI/agents-wake/internal/health"
+	"github.com/SupermodularAI/agents-wake/internal/inventory"
+	"github.com/SupermodularAI/agents-wake/internal/record"
 	"github.com/SupermodularAI/agents-wake/internal/sqlitex"
 	"github.com/SupermodularAI/agents-wake/internal/store"
 )
@@ -287,4 +290,214 @@ func readSource(t *testing.T, name string) string {
 		t.Fatalf("reading %s: %v", name, err)
 	}
 	return string(source)
+}
+
+// The acceptance criteria for autodetection, driven through Init and Ingest rather
+// than through the walk: what the ticket promises is that normal use collects from
+// both harnesses with no configuration command, and that a machine with only
+// Claude Code behaves exactly as it did.
+
+// bothHarnesses builds a machine with a Claude Code transcript and an opencode
+// store, both in the same consented repository.
+func bothHarnesses(t *testing.T) (paths config.Paths, claudeDir, root, openCodeStore string) {
+	t.Helper()
+	paths = testPaths(t)
+	claudeDir, root = inventoryFixture(t)
+	openCodeStore = openCodeFixture(t, root, toolPartRow("prt_1", "atlassian_search", "completed"))
+	return paths, claudeDir, root, openCodeStore
+}
+
+// withOpenCodeStore points the resolvers at a store built for a test, through
+// opencode's own environment variables rather than through a wake config key.
+func withOpenCodeStore(t *testing.T, storePath string) {
+	t.Helper()
+	// XDG_DATA_HOME/opencode/opencode.db is where the resolver looks, so the
+	// fixture is linked into that shape.
+	data := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(data, "opencode"), 0o700); err != nil {
+		t.Fatalf("creating the data dir: %v", err)
+	}
+	source, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatalf("reading the fixture store: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(data, "opencode", "opencode.db"), source, 0o600); err != nil {
+		t.Fatalf("placing the fixture store: %v", err)
+	}
+	t.Setenv(config.EnvXDGDataHome, data)
+	t.Setenv(config.EnvXDGConfigHome, t.TempDir())
+	t.Setenv(config.EnvOpenCodeConfig, "")
+}
+
+func harnessesInSpool(t *testing.T, paths config.Paths) map[record.Identifier]int {
+	t.Helper()
+	entries, err := store.New(filepath.Join(paths.DataDir, eventsFile)).Entries(0)
+	if err != nil {
+		t.Fatalf("Entries() error = %v", err)
+	}
+	counts := map[record.Identifier]int{}
+	for _, entry := range entries {
+		counts[entry.Record.Harness]++
+	}
+	return counts
+}
+
+func TestBothHarnessesCollectFromOneScan(t *testing.T) {
+	paths, claudeDir, root, openCodeStore := bothHarnesses(t)
+	withOpenCodeStore(t, openCodeStore)
+
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	if _, err := Ingest(paths, claudeDir); err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+
+	counts := harnessesInSpool(t, paths)
+	if counts["claude-code"] == 0 || counts["opencode"] == 0 {
+		t.Fatalf("records per harness = %v, want both: autodetection means no config command was needed", counts)
+	}
+}
+
+func TestOnlyClaudeCodeInstalledIsUnchanged(t *testing.T) {
+	// A machine with no opencode store collects exactly what it collected before,
+	// and opencode reports "not observed" rather than a zero.
+	paths, claudeDir, root, _ := bothHarnesses(t)
+	t.Setenv(config.EnvXDGDataHome, t.TempDir())
+	t.Setenv(config.EnvXDGConfigHome, t.TempDir())
+	t.Setenv(config.EnvOpenCodeConfig, "")
+
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	report, err := health.New(paths.HealthFile).Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if !report.Scan.ClaudeCode.Observed || report.Scan.ClaudeCode.EventsWritten == 0 {
+		t.Errorf("claude code section = %+v, want it collecting", report.Scan.ClaudeCode)
+	}
+
+	// The rescan writes nothing twice and leaves the spool byte-identical, which is
+	// the "behaviour is unchanged" half of the criterion.
+	spool := filepath.Join(paths.DataDir, eventsFile)
+	before, err := os.ReadFile(spool)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	written, err := Ingest(paths, claudeDir)
+	if err != nil {
+		t.Fatalf("Ingest() error = %v", err)
+	}
+	if written != 0 {
+		t.Fatalf("a second scan wrote %d records, want 0", written)
+	}
+	after, err := os.ReadFile(spool)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("a rescan on a Claude-Code-only machine changed the spool")
+	}
+
+	counts := harnessesInSpool(t, paths)
+	if counts["opencode"] != 0 {
+		t.Fatalf("opencode records = %d on a machine with no opencode", counts["opencode"])
+	}
+	if counts["claude-code"] == 0 {
+		t.Fatal("Claude Code collected nothing")
+	}
+
+	rescanned, err := health.New(paths.HealthFile).Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if rescanned.Scan.OpenCode.Observed {
+		t.Error("an absent opencode store was reported as observed")
+	}
+	if health.DiagnoseHarness(rescanned.Scan.OpenCode) != health.StateNotObserved {
+		t.Error("an absent harness did not read as not observed")
+	}
+}
+
+func TestAnOpenCodeFailureDoesNotFailIngest(t *testing.T) {
+	paths, claudeDir, root, _ := bothHarnesses(t)
+	data := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(data, "opencode"), 0o700); err != nil {
+		t.Fatalf("creating the data dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(data, "opencode", "opencode.db"), []byte(strings.Repeat("not a database", 64)), 0o600); err != nil {
+		t.Fatalf("writing the corrupt store: %v", err)
+	}
+	t.Setenv(config.EnvXDGDataHome, data)
+	t.Setenv(config.EnvXDGConfigHome, t.TempDir())
+	t.Setenv(config.EnvOpenCodeConfig, "")
+
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil {
+		t.Fatalf("Init() with a corrupt opencode store failed: %v", err)
+	}
+	if _, err := Ingest(paths, claudeDir); err != nil {
+		t.Fatalf("Ingest() with a corrupt opencode store failed: %v", err)
+	}
+	if counts := harnessesInSpool(t, paths); counts["claude-code"] == 0 {
+		t.Fatal("a blind opencode store cost Claude Code its records")
+	}
+
+	report, err := health.New(paths.HealthFile).Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if health.DiagnoseHarness(report.Scan.OpenCode) != health.StateCollectsNothing {
+		t.Errorf("opencode state = %q, want %q", health.DiagnoseHarness(report.Scan.OpenCode), health.StateCollectsNothing)
+	}
+	// The machine-wide word stays what Claude Code earned: adapters fail
+	// independently and soft, so a blind opencode store must not blind the machine.
+	// It is asserted as "not collects nothing" rather than as one word, because the
+	// word a rescan earns depends on what that rescan found and this test is not
+	// about that.
+	if got := health.Diagnose(report, nil, nil).State; got == health.StateCollectsNothing {
+		t.Errorf("machine-wide state = %q: one harness's blindness moved the machine-wide word", got)
+	}
+}
+
+func TestOpenCodeUsesTheSameConsentPath(t *testing.T) {
+	// No opencode-specific consent exists: a directory consented for Claude Code
+	// collects opencode with no further registration, and an unconsented one
+	// collects neither.
+	paths, claudeDir, root, openCodeStore := bothHarnesses(t)
+	withOpenCodeStore(t, openCodeStore)
+
+	if _, err := Ingest(paths, claudeDir); err != nil {
+		t.Fatalf("Ingest() before any consent failed: %v", err)
+	}
+	if counts := harnessesInSpool(t, paths); len(counts) != 0 {
+		t.Fatalf("records = %v before any repository was consented", counts)
+	}
+
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	if counts := harnessesInSpool(t, paths); counts["opencode"] == 0 {
+		t.Fatalf("records per harness = %v, want opencode collected under the same consent", counts)
+	}
+}
+
+func TestTheScanRecordsWhichHarnessesItRead(t *testing.T) {
+	paths, claudeDir, root, openCodeStore := bothHarnesses(t)
+	withOpenCodeStore(t, openCodeStore)
+	if _, err := Init(paths, root, claudeDir, testExecutable(t), true); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+
+	snapshot, err := inventory.New(paths.PrimitivesFile).Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot() error = %v", err)
+	}
+	observed := map[record.Identifier]bool{}
+	for _, harness := range snapshot.Harnesses {
+		observed[harness.Harness] = harness.Observed
+	}
+	if len(observed) != 2 || !observed["claude-code"] || !observed["opencode"] {
+		t.Fatalf("harness observations = %v, want both read", snapshot.Harnesses)
+	}
 }
