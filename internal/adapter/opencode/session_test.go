@@ -12,7 +12,7 @@ import (
 // finished drives a scan whose only content is one session, past the idle
 // threshold.
 func finished(idle adapter.Idleness) Result {
-	scan := NewScan(consents, NewServers(nil), adapter.Staleness{}, idle)
+	scan := NewScan(consents, testNames(), NewServers(nil), adapter.Staleness{}, idle)
 	scan.Session(session("ses_abc"))
 	return scan.Close()
 }
@@ -107,7 +107,7 @@ func TestAnActiveSessionIsNotFinished(t *testing.T) {
 }
 
 func TestAnUnconsentedSessionDerivesNoSessionEnd(t *testing.T) {
-	scan := NewScan(declines, NewServers(nil), adapter.Staleness{}, adapter.Idleness{Timeout: time.Hour, Now: past})
+	scan := NewScan(declines, testNames(), NewServers(nil), adapter.Staleness{}, adapter.Idleness{Timeout: time.Hour, Now: past})
 	scan.Session(session("ses_abc"))
 	result := scan.Close()
 	if len(result.Records) != 0 {
@@ -117,7 +117,7 @@ func TestAnUnconsentedSessionDerivesNoSessionEnd(t *testing.T) {
 
 func TestSessionEndsAreDerivedInAStableOrder(t *testing.T) {
 	run := func() []record.Hash {
-		scan := NewScan(consents, NewServers(nil), adapter.Staleness{}, adapter.Idleness{Timeout: time.Hour, Now: past})
+		scan := NewScan(consents, testNames(), NewServers(nil), adapter.Staleness{}, adapter.Idleness{Timeout: time.Hour, Now: past})
 		for _, id := range []string{"ses_c", "ses_a", "ses_b"} {
 			scan.Session(session(id))
 		}
@@ -151,7 +151,7 @@ func withoutLastActivity(id string) Session {
 // at 1970 — a record nothing measured, deduplicated forever by ADR-0004. It is
 // refused and counted instead.
 func TestASessionWithNoLastActivityInstantDerivesNoSessionEnd(t *testing.T) {
-	scan := NewScan(consents, NewServers(nil), adapter.Staleness{}, adapter.Idleness{Timeout: time.Hour, Now: past})
+	scan := NewScan(consents, testNames(), NewServers(nil), adapter.Staleness{}, adapter.Idleness{Timeout: time.Hour, Now: past})
 	scan.Session(withoutLastActivity("ses_abc"))
 	result := scan.Close()
 
@@ -167,7 +167,7 @@ func TestASessionWithNoLastActivityInstantDerivesNoSessionEnd(t *testing.T) {
 // parts: "no instant" is not "silent for long enough", and interrupted is a
 // permanent verdict.
 func TestAPartOfASessionWithNoLastActivityInstantStaysPending(t *testing.T) {
-	scan := NewScan(consents, NewServers(nil), adapter.Staleness{Timeout: time.Hour, Now: past}, adapter.Idleness{})
+	scan := NewScan(consents, testNames(), NewServers(nil), adapter.Staleness{Timeout: time.Hour, Now: past}, adapter.Idleness{})
 	scan.Session(withoutLastActivity("ses_abc"))
 	scan.Part(toolPart("prt_abc", "bash", "running"))
 	result := scan.Close()

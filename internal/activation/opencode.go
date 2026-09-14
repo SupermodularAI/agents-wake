@@ -7,6 +7,7 @@ import (
 	"github.com/SupermodularAI/agents-wake/internal/adapter/opencode"
 	"github.com/SupermodularAI/agents-wake/internal/config"
 	"github.com/SupermodularAI/agents-wake/internal/ingest"
+	"github.com/SupermodularAI/agents-wake/internal/record"
 	"github.com/SupermodularAI/agents-wake/internal/sqlitex"
 	"github.com/SupermodularAI/agents-wake/internal/store"
 )
@@ -117,7 +118,11 @@ func ingestOpenCode(repos *config.Repos, storePath string, servers opencode.Serv
 	// notes stay nil: the skipped-transcript breakdown is keyed by the ordinal the
 	// Claude Code walk assigns each source, and this walk has no sources to
 	// ordinal. Sharing that buffer would shift Claude Code's ordinals under it.
-	walk := ingest.NewOpenCodeScan(resolverFor(repos, scope, discover, nil), servers, stale, idle, destination)
+	// The Namer is built from the one name key this machine has, the same
+	// expression the Claude Code walk uses: a directory-scoped primitive name's
+	// scope is digested under it and never persisted (ADR-0019 §3, ADR-0020).
+	walk := ingest.NewOpenCodeScan(resolverFor(repos, scope, discover, nil),
+		record.NewNamer(repos.NameKey()), servers, stale, idle, destination)
 
 	if pageErr := pageSessions(db, walk, &counters); pageErr != nil {
 		counters.Unreadable++

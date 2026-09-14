@@ -3,6 +3,7 @@ package ingest
 import (
 	"github.com/SupermodularAI/agents-wake/internal/adapter"
 	"github.com/SupermodularAI/agents-wake/internal/adapter/opencode"
+	"github.com/SupermodularAI/agents-wake/internal/record"
 	"github.com/SupermodularAI/agents-wake/internal/store"
 )
 
@@ -48,10 +49,10 @@ type OpenCodeScan struct {
 // about this machine arrives as a value for the reasons the reader's own doc
 // gives: derivation may not read the filesystem, and this package does not read
 // config (plan §6.2).
-func NewOpenCodeScan(resolve adapter.Resolver, servers opencode.Servers,
+func NewOpenCodeScan(resolve adapter.Resolver, names record.Namer, servers opencode.Servers,
 	stale adapter.Staleness, idle adapter.Idleness, destination *store.Store) *OpenCodeScan {
 	return &OpenCodeScan{
-		scan:        opencode.NewScan(resolve, servers, stale, idle),
+		scan:        opencode.NewScan(resolve, names, servers, stale, idle),
 		destination: destination,
 	}
 }

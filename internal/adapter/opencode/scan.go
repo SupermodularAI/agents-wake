@@ -24,6 +24,7 @@ import (
 type Scan struct {
 	resolve adapter.Resolver
 	servers Servers
+	names   record.Namer
 	stale   adapter.Staleness
 	idle    adapter.Idleness
 
@@ -45,12 +46,19 @@ type Scan struct {
 var _ adapter.Scan = (*Scan)(nil)
 
 // NewScan starts one walk. Every capability it needs about the machine — the
-// consent answer, the configured servers, both thresholds — arrives here as a
-// value, because derivation may not read the filesystem (ADR-0019 §1).
-func NewScan(resolve adapter.Resolver, servers Servers, stale adapter.Staleness, idle adapter.Idleness) *Scan {
+// consent answer, the configured servers, the name key, both thresholds — arrives
+// here as a value, because derivation may not read the filesystem (ADR-0019 §1).
+//
+// The Namer holds the key a directory-scoped primitive name's scope is digested
+// under. It arrives as data for the same reason the rest does, and its zero value
+// refuses every scoped reference rather than digesting it unkeyed: a plain digest
+// of a path fragment is recoverable from a wordlist, so a caller that could not
+// resolve the key must collect less, never more (ADR-0020, fail closed).
+func NewScan(resolve adapter.Resolver, names record.Namer, servers Servers, stale adapter.Staleness, idle adapter.Idleness) *Scan {
 	return &Scan{
 		resolve:     resolve,
 		servers:     servers,
+		names:       names,
 		stale:       stale,
 		idle:        idle,
 		sessions:    map[string]Session{},

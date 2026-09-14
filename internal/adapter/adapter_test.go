@@ -22,7 +22,7 @@ func TestBothReadersSatisfyScan(t *testing.T) {
 	)
 	scans := []adapter.Scan{
 		claudecode.NewScan(nil, record.Namer{}, claudecode.Installed{}, adapter.Staleness{}, adapter.Idleness{}),
-		opencode.NewScan(nil, opencode.NewServers(nil), adapter.Staleness{}, adapter.Idleness{}),
+		opencode.NewScan(nil, record.Namer{}, opencode.NewServers(nil), adapter.Staleness{}, adapter.Idleness{}),
 	}
 	for _, scan := range scans {
 		if scan.Harness() == "" {

@@ -17,7 +17,7 @@ var (
 )
 
 func TestAPendingPartIsBufferedAndNotEmitted(t *testing.T) {
-	scan := NewScan(consents, NewServers(nil), adapter.Staleness{}, adapter.Idleness{})
+	scan := NewScan(consents, testNames(), NewServers(nil), adapter.Staleness{}, adapter.Idleness{})
 	scan.Session(session("ses_abc"))
 	scan.Part(toolPart("prt_abc", "bash", "running"))
 
@@ -34,7 +34,7 @@ func TestAPendingPartIsBufferedAndNotEmitted(t *testing.T) {
 }
 
 func TestABufferedPartBecomesInterruptedPastTheThreshold(t *testing.T) {
-	scan := NewScan(consents, NewServers(nil), adapter.Staleness{Timeout: time.Hour, Now: past}, adapter.Idleness{})
+	scan := NewScan(consents, testNames(), NewServers(nil), adapter.Staleness{Timeout: time.Hour, Now: past}, adapter.Idleness{})
 	scan.Session(session("ses_abc"))
 	scan.Part(toolPart("prt_abc", "bash", "running"))
 	result := scan.Close()
@@ -60,7 +60,7 @@ func TestABufferedPartBecomesInterruptedPastTheThreshold(t *testing.T) {
 }
 
 func TestAnActivePartIsNotInterrupted(t *testing.T) {
-	scan := NewScan(consents, NewServers(nil), adapter.Staleness{Timeout: time.Hour, Now: near}, adapter.Idleness{})
+	scan := NewScan(consents, testNames(), NewServers(nil), adapter.Staleness{Timeout: time.Hour, Now: near}, adapter.Idleness{})
 	scan.Session(session("ses_abc"))
 	scan.Part(toolPart("prt_abc", "bash", "running"))
 	result := scan.Close()
@@ -74,7 +74,7 @@ func TestAnUnknownStatusIsNeverGivenUpOn(t *testing.T) {
 	// An unrecognised status may well be terminal, so guessing "interrupted" would
 	// write a permanent wrong record. It stays buffered and is counted as
 	// blindness instead (plan §3.3, §12).
-	scan := NewScan(consents, NewServers(nil), adapter.Staleness{Timeout: time.Hour, Now: past}, adapter.Idleness{})
+	scan := NewScan(consents, testNames(), NewServers(nil), adapter.Staleness{Timeout: time.Hour, Now: past}, adapter.Idleness{})
 	scan.Session(session("ses_abc"))
 	scan.Part(toolPart("prt_abc", "bash", "cancelled"))
 	result := scan.Close()
@@ -90,7 +90,7 @@ func TestAnUnknownStatusIsNeverGivenUpOn(t *testing.T) {
 func TestAPartWithNoRegisteredSessionIsRefused(t *testing.T) {
 	// Its directory is unknown, so its consent is unknown, and an unknown consent
 	// is a refusal rather than an assumption (fail closed).
-	scan := NewScan(consents, NewServers(nil), adapter.Staleness{}, adapter.Idleness{})
+	scan := NewScan(consents, testNames(), NewServers(nil), adapter.Staleness{}, adapter.Idleness{})
 	scan.Part(toolPart("prt_abc", "bash", "completed"))
 	result := scan.Close()
 
@@ -100,7 +100,7 @@ func TestAPartWithNoRegisteredSessionIsRefused(t *testing.T) {
 }
 
 func TestZeroStalenessDisablesTheRule(t *testing.T) {
-	scan := NewScan(consents, NewServers(nil), adapter.Staleness{}, adapter.Idleness{})
+	scan := NewScan(consents, testNames(), NewServers(nil), adapter.Staleness{}, adapter.Idleness{})
 	scan.Session(session("ses_abc"))
 	scan.Part(toolPart("prt_abc", "bash", "running"))
 	result := scan.Close()
@@ -117,7 +117,7 @@ func TestTwoScansOverTheSameRowsProduceIdenticalRecords(t *testing.T) {
 		toolPart("prt_2", "read", "running"),
 	}
 	run := func() [][]byte {
-		scan := NewScan(consents, servers("atlassian"), adapter.Staleness{Timeout: time.Hour, Now: past}, adapter.Idleness{Timeout: time.Hour, Now: past})
+		scan := NewScan(consents, testNames(), servers("atlassian"), adapter.Staleness{Timeout: time.Hour, Now: past}, adapter.Idleness{Timeout: time.Hour, Now: past})
 		scan.Session(session("ses_abc"))
 		for _, part := range parts {
 			scan.Part(part)
@@ -144,7 +144,7 @@ func TestTwoScansOverTheSameRowsProduceIdenticalRecords(t *testing.T) {
 }
 
 func TestHarnessNamesTheSlugEveryRecordCarries(t *testing.T) {
-	scan := NewScan(consents, NewServers(nil), adapter.Staleness{}, adapter.Idleness{})
+	scan := NewScan(consents, testNames(), NewServers(nil), adapter.Staleness{}, adapter.Idleness{})
 	if scan.Harness() != "opencode" {
 		t.Fatalf("Harness() = %q, want opencode", scan.Harness())
 	}
@@ -178,7 +178,7 @@ func TestAPendingPartWithNoStartInstantIsRefusedRatherThanBuffered(t *testing.T)
 	part := toolPart("prt_abc", "bash", "running")
 	part.StartMS, part.HasStart = 0, false
 
-	scan := NewScan(consents, NewServers(nil), adapter.Staleness{Timeout: time.Hour, Now: past}, adapter.Idleness{})
+	scan := NewScan(consents, testNames(), NewServers(nil), adapter.Staleness{Timeout: time.Hour, Now: past}, adapter.Idleness{})
 	scan.Session(session("ses_abc"))
 	scan.Part(part)
 	result := scan.Close()
