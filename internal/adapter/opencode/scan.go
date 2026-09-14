@@ -88,7 +88,19 @@ func (s *Scan) Session(registered Session) { s.sessions[registered.ID] = registe
 // which is inferring structure and counting on (plan §3.3, §12). It is the answer
 // the first adapter already gives an entry with no timestamp. Terminal or not:
 // buffering it would only defer the same substitution to Close.
+//
+// The invoking tool='task' part is skipped before either refusal, and skipping is
+// not refusing: see the gate itself.
 func (s *Scan) Part(part ToolPart) {
+	if part.Tool == toolTask {
+		// Skipped, not refused, and before every other gate: this part was never
+		// Wake's to collect, so counting it as lost collection would report a
+		// permanent fault for a rule working as designed. The subagent's own
+		// session row is the canonical source event and this part is the same
+		// logical event seen from the other side (ADR-0036 §2), so it produces no
+		// record of its own — not an unnamed builtin, and not a refusal.
+		return
+	}
 	if !part.HasStart {
 		s.result.Refused++
 		return
@@ -184,7 +196,7 @@ func (s *Scan) emit(part ToolPart, from Session, outcome record.Outcome, duratio
 	if !consented {
 		return
 	}
-	derived := invocation(part, from, repo, s.servers, outcome, duration)
+	derived := invocation(part, from, repo, s.servers, s.names, outcome, duration)
 	if derived.refused {
 		s.result.Refused++
 		return

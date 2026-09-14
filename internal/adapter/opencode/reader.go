@@ -22,8 +22,11 @@ const harness = record.Identifier("opencode")
 // canonical source event is a single primary key, so an invocation's id shape is
 // a bare part.id with no composed separator at all — structurally disjoint from
 // every Claude Code id shape, and namespaced by harness inside DeriveEventID in
-// any case. The one composed id this package builds is the session grain's, in
-// session.go.
+// any case. The two composed ids this package builds are both in session.go, and
+// both hang off a session id: the session grain's, delimited by \x1e, and a
+// subagent invocation's, delimited by \x1d. A tool invocation's id stays a bare
+// part.id carrying no separator at all, so the three shapes stay structurally
+// disjoint.
 
 // Harness is the slug every record this reader derives carries. Exported so a
 // caller folding per-harness diagnostics can name it without holding a Scan.
@@ -87,14 +90,23 @@ type derivation struct {
 
 // invocation derives the record for one terminal tool part.
 //
+// KindSkill is claimed here, from the skill part's own declared name. ADR-0007's
+// Consequences license reading free text in order to derive a name, and plan §3.3
+// repeats it: reading is not persisting, and what is persisted is a value the name
+// domain admits or nothing at all.
+//
+// KindSubagent is claimed by this package but not here. Its canonical source event
+// is the child session row — the harness's own record of the run — so it is
+// derived in session.go, and the invoking tool='task' part produces no record at
+// all (ADR-0036 §1-§2).
+//
 // Deliberately absent, and stated rather than implied: ViaSkill, ViaAgent, Model,
-// Effort, Entrypoint, Package and ParentEventID. opencode's skill and subagent
-// attribution lives inside state.input, which is free text the record allowlist
-// forbids reading (ADR-0007), so KindSkill and KindSubagent are never claimed for
-// this harness and the "skill" and "task" tool spellings are collected as builtin
-// tools like any other. That is an absence observed and reported as such, never a
-// zero (ADR-0046).
-func invocation(part ToolPart, from Session, repo record.Hash, servers Servers, outcome record.Outcome, duration *int64) derivation {
+// Effort, Entrypoint and Package. ParentEventID is absent across this whole
+// adapter, which is a pre-existing gap owned by the adapter's own ticket rather
+// than anything this derivation narrows or widens. Each is an absence observed and
+// reported as such, never a zero (ADR-0046).
+func invocation(part ToolPart, from Session, repo record.Hash, servers Servers,
+	names record.Namer, outcome record.Outcome, duration *int64) derivation {
 	derived := record.Record{
 		SchemaVersion: record.SchemaVersion,
 		EventID:       record.DeriveEventID(harness, record.Identifier(part.ID)),
@@ -117,6 +129,25 @@ func invocation(part ToolPart, from Session, repo record.Hash, servers Servers, 
 		return derivation{refused: true}
 	}
 	derived.SessionID = sessionID
+
+	if part.Tool == toolSkill {
+		// opencode's own spelling fixes the kind (ADR-0041), and the skill's own
+		// declared name fixes its identity. DerivedName rather than
+		// BoundedIdentifier: the name domain admits ':', so a source value already
+		// wearing the keyed scope digest's shape would otherwise be persisted
+		// verbatim and merge a crafted name onto a real scope (ADR-0020).
+		//
+		// A name the grammar refuses refuses the record — the kind is known and the
+		// identity is not, and a skill collected as a builtin named "skill" is the
+		// grain violation ADR-0002 forbids. Returning here is also what keeps the
+		// MCP-server branch below from reclassifying a skill.
+		name, err := names.DerivedName(part.SkillName)
+		if err != nil {
+			return derivation{refused: true}
+		}
+		derived.Kind, derived.Name = record.KindSkill, name
+		return finish(derived)
+	}
 
 	name, err := record.BoundedIdentifier(part.Tool)
 	if err != nil {

@@ -3,6 +3,7 @@ package opencode
 import (
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -281,5 +282,92 @@ func TestEveryDerivedRecordValidates(t *testing.T) {
 		if err := record.Validate(derived); err != nil {
 			t.Errorf("record %+v failed validation: %v", derived, err)
 		}
+	}
+}
+
+// TestASkillPartCarriesTheSkillsOwnName pins the half of this harness's naming
+// that the invoking part really is canonical for: a tool='skill' part is the
+// tool_use block naming the skill (ADR-0036 §1), so its own id stays the record's
+// id and its declared name is the record's name.
+func TestASkillPartCarriesTheSkillsOwnName(t *testing.T) {
+	part := toolPart("prt_abc", "skill", "completed")
+	part.SkillName = "run-sdlc"
+	result := walk(consents, NewServers(nil), part)
+
+	if len(result.Records) != 1 {
+		t.Fatalf("records = %d, want 1", len(result.Records))
+	}
+	got := result.Records[0]
+	if got.Kind != record.KindSkill || got.Name != "run-sdlc" || got.MCPServer != "" {
+		t.Fatalf("kind/name/server = %q/%q/%q, want skill/run-sdlc and no server", got.Kind, got.Name, got.MCPServer)
+	}
+	if want := record.DeriveEventID("opencode", record.Identifier("prt_abc")); got.EventID != want {
+		t.Fatalf("event id = %q, want %q: the skill half's id does not move", got.EventID, want)
+	}
+}
+
+// A skill whose name the harness did not record is lost collection, not a builtin
+// named "skill". The kind is known and the identity is not, and collapsing two
+// distinct skills onto one row is the grain violation ADR-0002 forbids.
+func TestASkillPartWithNoNameIsRefusedAndCounted(t *testing.T) {
+	result := walk(consents, NewServers(nil), toolPart("prt_abc", "skill", "completed"))
+
+	if len(result.Records) != 0 {
+		t.Fatalf("records = %d, want 0", len(result.Records))
+	}
+	if result.Refused != 1 {
+		t.Fatalf("refused = %d, want 1: the loss has to be counted, not silent", result.Refused)
+	}
+}
+
+// The kind comes from opencode's own spelling, and nothing reclassifies it.
+// Servers.Match structurally cannot claim the bare spelling "skill" — it requires
+// a spelling followed by the separator — but the ordering is pinned anyway,
+// because that is the property, not the accident.
+func TestASkillPartStaysASkillWithServersConfigured(t *testing.T) {
+	part := toolPart("prt_abc", "skill", "completed")
+	part.SkillName = "run-sdlc"
+	result := walk(consents, servers("skill", "atlassian"), part)
+
+	if len(result.Records) != 1 {
+		t.Fatalf("records = %d, want 1", len(result.Records))
+	}
+	if got := result.Records[0]; got.Kind != record.KindSkill || got.MCPServer != "" {
+		t.Fatalf("kind/server = %q/%q, want skill and no server", got.Kind, got.MCPServer)
+	}
+}
+
+// A directory-scoped skill name goes through DerivedName, so the scope is a keyed
+// digest and the path fragment itself never reaches the record (ADR-0020).
+func TestADirectoryScopedSkillNameIsDigestedNotStored(t *testing.T) {
+	part := toolPart("prt_abc", "skill", "completed")
+	part.SkillName = "apps/web:deploy"
+	result := walk(consents, NewServers(nil), part)
+
+	if len(result.Records) != 1 {
+		t.Fatalf("records = %d, want 1", len(result.Records))
+	}
+	got := result.Records[0]
+	if !strings.HasPrefix(string(got.Name), "scope-") {
+		t.Fatalf("name = %q, want a keyed scope digest", got.Name)
+	}
+	if strings.Contains(string(got.Name), "apps/web") {
+		t.Fatalf("name = %q carries the scope verbatim", got.Name)
+	}
+}
+
+// The zero Namer has no key, and refuses every scoped reference rather than
+// digesting it unkeyed: a plain digest of a path fragment is recoverable from a
+// wordlist (ADR-0020, fail closed).
+func TestAScopedSkillNameWithNoKeyIsRefused(t *testing.T) {
+	part := toolPart("prt_abc", "skill", "completed")
+	part.SkillName = "apps/web:deploy"
+	scan := NewScan(consents, record.Namer{}, NewServers(nil), adapter.Staleness{}, adapter.Idleness{})
+	scan.Session(session("ses_abc"))
+	scan.Part(part)
+	result := scan.Close()
+
+	if len(result.Records) != 0 || result.Refused != 1 {
+		t.Fatalf("records = %d, refused = %d, want 0 and 1", len(result.Records), result.Refused)
 	}
 }

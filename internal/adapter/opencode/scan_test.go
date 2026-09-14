@@ -191,3 +191,48 @@ func TestAPendingPartWithNoStartInstantIsRefusedRatherThanBuffered(t *testing.T)
 			scan.Buffered(), result.Pending, result.Interrupted)
 	}
 }
+
+// TestATaskPartProducesNoRecordAndIsNotCounted pins the skip as a skip. This part
+// was never Wake's to collect — the child session row is the canonical source
+// event for a subagent invocation and this part is the same logical event seen
+// from the other side (ADR-0036 §2) — so counting it as lost collection would
+// report a permanent fault for a rule working as designed.
+func TestATaskPartProducesNoRecordAndIsNotCounted(t *testing.T) {
+	result := walk(consents, NewServers(nil), toolPart("prt_abc", "task", "completed"))
+
+	if len(result.Records) != 0 {
+		t.Fatalf("records = %d, want 0: the invoking part produces no record", len(result.Records))
+	}
+	if result.Refused != 0 || result.Pending != 0 || result.Interrupted != 0 {
+		t.Fatalf("refused = %d, pending = %d, interrupted = %d, want 0, 0 and 0",
+			result.Refused, result.Pending, result.Interrupted)
+	}
+}
+
+// The skip is the first gate in Part, ahead of both refusals: a part Wake does not
+// collect cannot be lost collection for want of an instant it never needed.
+func TestATaskPartWithNoStartInstantIsStillSkipped(t *testing.T) {
+	part := toolPart("prt_abc", "task", "completed")
+	part.StartMS, part.HasStart = 0, false
+	result := walk(consents, NewServers(nil), part)
+
+	if len(result.Records) != 0 || result.Refused != 0 {
+		t.Fatalf("records = %d, refused = %d, want 0 and 0", len(result.Records), result.Refused)
+	}
+}
+
+// Nor is it buffered: buffering it would hold a part no threshold will ever emit
+// and report it as a number that is not final yet (ADR-0015).
+func TestAnUnterminatedTaskPartIsNotBuffered(t *testing.T) {
+	scan := NewScan(consents, testNames(), NewServers(nil), adapter.Staleness{Timeout: time.Hour, Now: past}, adapter.Idleness{})
+	scan.Session(session("ses_abc"))
+	scan.Part(toolPart("prt_abc", "task", "running"))
+
+	if scan.Buffered() != 0 {
+		t.Fatalf("buffered = %d, want 0", scan.Buffered())
+	}
+	result := scan.Close()
+	if result.Pending != 0 || len(result.Records) != 0 {
+		t.Fatalf("pending = %d, records = %d, want 0 and 0", result.Pending, len(result.Records))
+	}
+}
