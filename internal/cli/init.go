@@ -159,10 +159,10 @@ func newInitCmd() *cobra.Command {
 		if global {
 			backfill = `"wake init --global --full"`
 		}
-		sentences := []string{fmt.Sprintf("Existing Claude Code history will not be imported, so %s is not written; the session triggers this installs collect only what happens from now on. Run %s to import it now.", spool, backfill)}
+		sentences := []string{fmt.Sprintf("Existing history will not be imported, so %s is not written; the session triggers this installs collect only what happens from now on. Run %s to import it now.", spool, backfill)}
 		if full {
 			modifies = append(modifies, spool)
-			sentences = []string{"Existing Claude Code history will be imported now."}
+			sentences = []string{"Existing history will be imported now."}
 		}
 		if global {
 			// The boundary is the one path this sentence may carry: it is the path the
