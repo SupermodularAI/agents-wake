@@ -89,6 +89,29 @@ func toolPartRowWithoutStart(id, tool, status string) string {
 		sqlQuote(id), openCodeInstant.UnixMilli(), openCodeInstant.UnixMilli(), sqlQuote(data))
 }
 
+// skillPartRow is a tool part opencode wrote for a skill invocation, carrying the
+// skill's own declared name beside the free text the walk must never select.
+func skillPartRow(id, name string) string {
+	data := fmt.Sprintf(`{"type":"tool","tool":"skill","callID":"skill:1","state":{"status":"completed",`+
+		`"input":{"name":%s,"prompt":"s3cret skill prompt"},"output":"s3cret output",`+
+		`"time":{"start":%d,"end":%d}},"metadata":{"x":1}}`,
+		sqlQuote(name), openCodeInstant.UnixMilli(), openCodeInstant.UnixMilli()+250)
+	return fmt.Sprintf(`insert into part values (%s, 'msg_1', 'ses_abc', %d, %d, %s)`,
+		sqlQuote(id), openCodeInstant.UnixMilli(), openCodeInstant.UnixMilli(), sqlQuote(data))
+}
+
+// taskPartRow is the invoking part for a subagent run. It produces no record at
+// all: the child session row is the canonical source event (ADR-0036 §2), and the
+// subagent_type argument this row carries is never read.
+func taskPartRow(id, subagentType string) string {
+	data := fmt.Sprintf(`{"type":"tool","tool":"task","callID":"task:1","state":{"status":"completed",`+
+		`"input":{"subagent_type":%s,"prompt":"s3cret task prompt"},"output":"s3cret output",`+
+		`"time":{"start":%d,"end":%d}},"metadata":{"x":1}}`,
+		sqlQuote(subagentType), openCodeInstant.UnixMilli(), openCodeInstant.UnixMilli()+250)
+	return fmt.Sprintf(`insert into part values (%s, 'msg_1', 'ses_abc', %d, %d, %s)`,
+		sqlQuote(id), openCodeInstant.UnixMilli(), openCodeInstant.UnixMilli(), sqlQuote(data))
+}
+
 // sqlQuote is a SQL string literal for a fixture statement. It is not quote()
 // from hooks_test.go, which quotes for JSON.
 func sqlQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "''") + "'" }
@@ -111,6 +134,17 @@ func runOpenCode(t *testing.T, repos *config.Repos, storePath, spool string) (in
 	t.Helper()
 	return ingestOpenCode(repos, storePath, opencode.NewServers(nil), store.New(spool),
 		adapter.Staleness{}, adapter.Idleness{}, wholeHistory, nil)
+}
+
+// runOpenCodeClosed is runOpenCode with the idle threshold elapsed, which is the
+// only boundary either session-derived grain is emitted at. runOpenCode leaves
+// both thresholds disabled, so it derives no session grain and therefore no
+// subagent grain either.
+func runOpenCodeClosed(t *testing.T, repos *config.Repos, storePath, spool string) (int, openCodeCounters, error) {
+	t.Helper()
+	return ingestOpenCode(repos, storePath, opencode.NewServers(nil), store.New(spool),
+		adapter.Staleness{}, adapter.Idleness{Timeout: time.Hour, Now: openCodeInstant.Add(2 * time.Hour)},
+		wholeHistory, nil)
 }
 
 func TestAnAbsentStoreCollectsNothingAndIsNotObserved(t *testing.T) {
@@ -230,20 +264,26 @@ func TestRescanningTheSameStoreIsByteIdentical(t *testing.T) {
 	paths := testPaths(t)
 	root := t.TempDir()
 	repos := consentedRepos(t, paths, root)
+	// Every grain this reader derives is in the fixture, so the byte-identity claim
+	// covers the two the skill and subagent derivations added.
 	storePath := openCodeFixture(t, root,
 		toolPartRow("prt_1", "bash", "completed"),
 		toolPartRow("prt_2", "atlassian_search", "error"),
+		skillPartRow("prt_3", "run-sdlc"),
+		taskPartRow("prt_4", "sdlc-plan"),
+		sessionRow("ses_child", root, "explore", "ses_abc",
+			fmt.Sprint(openCodeInstant.UnixMilli()), fmt.Sprint(openCodeInstant.UnixMilli())),
 	)
 	spool := filepath.Join(t.TempDir(), "events.ndjson")
 
-	if _, _, err := runOpenCode(t, repos, storePath, spool); err != nil {
+	if _, _, err := runOpenCodeClosed(t, repos, storePath, spool); err != nil {
 		t.Fatalf("first walk: %v", err)
 	}
 	before, err := os.ReadFile(spool)
 	if err != nil {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
-	written, _, err := runOpenCode(t, repos, storePath, spool)
+	written, _, err := runOpenCodeClosed(t, repos, storePath, spool)
 	if err != nil {
 		t.Fatalf("second walk: %v", err)
 	}
@@ -801,5 +841,100 @@ func TestASessionWithNoLastActivityInstantIsRefusedAndVisible(t *testing.T) {
 	}
 	if body, readErr := os.ReadFile(spool); readErr == nil && strings.Contains(string(body), "1970-01-01") {
 		t.Fatal("a session_end was written stamped at the epoch")
+	}
+}
+
+// TestASkillPartCollectsItsOwnName is the CI-reproducible half of the claim that
+// report shows opencode skills by name: the name arrives through the real query,
+// and none of the free text sitting beside it in the same blob does.
+func TestASkillPartCollectsItsOwnName(t *testing.T) {
+	paths := testPaths(t)
+	root := t.TempDir()
+	repos := consentedRepos(t, paths, root)
+	storePath := openCodeFixture(t, root, skillPartRow("prt_1", "run-sdlc"))
+	spool := filepath.Join(t.TempDir(), "events.ndjson")
+
+	written, _, err := runOpenCode(t, repos, storePath, spool)
+	if err != nil {
+		t.Fatalf("ingestOpenCode() error = %v", err)
+	}
+	if written != 1 {
+		t.Fatalf("written = %d, want 1", written)
+	}
+	body, err := os.ReadFile(spool)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	for _, want := range []string{`"kind":"skill"`, `"name":"run-sdlc"`} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("the spool does not carry %s", want)
+		}
+	}
+	for _, secret := range []string{"s3cret skill prompt", "s3cret output", "skill:1"} {
+		if strings.Contains(string(body), secret) {
+			t.Errorf("the spool carries %q from the source blob", secret)
+		}
+	}
+}
+
+// TestATaskPartCollectsNothing pins the skip end to end, including that the
+// invoking argument is not read at all: subagent_type appears nowhere, because the
+// query never projects it.
+func TestATaskPartCollectsNothing(t *testing.T) {
+	paths := testPaths(t)
+	root := t.TempDir()
+	repos := consentedRepos(t, paths, root)
+	storePath := openCodeFixture(t, root, taskPartRow("prt_1", "sdlc-plan"))
+	spool := filepath.Join(t.TempDir(), "events.ndjson")
+
+	written, counters, err := runOpenCode(t, repos, storePath, spool)
+	if err != nil {
+		t.Fatalf("ingestOpenCode() error = %v", err)
+	}
+	if written != 0 {
+		t.Fatalf("written = %d, want 0: the invoking part produces no record", written)
+	}
+	if counters.RefusedCalls != 0 || counters.PendingCalls != 0 {
+		t.Fatalf("refused = %d, pending = %d, want 0 and 0: skipped is not lost collection",
+			counters.RefusedCalls, counters.PendingCalls)
+	}
+	if body, readErr := os.ReadFile(spool); readErr == nil && strings.Contains(string(body), "sdlc-plan") {
+		t.Fatal("the spool carries the invoking subagent_type argument")
+	}
+}
+
+// TestAChildSessionCollectsASubagentNamedByItsAgent is the other half: the name
+// comes from the child session's own agent declaration, and the invoking part's
+// subagent_type — a different value on purpose — reaches nothing.
+func TestAChildSessionCollectsASubagentNamedByItsAgent(t *testing.T) {
+	paths := testPaths(t)
+	root := t.TempDir()
+	repos := consentedRepos(t, paths, root)
+	storePath := openCodeFixture(t, root,
+		taskPartRow("prt_1", "sdlc-plan"),
+		sessionRow("ses_child", root, "explore", "ses_abc",
+			fmt.Sprint(openCodeInstant.UnixMilli()), fmt.Sprint(openCodeInstant.UnixMilli())),
+	)
+	spool := filepath.Join(t.TempDir(), "events.ndjson")
+
+	if _, _, err := runOpenCodeClosed(t, repos, storePath, spool); err != nil {
+		t.Fatalf("ingestOpenCode() error = %v", err)
+	}
+	body, err := os.ReadFile(spool)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	for _, want := range []string{`"kind":"subagent"`, `"name":"explore"`} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("the spool does not carry %s", want)
+		}
+	}
+	if strings.Contains(string(body), `"name":"sdlc-plan"`) {
+		t.Error("the spool names the subagent by the caller's argument rather than by the harness's own declaration")
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
+		if strings.Contains(line, `"kind":"subagent"`) && !strings.Contains(line, `"session_id":"ses_child"`) {
+			t.Error("the subagent invocation does not carry the child's own session id")
+		}
 	}
 }

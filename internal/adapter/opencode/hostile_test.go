@@ -57,6 +57,12 @@ func hostileSession(payload string) Session {
 		TokensCacheWrite: math.MaxInt64,
 		UpdatedMS:        time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC).UnixMilli(),
 		HasUpdated:       true,
+		// The parentage and agent declaration too, so every assertion below covers
+		// the subagent grain and not only the session grain.
+		ParentID:   payload,
+		Agent:      payload,
+		CreatedMS:  time.Date(2026, 3, 1, 11, 59, 0, 0, time.UTC).UnixMilli(),
+		HasCreated: true,
 	}
 }
 
@@ -66,6 +72,7 @@ func hostilePart(payload string) ToolPart {
 		ID:         payload,
 		SessionID:  payload,
 		Tool:       payload,
+		SkillName:  payload,
 		Status:     payload,
 		StartMS:    start,
 		EndMS:      start + 1,
@@ -90,6 +97,12 @@ func TestHostilePayloadsNeverReachARecord(t *testing.T) {
 			part := toolPart("prt_clean", payload.value, "completed")
 			part.SessionID = clean.ID
 			scan.Part(part)
+			// And once more through the skill name, which is the one free-text key
+			// this reader is licensed to read in order to derive a name (ADR-0007).
+			skill := toolPart("prt_skill", "skill", "completed")
+			skill.SkillName = payload.value
+			skill.SessionID = clean.ID
+			scan.Part(skill)
 
 			for _, derived := range scan.Close().Records {
 				if err := record.Validate(derived); err != nil {
@@ -217,5 +230,39 @@ func TestNoCounterCarriesAPayload(t *testing.T) {
 		if field.Type.Kind() != reflect.Int {
 			t.Errorf("Result.%s is %s, and a diagnostic that is not a count could carry store content", field.Name, field.Type)
 		}
+	}
+}
+
+// TestAForgedScopeDigestIsRefusedAsASkillName asserts what the corpus run alone
+// cannot. "scope-0123456789ab:name" is a bounded payload, so assertNoPayload skips
+// the Name field for it — but the whole point of ADR-0020 is that a source value
+// already wearing the keyed digest's shape is refused verbatim, or a transcript
+// could merge a crafted name onto a real scope's metrics.
+func TestAForgedScopeDigestIsRefusedAsASkillName(t *testing.T) {
+	part := toolPart("prt_abc", "skill", "completed")
+	part.SkillName = "scope-0123456789ab:name"
+	result := walk(consents, NewServers(nil), part)
+
+	if len(result.Records) != 0 {
+		t.Fatalf("records = %d, want 0: a forged digest is refused verbatim", len(result.Records))
+	}
+	if result.Refused != 1 {
+		t.Fatalf("refused = %d, want 1", result.Refused)
+	}
+}
+
+// The same rule on the other derived name. The session grain is still written —
+// it carries no observed name at all — and only the invocation is refused.
+func TestAForgedScopeDigestIsRefusedAsASubagentName(t *testing.T) {
+	from := childSession("ses_child", "ses_parent", "scope-0123456789ab:name")
+	scan := NewScan(consents, testNames(), NewServers(nil), adapter.Staleness{}, adapter.Idleness{Timeout: time.Hour, Now: past})
+	scan.Session(from)
+	result := scan.Close()
+
+	if len(result.Records) != 1 || result.Records[0].Kind != record.KindSessionEnd {
+		t.Fatalf("records = %d, want the session grain alone", len(result.Records))
+	}
+	if result.Refused != 1 {
+		t.Fatalf("refused = %d, want 1", result.Refused)
 	}
 }
