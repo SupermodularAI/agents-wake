@@ -141,8 +141,8 @@ func invocation(part ToolPart, from Session, repo record.Hash, servers Servers,
 		// identity is not, and a skill collected as a builtin named "skill" is the
 		// grain violation ADR-0002 forbids. Returning here is also what keeps the
 		// MCP-server branch below from reclassifying a skill.
-		name, err := names.DerivedName(part.SkillName)
-		if err != nil {
+		name, nameErr := names.DerivedName(part.SkillName)
+		if nameErr != nil {
 			return derivation{refused: true}
 		}
 		derived.Kind, derived.Name = record.KindSkill, name

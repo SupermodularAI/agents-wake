@@ -39,7 +39,21 @@ func session(id string) Session {
 		TokensCacheWrite: 23,
 		UpdatedMS:        time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC).UnixMilli(),
 		HasUpdated:       true,
+		// An ordinary top-level session: it was opened at some instant like every
+		// other, but it declares no parent and no agent, so it derives no subagent
+		// invocation.
+		CreatedMS:  time.Date(2026, 3, 1, 11, 59, 0, 0, time.UTC).UnixMilli(),
+		HasCreated: true,
 	}
+}
+
+// childSession is a session opencode opened as a child run: it declares a parent
+// and the agent that ran, which together are the canonical source event for a
+// subagent invocation (ADR-0036 §1).
+func childSession(id, parentID, agent string) Session {
+	from := session(id)
+	from.ParentID, from.Agent = parentID, agent
+	return from
 }
 
 func toolPart(id, tool, status string) ToolPart {
