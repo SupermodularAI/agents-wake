@@ -23,6 +23,12 @@ type ToolPart struct {
 	SessionID string
 	// Tool is data.tool, the observed spelling exactly as opencode wrote it.
 	Tool string
+	// SkillName is the skill's own name, and it is populated for tool='skill' rows
+	// only: the query projects state.input.name under a CASE on the tool spelling,
+	// so no other tool's input reaches this field or this process at all
+	// (ADR-0007). Empty where the harness recorded none, and an empty name refuses
+	// the record rather than becoming a builtin named "skill".
+	SkillName string
 	// Status is data.state.status, mapped by outcome.go and never guessed at.
 	Status string
 	// StartMS and EndMS are data.state.time.start / .end, epoch milliseconds.
@@ -43,7 +49,8 @@ type ToolPart struct {
 }
 
 // Session is the allowlisted subset of one opencode `session` row: a directory the
-// consent resolver consumes and never stores, a version, and five totals.
+// consent resolver consumes and never stores, a version, five totals, and the
+// parentage and agent declaration the subagent grain derives from.
 //
 // session.cost is deliberately absent. record.Record has no field for it, adding
 // one is a schema change, and nothing in this change needs it — so the column is
@@ -65,7 +72,32 @@ type Session struct {
 	// every such session finished the moment it was read.
 	UpdatedMS  int64
 	HasUpdated bool
+	// ParentID is session.parent_id: non-empty exactly on a session opencode opened
+	// as a child run. It is the gate the subagent grain is derived behind and is
+	// never persisted — measured on a real store, 79 of 115 sessions carry it,
+	// while 36 top-level sessions carry an agent without one, so gating on agent
+	// alone would fabricate 36 subagent invocations out of ordinary sessions.
+	ParentID string
+	// Agent is session.agent: the harness's own declaration of what ran, which is
+	// what fixes the primitive's identity (ADR-0041) — never the caller's
+	// subagent_type argument, which this reader does not read.
+	Agent string
+	// CreatedMS is session.time_created, the instant the run was opened, and the
+	// subagent grain's whole timestamp. HasCreated is false where the harness
+	// recorded none, modelled rather than coalesced on the same rule as every other
+	// instant here: an epoch put there would stamp a record nothing measured.
+	CreatedMS  int64
+	HasCreated bool
 }
+
+// toolSkill and toolTask are opencode's own two spellings for the primitives this
+// reader names rather than counts as builtins. They are compared as whole values,
+// never as prefixes: a server match runs forward from a configured spelling and
+// can never claim either of these (see Servers.Match).
+const (
+	toolSkill = "skill"
+	toolTask  = "task"
+)
 
 // serverSeparator is what opencode puts between an MCP server's spelling and the
 // tool's own name. It is a single character that tool names also contain freely,

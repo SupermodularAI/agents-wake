@@ -44,10 +44,21 @@ type openCodeCounters struct {
 // instant: it is the session grain's whole timestamp and the idleness rule's whole
 // input, so a 0 substituted for an absent value is a session declared finished on
 // no evidence and stamped at the epoch. It arrives as NULL and the reader refuses
-// the session grain (plan §3.3, §12).
+// the session grain (plan §3.3, §12). time_created is not coalesced for exactly
+// the same reason: it is the subagent grain's whole timestamp, and an epoch
+// substituted for an absence is a 1970 record that passes every validator.
+//
+// parent_id and agent are bounded declarations the harness writes about its own
+// run, not free text the user or the model typed: parent_id is a session id and
+// is read as a gate that never reaches a record, and agent is opencode's own name
+// for what ran, which is what fixes a subagent invocation's identity (ADR-0041).
+// Neither is the invoking side's argument — $.state.input.subagent_type is not
+// projected here or anywhere, because the child session row is the canonical
+// source event for a subagent invocation (ADR-0036 §1-§2).
 const sessionQuery = `SELECT id, coalesce(directory,''), coalesce(version,''),
        coalesce(tokens_input,0), coalesce(tokens_output,0), coalesce(tokens_reasoning,0),
-       coalesce(tokens_cache_read,0), coalesce(tokens_cache_write,0), time_updated
+       coalesce(tokens_cache_read,0), coalesce(tokens_cache_write,0), time_updated,
+       coalesce(parent_id,''), coalesce(agent,''), time_created
   FROM session
  WHERE id > ?
  ORDER BY id
@@ -55,11 +66,20 @@ const sessionQuery = `SELECT id, coalesce(directory,''), coalesce(version,''),
 
 // partQuery pages the tool parts by primary key.
 //
-// Seven projected columns and no others. The free text opencode keeps in the same
+// Eight projected columns and no others. The free text opencode keeps in the same
 // blob — the tool's input, its output, its title, its error, its raw payload and
 // both metadata objects — is never selected, so it does not enter this process at
 // all (ADR-0007). Neither is the provider's call id: the canonical identity is the
 // row's own primary key, which is unique where that one is not (ADR-0004).
+//
+// The eighth column is the one exception and it is guarded by a CASE. ADR-0007's
+// Consequences license reading free text in order to *derive a name*, and plan
+// §3.3 repeats it — reading is not persisting. But only the skill's own
+// declaration is a name: an arbitrary tool's input.name is whatever that tool's
+// caller typed, so the CASE keeps it from entering this process for any other
+// spelling. $.state.input.subagent_type is not projected, and never will be: an
+// opencode subagent's canonical source event is the child session row, not the
+// invoking part (ADR-0036 §1-§2), so the invoking argument is not read at all.
 //
 // part.id is broadly but not strictly time-ordered — one inversion measured over
 // 11,435 rows — which is irrelevant here because the walk reads every row on every
@@ -77,7 +97,9 @@ const partQuery = `SELECT p.id, coalesce(p.session_id,''), p.time_updated,
        coalesce(json_extract(p.data,'$.tool'),'')         AS tool,
        coalesce(json_extract(p.data,'$.state.status'),'') AS status,
        json_extract(p.data,'$.state.time.start')          AS start_ms,
-       json_extract(p.data,'$.state.time.end')            AS end_ms
+       json_extract(p.data,'$.state.time.end')            AS end_ms,
+       coalesce(CASE WHEN json_extract(p.data,'$.tool') = 'skill'
+                     THEN json_extract(p.data,'$.state.input.name') END, '') AS skill_name
   FROM part AS p
  WHERE p.id > ?
    AND json_extract(p.data,'$.type') = 'tool'
@@ -236,15 +258,22 @@ func scanSession(row sqlitex.Row, counters *openCodeCounters) (opencode.Session,
 	// nil is what makes HasUpdated false rather than the epoch. The session's other
 	// columns stay usable, so its parts are still resolved against its directory —
 	// only the session grain the missing instant would have stamped is refused.
-	var updated *int64
+	var updated, created *int64
 	if err := row.Scan(&session.ID, &session.Directory, &session.Version,
 		&session.TokensInput, &session.TokensOutput, &session.TokensReasoning,
-		&session.TokensCacheRead, &session.TokensCacheWrite, &updated); err != nil {
+		&session.TokensCacheRead, &session.TokensCacheWrite, &updated,
+		&session.ParentID, &session.Agent, &created); err != nil {
 		counters.ParseErrors++
 		return opencode.Session{}, session.ID, false
 	}
 	if updated != nil {
 		session.UpdatedMS, session.HasUpdated = *updated, true
+	}
+	// The creation instant is absent on the same terms and substituted for on none:
+	// it is the subagent grain's whole timestamp, so nil is what makes HasCreated
+	// false rather than the epoch.
+	if created != nil {
+		session.CreatedMS, session.HasCreated = *created, true
 	}
 	return session, session.ID, true
 }
@@ -259,7 +288,7 @@ func scanPart(row sqlitex.Row, counters *openCodeCounters) (opencode.ToolPart, s
 	// instead of writing a 1970 record nothing measured.
 	var updated, start, end *int64
 	if err := row.Scan(&part.ID, &part.SessionID, &updated,
-		&part.Tool, &part.Status, &start, &end); err != nil {
+		&part.Tool, &part.Status, &start, &end, &part.SkillName); err != nil {
 		counters.ParseErrors++
 		return opencode.ToolPart{}, part.ID, false
 	}

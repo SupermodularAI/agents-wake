@@ -35,11 +35,12 @@ func openCodeFixture(t *testing.T, directory string, parts ...string) string {
 	statements := []string{
 		`create table session (id text primary key, directory text, version text,
 			tokens_input integer, tokens_output integer, tokens_reasoning integer,
-			tokens_cache_read integer, tokens_cache_write integer, cost real, time_updated integer)`,
+			tokens_cache_read integer, tokens_cache_write integer, cost real, time_updated integer,
+			parent_id text, agent text, time_created integer)`,
 		`create table part (id text primary key, message_id text, session_id text,
 			time_created integer, time_updated integer, data text)`,
-		fmt.Sprintf(`insert into session values ('ses_abc', %s, '1.18.30', 11, 13, 17, 19, 23, 0.42, %d)`,
-			sqlQuote(directory), openCodeInstant.UnixMilli()),
+		sessionRow("ses_abc", directory, "", "",
+			fmt.Sprint(openCodeInstant.UnixMilli()), fmt.Sprint(openCodeInstant.UnixMilli())),
 	}
 	return writeFixtureStore(t, path, append(statements, parts...))
 }
@@ -50,6 +51,20 @@ func writeFixtureStore(t *testing.T, path string, statements []string) string {
 		t.Fatalf("creating the opencode fixture: %v", err)
 	}
 	return path
+}
+
+// sessionRow is one `session` row written by column name rather than by position,
+// so a column added to the fixture's schema cannot silently shift another's value.
+//
+// created and updated are raw SQL fragments — a millisecond literal or NULL —
+// because two tests here need an absent instant, which is the one thing a typed
+// parameter could not express.
+func sessionRow(id, directory, agent, parentID, created, updated string) string {
+	return fmt.Sprintf(`insert into session
+		(id, directory, version, tokens_input, tokens_output, tokens_reasoning,
+		 tokens_cache_read, tokens_cache_write, cost, time_updated, parent_id, agent, time_created)
+		values (%s, %s, '1.18.30', 11, 13, 17, 19, 23, 0.42, %s, %s, %s, %s)`,
+		sqlQuote(id), sqlQuote(directory), updated, sqlQuote(parentID), sqlQuote(agent), created)
 }
 
 // toolPartRow is one `part` row whose data is a tool part, written the way
@@ -286,11 +301,51 @@ func TestTheWalkNeverOrdersOnAnUnindexedColumn(t *testing.T) {
 }
 
 func TestTheWalkSelectsNoFreeTextColumn(t *testing.T) {
-	for _, key := range []string{"callID", "$.state.input", "$.state.output", "$.state.title", "$.state.error", "$.state.raw", "$.metadata", "$.state.metadata", "cost"} {
+	// $.state.input is not on this list any more, because the query legitimately
+	// carries exactly one key beneath it — the skill's own declared name. That one
+	// key is pinned by the closed enumeration below rather than by an absence here.
+	for _, key := range []string{"callID", "$.state.output", "$.state.title", "$.state.error", "$.state.raw", "$.metadata", "$.state.metadata", "cost"} {
 		for _, query := range []string{sessionQuery, partQuery} {
 			if strings.Contains(query, key) {
 				t.Errorf("a query selects %q: free text must not enter this process at all (ADR-0007)", key)
 			}
+		}
+	}
+}
+
+// allowedInputPath is the one $.state.input key any query may project: a skill's
+// own declared name, which ADR-0007's Consequences license reading in order to
+// derive a name.  Everything else under that object is free text.
+const allowedInputPath = `$.state.input.name`
+
+// TestTheOnlyProjectedInputKeyIsTheSkillName is the privacy guarantee of this
+// change, pinned rather than assumed. The named forbidden paths are the ones a
+// reader would reach for first; the closed enumeration below them is what catches
+// a path this list never imagined — including $.state.input.subagent_type, which
+// is not read at all, because an opencode subagent's canonical source event is the
+// child session row and not the invoking part (ADR-0036 §1-§2).
+func TestTheOnlyProjectedInputKeyIsTheSkillName(t *testing.T) {
+	for _, forbidden := range []string{
+		`$.state.input.prompt`, `$.state.input.description`, `$.state.input.command`,
+		`$.state.input.subagent_type`, `$.state.input.arguments`, `$.state.input.filePath`,
+	} {
+		for _, query := range []string{sessionQuery, partQuery} {
+			if strings.Contains(query, forbidden) {
+				t.Errorf("a query projects %q: free text must not enter this process at all (ADR-0007)", forbidden)
+			}
+		}
+	}
+	for _, query := range []string{sessionQuery, partQuery} {
+		for rest := query; ; {
+			at := strings.Index(rest, `$.state.input`)
+			if at < 0 {
+				break
+			}
+			if !strings.HasPrefix(rest[at:], allowedInputPath+`'`) {
+				t.Errorf("a query projects a $.state.input key other than %q", allowedInputPath)
+				break
+			}
+			rest = rest[at+len(allowedInputPath):]
 		}
 	}
 }
@@ -302,7 +357,7 @@ func TestTheWalkSelectsNoFreeTextColumn(t *testing.T) {
 func TestNoInstantIsCoalesced(t *testing.T) {
 	for _, query := range []string{sessionQuery, partQuery} {
 		for _, argument := range coalesced(query) {
-			for _, instant := range []string{"time_updated", "$.state.time.start", "$.state.time.end"} {
+			for _, instant := range []string{"time_updated", "time_created", "$.state.time.start", "$.state.time.end"} {
 				if strings.Contains(argument, instant) {
 					t.Errorf("a query coalesces %q: an absent instant must stay distinguishable from the epoch", instant)
 				}
@@ -579,8 +634,8 @@ func unscannablePartRow(id string) string {
 // unscannableSessionRow is a session whose token count is text where the walk
 // projects a number, on the same terms.
 func unscannableSessionRow(id string) string {
-	return fmt.Sprintf(`insert into session values (%s, '/nowhere', '1.18.30', 'lots', 13, 17, 19, 23, 0.42, %d)`,
-		sqlQuote(id), openCodeInstant.UnixMilli())
+	return fmt.Sprintf(`insert into session values (%s, '/nowhere', '1.18.30', 'lots', 13, 17, 19, 23, 0.42, %d, '', '', %d)`,
+		sqlQuote(id), openCodeInstant.UnixMilli(), openCodeInstant.UnixMilli())
 }
 
 // TestAPageOfUnscannablePartsDoesNotStallTheWalk pins the paging key's only job:
@@ -724,11 +779,11 @@ func TestASessionWithNoLastActivityInstantIsRefusedAndVisible(t *testing.T) {
 	storePath := writeFixtureStore(t, path, []string{
 		`create table session (id text primary key, directory text, version text,
 			tokens_input integer, tokens_output integer, tokens_reasoning integer,
-			tokens_cache_read integer, tokens_cache_write integer, cost real, time_updated integer)`,
+			tokens_cache_read integer, tokens_cache_write integer, cost real, time_updated integer,
+			parent_id text, agent text, time_created integer)`,
 		`create table part (id text primary key, message_id text, session_id text,
 			time_created integer, time_updated integer, data text)`,
-		fmt.Sprintf(`insert into session values ('ses_abc', %s, '1.18.30', 11, 13, 17, 19, 23, 0.42, NULL)`,
-			sqlQuote(root)),
+		sessionRow("ses_abc", root, "", "", fmt.Sprint(openCodeInstant.UnixMilli()), "NULL"),
 	})
 	spool := filepath.Join(t.TempDir(), "events.ndjson")
 
