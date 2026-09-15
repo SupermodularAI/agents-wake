@@ -9,6 +9,8 @@ called out under Changed.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-15
+
 ### Added
 
 - opencode is read alongside Claude Code, autodetected and with no new
@@ -360,7 +362,8 @@ uses, which ones fail, and which ones are never used, supporting Claude Code.
   network without being asked to deliver.
 - Official binaries for macOS and Linux on amd64 and arm64, plus `install.sh`.
 
-[Unreleased]: https://github.com/SupermodularAI/agents-wake/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/SupermodularAI/agents-wake/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/SupermodularAI/agents-wake/releases/tag/v0.4.0
 [0.3.0]: https://github.com/SupermodularAI/agents-wake/releases/tag/v0.3.0
 [0.2.0]: https://github.com/SupermodularAI/agents-wake/releases/tag/v0.2.0
 [0.1.0]: https://github.com/SupermodularAI/agents-wake/releases/tag/v0.1.0
