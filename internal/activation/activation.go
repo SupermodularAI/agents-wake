@@ -275,7 +275,7 @@ func collect(paths config.Paths, repos *config.Repos, claudeDir string, events *
 	if storeErr != nil {
 		openCodeStore = ""
 	}
-	openCodeDiscovered := inventory.OpenCodeServers(openCodeConfig, record.NewNamer(repos.NameKey()))
+	openCodeDiscovered := inventory.OpenCodeInScope(openCodeConfig, record.NewNamer(repos.NameKey()))
 
 	written, scan, err := 0, health.Scan{At: time.Now().UTC(), Scope: scope.health()}, error(nil)
 	if enabled[claudecode.Harness()] {

@@ -152,14 +152,20 @@ type primitiveKey struct {
 	name record.Identifier
 }
 
-func scanPrimitives(path, exactName string, kind record.Kind, add func(record.Kind, string)) {
+// scanPrimitives reads one directory of primitive definitions and reports
+// whether it could: false means unreadable or absent, and true means read
+// whether or not it held any entry — an empty declared directory and a missing
+// one are different answers, and a caller that needs to tell them apart (an
+// opencode harness with nothing else to prove it was observed) reads the
+// return rather than inferring it from whether add ran.
+func scanPrimitives(path, exactName string, kind record.Kind, add func(record.Kind, string)) bool {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return
+		return false
 	}
 	entries, err := os.ReadDir(resolved)
 	if err != nil {
-		return
+		return false
 	}
 	for _, entry := range entries {
 		if exactName != "" {
@@ -174,6 +180,7 @@ func scanPrimitives(path, exactName string, kind record.Kind, add func(record.Ki
 			add(kind, strings.TrimSuffix(entry.Name(), ".md"))
 		}
 	}
+	return true
 }
 
 // pluginInstall is one installed plugin version as installed_plugins.json states

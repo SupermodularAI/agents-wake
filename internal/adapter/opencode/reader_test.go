@@ -3,6 +3,7 @@ package opencode
 import (
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +22,11 @@ func consents(string, time.Time) (record.Hash, bool) { return consentedRepo, tru
 // declines is its refusal: a directory belonging to no consented repository.
 func declines(string, time.Time) (record.Hash, bool) { return "", false }
 
+// testNames is a Namer with a key, so a directory-scoped primitive name is
+// digested rather than refused. The key is this file's own and reaches no record:
+// only the digest of a scope does.
+func testNames() record.Namer { return record.NewNamer([]byte("opencode-test-name-key")) }
+
 func session(id string) Session {
 	return Session{
 		ID:               id,
@@ -33,7 +39,21 @@ func session(id string) Session {
 		TokensCacheWrite: 23,
 		UpdatedMS:        time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC).UnixMilli(),
 		HasUpdated:       true,
+		// An ordinary top-level session: it was opened at some instant like every
+		// other, but it declares no parent and no agent, so it derives no subagent
+		// invocation.
+		CreatedMS:  time.Date(2026, 3, 1, 11, 59, 0, 0, time.UTC).UnixMilli(),
+		HasCreated: true,
 	}
+}
+
+// childSession is a session opencode opened as a child run: it declares a parent
+// and the agent that ran, which together are the canonical source event for a
+// subagent invocation (ADR-0036 §1).
+func childSession(id, parentID, agent string) Session {
+	from := session(id)
+	from.ParentID, from.Agent = parentID, agent
+	return from
 }
 
 func toolPart(id, tool, status string) ToolPart {
@@ -55,7 +75,7 @@ func toolPart(id, tool, status string) ToolPart {
 // walk drives one scan over one session and the parts given, with consent
 // granted, nothing configured as an MCP server, and both thresholds disabled.
 func walk(resolve adapter.Resolver, servers Servers, parts ...ToolPart) Result {
-	scan := NewScan(resolve, servers, adapter.Staleness{}, adapter.Idleness{})
+	scan := NewScan(resolve, testNames(), servers, adapter.Staleness{}, adapter.Idleness{})
 	scan.Session(session("ses_abc"))
 	for _, part := range parts {
 		scan.Part(part)
@@ -104,7 +124,7 @@ func TestDistinctPartsNeverShareAnEventID(t *testing.T) {
 	// provider call ids all read "bash:1" and whose part ids differ. Deriving from
 	// callID would fold three invocations into one record and no number would ever
 	// say so (ADR-0004).
-	scan := NewScan(consents, NewServers(nil), adapter.Staleness{}, adapter.Idleness{})
+	scan := NewScan(consents, testNames(), NewServers(nil), adapter.Staleness{}, adapter.Idleness{})
 	for _, id := range []string{"ses_1", "ses_2", "ses_3"} {
 		registered := session(id)
 		scan.Session(registered)
@@ -127,7 +147,7 @@ func TestDistinctPartsNeverShareAnEventID(t *testing.T) {
 	}
 
 	t.Run("over a generated corpus", func(t *testing.T) {
-		corpus := NewScan(consents, NewServers(nil), adapter.Staleness{}, adapter.Idleness{})
+		corpus := NewScan(consents, testNames(), NewServers(nil), adapter.Staleness{}, adapter.Idleness{})
 		corpus.Session(session("ses_abc"))
 		for index := range 5000 {
 			corpus.Part(toolPart(fmt.Sprintf("prt_%04d", index), "bash", "completed"))
@@ -233,7 +253,7 @@ func TestAnUnnameableToolIsRefusedAndDropped(t *testing.T) {
 func TestASessionIDOutsideTheTokenDomainIsRefused(t *testing.T) {
 	part := toolPart("prt_abc", "bash", "completed")
 	part.SessionID = "ses/abc"
-	scan := NewScan(consents, NewServers(nil), adapter.Staleness{}, adapter.Idleness{})
+	scan := NewScan(consents, testNames(), NewServers(nil), adapter.Staleness{}, adapter.Idleness{})
 	registered := session("ses/abc")
 	scan.Session(registered)
 	scan.Part(part)
@@ -262,7 +282,7 @@ func TestEveryDerivedRecordValidates(t *testing.T) {
 		toolPart("prt_2", "atlassian_search", "error"),
 		toolPart("prt_3", "notion_fetch", "completed"),
 	}
-	scan := NewScan(consents, servers("atlassian", "notion"), adapter.Staleness{Timeout: time.Minute, Now: time.Date(2026, 3, 2, 12, 0, 0, 0, time.UTC)}, adapter.Idleness{Timeout: time.Minute, Now: time.Date(2026, 3, 2, 12, 0, 0, 0, time.UTC)})
+	scan := NewScan(consents, testNames(), servers("atlassian", "notion"), adapter.Staleness{Timeout: time.Minute, Now: time.Date(2026, 3, 2, 12, 0, 0, 0, time.UTC)}, adapter.Idleness{Timeout: time.Minute, Now: time.Date(2026, 3, 2, 12, 0, 0, 0, time.UTC)})
 	scan.Session(session("ses_abc"))
 	for _, part := range parts {
 		scan.Part(part)
@@ -276,5 +296,92 @@ func TestEveryDerivedRecordValidates(t *testing.T) {
 		if err := record.Validate(derived); err != nil {
 			t.Errorf("record %+v failed validation: %v", derived, err)
 		}
+	}
+}
+
+// TestASkillPartCarriesTheSkillsOwnName pins the half of this harness's naming
+// that the invoking part really is canonical for: a tool='skill' part is the
+// tool_use block naming the skill (ADR-0036 §1), so its own id stays the record's
+// id and its declared name is the record's name.
+func TestASkillPartCarriesTheSkillsOwnName(t *testing.T) {
+	part := toolPart("prt_abc", "skill", "completed")
+	part.SkillName = "run-sdlc"
+	result := walk(consents, NewServers(nil), part)
+
+	if len(result.Records) != 1 {
+		t.Fatalf("records = %d, want 1", len(result.Records))
+	}
+	got := result.Records[0]
+	if got.Kind != record.KindSkill || got.Name != "run-sdlc" || got.MCPServer != "" {
+		t.Fatalf("kind/name/server = %q/%q/%q, want skill/run-sdlc and no server", got.Kind, got.Name, got.MCPServer)
+	}
+	if want := record.DeriveEventID("opencode", record.Identifier("prt_abc")); got.EventID != want {
+		t.Fatalf("event id = %q, want %q: the skill half's id does not move", got.EventID, want)
+	}
+}
+
+// A skill whose name the harness did not record is lost collection, not a builtin
+// named "skill". The kind is known and the identity is not, and collapsing two
+// distinct skills onto one row is the grain violation ADR-0002 forbids.
+func TestASkillPartWithNoNameIsRefusedAndCounted(t *testing.T) {
+	result := walk(consents, NewServers(nil), toolPart("prt_abc", "skill", "completed"))
+
+	if len(result.Records) != 0 {
+		t.Fatalf("records = %d, want 0", len(result.Records))
+	}
+	if result.Refused != 1 {
+		t.Fatalf("refused = %d, want 1: the loss has to be counted, not silent", result.Refused)
+	}
+}
+
+// The kind comes from opencode's own spelling, and nothing reclassifies it.
+// Servers.Match structurally cannot claim the bare spelling "skill" — it requires
+// a spelling followed by the separator — but the ordering is pinned anyway,
+// because that is the property, not the accident.
+func TestASkillPartStaysASkillWithServersConfigured(t *testing.T) {
+	part := toolPart("prt_abc", "skill", "completed")
+	part.SkillName = "run-sdlc"
+	result := walk(consents, servers("skill", "atlassian"), part)
+
+	if len(result.Records) != 1 {
+		t.Fatalf("records = %d, want 1", len(result.Records))
+	}
+	if got := result.Records[0]; got.Kind != record.KindSkill || got.MCPServer != "" {
+		t.Fatalf("kind/server = %q/%q, want skill and no server", got.Kind, got.MCPServer)
+	}
+}
+
+// A directory-scoped skill name goes through DerivedName, so the scope is a keyed
+// digest and the path fragment itself never reaches the record (ADR-0020).
+func TestADirectoryScopedSkillNameIsDigestedNotStored(t *testing.T) {
+	part := toolPart("prt_abc", "skill", "completed")
+	part.SkillName = "apps/web:deploy"
+	result := walk(consents, NewServers(nil), part)
+
+	if len(result.Records) != 1 {
+		t.Fatalf("records = %d, want 1", len(result.Records))
+	}
+	got := result.Records[0]
+	if !strings.HasPrefix(string(got.Name), "scope-") {
+		t.Fatalf("name = %q, want a keyed scope digest", got.Name)
+	}
+	if strings.Contains(string(got.Name), "apps/web") {
+		t.Fatalf("name = %q carries the scope verbatim", got.Name)
+	}
+}
+
+// The zero Namer has no key, and refuses every scoped reference rather than
+// digesting it unkeyed: a plain digest of a path fragment is recoverable from a
+// wordlist (ADR-0020, fail closed).
+func TestAScopedSkillNameWithNoKeyIsRefused(t *testing.T) {
+	part := toolPart("prt_abc", "skill", "completed")
+	part.SkillName = "apps/web:deploy"
+	scan := NewScan(consents, record.Namer{}, NewServers(nil), adapter.Staleness{}, adapter.Idleness{})
+	scan.Session(session("ses_abc"))
+	scan.Part(part)
+	result := scan.Close()
+
+	if len(result.Records) != 0 || result.Refused != 1 {
+		t.Fatalf("records = %d, refused = %d, want 0 and 1", len(result.Records), result.Refused)
 	}
 }

@@ -35,11 +35,12 @@ func openCodeFixture(t *testing.T, directory string, parts ...string) string {
 	statements := []string{
 		`create table session (id text primary key, directory text, version text,
 			tokens_input integer, tokens_output integer, tokens_reasoning integer,
-			tokens_cache_read integer, tokens_cache_write integer, cost real, time_updated integer)`,
+			tokens_cache_read integer, tokens_cache_write integer, cost real, time_updated integer,
+			parent_id text, agent text, time_created integer)`,
 		`create table part (id text primary key, message_id text, session_id text,
 			time_created integer, time_updated integer, data text)`,
-		fmt.Sprintf(`insert into session values ('ses_abc', %s, '1.18.30', 11, 13, 17, 19, 23, 0.42, %d)`,
-			sqlQuote(directory), openCodeInstant.UnixMilli()),
+		sessionRow("ses_abc", directory, "", "",
+			fmt.Sprint(openCodeInstant.UnixMilli()), fmt.Sprint(openCodeInstant.UnixMilli())),
 	}
 	return writeFixtureStore(t, path, append(statements, parts...))
 }
@@ -50,6 +51,20 @@ func writeFixtureStore(t *testing.T, path string, statements []string) string {
 		t.Fatalf("creating the opencode fixture: %v", err)
 	}
 	return path
+}
+
+// sessionRow is one `session` row written by column name rather than by position,
+// so a column added to the fixture's schema cannot silently shift another's value.
+//
+// created and updated are raw SQL fragments — a millisecond literal or NULL —
+// because two tests here need an absent instant, which is the one thing a typed
+// parameter could not express.
+func sessionRow(id, directory, agent, parentID, created, updated string) string {
+	return fmt.Sprintf(`insert into session
+		(id, directory, version, tokens_input, tokens_output, tokens_reasoning,
+		 tokens_cache_read, tokens_cache_write, cost, time_updated, parent_id, agent, time_created)
+		values (%s, %s, '1.18.30', 11, 13, 17, 19, 23, 0.42, %s, %s, %s, %s)`,
+		sqlQuote(id), sqlQuote(directory), updated, sqlQuote(parentID), sqlQuote(agent), created)
 }
 
 // toolPartRow is one `part` row whose data is a tool part, written the way
@@ -70,6 +85,29 @@ func toolPartRowWithoutStart(id, tool, status string) string {
 	data := fmt.Sprintf(`{"type":"tool","tool":%s,"callID":"bash:1","state":{"status":%s,`+
 		`"time":{"end":%d}}}`,
 		sqlQuote(tool), sqlQuote(status), openCodeInstant.UnixMilli()+250)
+	return fmt.Sprintf(`insert into part values (%s, 'msg_1', 'ses_abc', %d, %d, %s)`,
+		sqlQuote(id), openCodeInstant.UnixMilli(), openCodeInstant.UnixMilli(), sqlQuote(data))
+}
+
+// skillPartRow is a tool part opencode wrote for a skill invocation, carrying the
+// skill's own declared name beside the free text the walk must never select.
+func skillPartRow(id, name string) string {
+	data := fmt.Sprintf(`{"type":"tool","tool":"skill","callID":"skill:1","state":{"status":"completed",`+
+		`"input":{"name":%s,"prompt":"s3cret skill prompt"},"output":"s3cret output",`+
+		`"time":{"start":%d,"end":%d}},"metadata":{"x":1}}`,
+		sqlQuote(name), openCodeInstant.UnixMilli(), openCodeInstant.UnixMilli()+250)
+	return fmt.Sprintf(`insert into part values (%s, 'msg_1', 'ses_abc', %d, %d, %s)`,
+		sqlQuote(id), openCodeInstant.UnixMilli(), openCodeInstant.UnixMilli(), sqlQuote(data))
+}
+
+// taskPartRow is the invoking part for a subagent run. It produces no record at
+// all: the child session row is the canonical source event (ADR-0036 §2), and the
+// subagent_type argument this row carries is never read.
+func taskPartRow(id, subagentType string) string {
+	data := fmt.Sprintf(`{"type":"tool","tool":"task","callID":"task:1","state":{"status":"completed",`+
+		`"input":{"subagent_type":%s,"prompt":"s3cret task prompt"},"output":"s3cret output",`+
+		`"time":{"start":%d,"end":%d}},"metadata":{"x":1}}`,
+		sqlQuote(subagentType), openCodeInstant.UnixMilli(), openCodeInstant.UnixMilli()+250)
 	return fmt.Sprintf(`insert into part values (%s, 'msg_1', 'ses_abc', %d, %d, %s)`,
 		sqlQuote(id), openCodeInstant.UnixMilli(), openCodeInstant.UnixMilli(), sqlQuote(data))
 }
@@ -96,6 +134,17 @@ func runOpenCode(t *testing.T, repos *config.Repos, storePath, spool string) (in
 	t.Helper()
 	return ingestOpenCode(repos, storePath, opencode.NewServers(nil), store.New(spool),
 		adapter.Staleness{}, adapter.Idleness{}, wholeHistory, nil)
+}
+
+// runOpenCodeClosed is runOpenCode with the idle threshold elapsed, which is the
+// only boundary either session-derived grain is emitted at. runOpenCode leaves
+// both thresholds disabled, so it derives no session grain and therefore no
+// subagent grain either.
+func runOpenCodeClosed(t *testing.T, repos *config.Repos, storePath, spool string) (int, openCodeCounters, error) {
+	t.Helper()
+	return ingestOpenCode(repos, storePath, opencode.NewServers(nil), store.New(spool),
+		adapter.Staleness{}, adapter.Idleness{Timeout: time.Hour, Now: openCodeInstant.Add(2 * time.Hour)},
+		wholeHistory, nil)
 }
 
 func TestAnAbsentStoreCollectsNothingAndIsNotObserved(t *testing.T) {
@@ -215,20 +264,26 @@ func TestRescanningTheSameStoreIsByteIdentical(t *testing.T) {
 	paths := testPaths(t)
 	root := t.TempDir()
 	repos := consentedRepos(t, paths, root)
+	// Every grain this reader derives is in the fixture, so the byte-identity claim
+	// covers the two the skill and subagent derivations added.
 	storePath := openCodeFixture(t, root,
 		toolPartRow("prt_1", "bash", "completed"),
 		toolPartRow("prt_2", "atlassian_search", "error"),
+		skillPartRow("prt_3", "run-sdlc"),
+		taskPartRow("prt_4", "sdlc-plan"),
+		sessionRow("ses_child", root, "explore", "ses_abc",
+			fmt.Sprint(openCodeInstant.UnixMilli()), fmt.Sprint(openCodeInstant.UnixMilli())),
 	)
 	spool := filepath.Join(t.TempDir(), "events.ndjson")
 
-	if _, _, err := runOpenCode(t, repos, storePath, spool); err != nil {
+	if _, _, err := runOpenCodeClosed(t, repos, storePath, spool); err != nil {
 		t.Fatalf("first walk: %v", err)
 	}
 	before, err := os.ReadFile(spool)
 	if err != nil {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
-	written, _, err := runOpenCode(t, repos, storePath, spool)
+	written, _, err := runOpenCodeClosed(t, repos, storePath, spool)
 	if err != nil {
 		t.Fatalf("second walk: %v", err)
 	}
@@ -286,11 +341,51 @@ func TestTheWalkNeverOrdersOnAnUnindexedColumn(t *testing.T) {
 }
 
 func TestTheWalkSelectsNoFreeTextColumn(t *testing.T) {
-	for _, key := range []string{"callID", "$.state.input", "$.state.output", "$.state.title", "$.state.error", "$.state.raw", "$.metadata", "$.state.metadata", "cost"} {
+	// $.state.input is not on this list any more, because the query legitimately
+	// carries exactly one key beneath it — the skill's own declared name. That one
+	// key is pinned by the closed enumeration below rather than by an absence here.
+	for _, key := range []string{"callID", "$.state.output", "$.state.title", "$.state.error", "$.state.raw", "$.metadata", "$.state.metadata", "cost"} {
 		for _, query := range []string{sessionQuery, partQuery} {
 			if strings.Contains(query, key) {
 				t.Errorf("a query selects %q: free text must not enter this process at all (ADR-0007)", key)
 			}
+		}
+	}
+}
+
+// allowedInputPath is the one $.state.input key any query may project: a skill's
+// own declared name, which ADR-0007's Consequences license reading in order to
+// derive a name.  Everything else under that object is free text.
+const allowedInputPath = `$.state.input.name`
+
+// TestTheOnlyProjectedInputKeyIsTheSkillName is the privacy guarantee of this
+// change, pinned rather than assumed. The named forbidden paths are the ones a
+// reader would reach for first; the closed enumeration below them is what catches
+// a path this list never imagined — including $.state.input.subagent_type, which
+// is not read at all, because an opencode subagent's canonical source event is the
+// child session row and not the invoking part (ADR-0036 §1-§2).
+func TestTheOnlyProjectedInputKeyIsTheSkillName(t *testing.T) {
+	for _, forbidden := range []string{
+		`$.state.input.prompt`, `$.state.input.description`, `$.state.input.command`,
+		`$.state.input.subagent_type`, `$.state.input.arguments`, `$.state.input.filePath`,
+	} {
+		for _, query := range []string{sessionQuery, partQuery} {
+			if strings.Contains(query, forbidden) {
+				t.Errorf("a query projects %q: free text must not enter this process at all (ADR-0007)", forbidden)
+			}
+		}
+	}
+	for _, query := range []string{sessionQuery, partQuery} {
+		for rest := query; ; {
+			at := strings.Index(rest, `$.state.input`)
+			if at < 0 {
+				break
+			}
+			if !strings.HasPrefix(rest[at:], allowedInputPath+`'`) {
+				t.Errorf("a query projects a $.state.input key other than %q", allowedInputPath)
+				break
+			}
+			rest = rest[at+len(allowedInputPath):]
 		}
 	}
 }
@@ -302,7 +397,7 @@ func TestTheWalkSelectsNoFreeTextColumn(t *testing.T) {
 func TestNoInstantIsCoalesced(t *testing.T) {
 	for _, query := range []string{sessionQuery, partQuery} {
 		for _, argument := range coalesced(query) {
-			for _, instant := range []string{"time_updated", "$.state.time.start", "$.state.time.end"} {
+			for _, instant := range []string{"time_updated", "time_created", "$.state.time.start", "$.state.time.end"} {
 				if strings.Contains(argument, instant) {
 					t.Errorf("a query coalesces %q: an absent instant must stay distinguishable from the epoch", instant)
 				}
@@ -579,8 +674,8 @@ func unscannablePartRow(id string) string {
 // unscannableSessionRow is a session whose token count is text where the walk
 // projects a number, on the same terms.
 func unscannableSessionRow(id string) string {
-	return fmt.Sprintf(`insert into session values (%s, '/nowhere', '1.18.30', 'lots', 13, 17, 19, 23, 0.42, %d)`,
-		sqlQuote(id), openCodeInstant.UnixMilli())
+	return fmt.Sprintf(`insert into session values (%s, '/nowhere', '1.18.30', 'lots', 13, 17, 19, 23, 0.42, %d, '', '', %d)`,
+		sqlQuote(id), openCodeInstant.UnixMilli(), openCodeInstant.UnixMilli())
 }
 
 // TestAPageOfUnscannablePartsDoesNotStallTheWalk pins the paging key's only job:
@@ -724,11 +819,11 @@ func TestASessionWithNoLastActivityInstantIsRefusedAndVisible(t *testing.T) {
 	storePath := writeFixtureStore(t, path, []string{
 		`create table session (id text primary key, directory text, version text,
 			tokens_input integer, tokens_output integer, tokens_reasoning integer,
-			tokens_cache_read integer, tokens_cache_write integer, cost real, time_updated integer)`,
+			tokens_cache_read integer, tokens_cache_write integer, cost real, time_updated integer,
+			parent_id text, agent text, time_created integer)`,
 		`create table part (id text primary key, message_id text, session_id text,
 			time_created integer, time_updated integer, data text)`,
-		fmt.Sprintf(`insert into session values ('ses_abc', %s, '1.18.30', 11, 13, 17, 19, 23, 0.42, NULL)`,
-			sqlQuote(root)),
+		sessionRow("ses_abc", root, "", "", fmt.Sprint(openCodeInstant.UnixMilli()), "NULL"),
 	})
 	spool := filepath.Join(t.TempDir(), "events.ndjson")
 
@@ -746,5 +841,100 @@ func TestASessionWithNoLastActivityInstantIsRefusedAndVisible(t *testing.T) {
 	}
 	if body, readErr := os.ReadFile(spool); readErr == nil && strings.Contains(string(body), "1970-01-01") {
 		t.Fatal("a session_end was written stamped at the epoch")
+	}
+}
+
+// TestASkillPartCollectsItsOwnName is the CI-reproducible half of the claim that
+// report shows opencode skills by name: the name arrives through the real query,
+// and none of the free text sitting beside it in the same blob does.
+func TestASkillPartCollectsItsOwnName(t *testing.T) {
+	paths := testPaths(t)
+	root := t.TempDir()
+	repos := consentedRepos(t, paths, root)
+	storePath := openCodeFixture(t, root, skillPartRow("prt_1", "run-sdlc"))
+	spool := filepath.Join(t.TempDir(), "events.ndjson")
+
+	written, _, err := runOpenCode(t, repos, storePath, spool)
+	if err != nil {
+		t.Fatalf("ingestOpenCode() error = %v", err)
+	}
+	if written != 1 {
+		t.Fatalf("written = %d, want 1", written)
+	}
+	body, err := os.ReadFile(spool)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	for _, want := range []string{`"kind":"skill"`, `"name":"run-sdlc"`} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("the spool does not carry %s", want)
+		}
+	}
+	for _, secret := range []string{"s3cret skill prompt", "s3cret output", "skill:1"} {
+		if strings.Contains(string(body), secret) {
+			t.Errorf("the spool carries %q from the source blob", secret)
+		}
+	}
+}
+
+// TestATaskPartCollectsNothing pins the skip end to end, including that the
+// invoking argument is not read at all: subagent_type appears nowhere, because the
+// query never projects it.
+func TestATaskPartCollectsNothing(t *testing.T) {
+	paths := testPaths(t)
+	root := t.TempDir()
+	repos := consentedRepos(t, paths, root)
+	storePath := openCodeFixture(t, root, taskPartRow("prt_1", "sdlc-plan"))
+	spool := filepath.Join(t.TempDir(), "events.ndjson")
+
+	written, counters, err := runOpenCode(t, repos, storePath, spool)
+	if err != nil {
+		t.Fatalf("ingestOpenCode() error = %v", err)
+	}
+	if written != 0 {
+		t.Fatalf("written = %d, want 0: the invoking part produces no record", written)
+	}
+	if counters.RefusedCalls != 0 || counters.PendingCalls != 0 {
+		t.Fatalf("refused = %d, pending = %d, want 0 and 0: skipped is not lost collection",
+			counters.RefusedCalls, counters.PendingCalls)
+	}
+	if body, readErr := os.ReadFile(spool); readErr == nil && strings.Contains(string(body), "sdlc-plan") {
+		t.Fatal("the spool carries the invoking subagent_type argument")
+	}
+}
+
+// TestAChildSessionCollectsASubagentNamedByItsAgent is the other half: the name
+// comes from the child session's own agent declaration, and the invoking part's
+// subagent_type — a different value on purpose — reaches nothing.
+func TestAChildSessionCollectsASubagentNamedByItsAgent(t *testing.T) {
+	paths := testPaths(t)
+	root := t.TempDir()
+	repos := consentedRepos(t, paths, root)
+	storePath := openCodeFixture(t, root,
+		taskPartRow("prt_1", "sdlc-plan"),
+		sessionRow("ses_child", root, "explore", "ses_abc",
+			fmt.Sprint(openCodeInstant.UnixMilli()), fmt.Sprint(openCodeInstant.UnixMilli())),
+	)
+	spool := filepath.Join(t.TempDir(), "events.ndjson")
+
+	if _, _, err := runOpenCodeClosed(t, repos, storePath, spool); err != nil {
+		t.Fatalf("ingestOpenCode() error = %v", err)
+	}
+	body, err := os.ReadFile(spool)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	for _, want := range []string{`"kind":"subagent"`, `"name":"explore"`} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("the spool does not carry %s", want)
+		}
+	}
+	if strings.Contains(string(body), `"name":"sdlc-plan"`) {
+		t.Error("the spool names the subagent by the caller's argument rather than by the harness's own declaration")
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
+		if strings.Contains(line, `"kind":"subagent"`) && !strings.Contains(line, `"session_id":"ses_child"`) {
+			t.Error("the subagent invocation does not carry the child's own session id")
+		}
 	}
 }

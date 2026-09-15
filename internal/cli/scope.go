@@ -69,6 +69,6 @@ func discoverAllRepos(paths config.Paths, claudeDir string) (inventory.Discovery
 	}
 	return inventory.Merge(
 		inventory.ClaudeCodeAcrossRepos(claudeDir, roots, names),
-		inventory.OpenCodeServers(openCodeConfig, names),
+		inventory.OpenCodeInScope(openCodeConfig, names),
 	), nil
 }
