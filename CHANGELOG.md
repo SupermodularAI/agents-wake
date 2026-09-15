@@ -49,6 +49,18 @@ called out under Changed.
   `CGO_ENABLED=0`. A test walks the whole module and asserts that one file
   imports the driver and one package imports `database/sql`.
 
+### Fixed
+
+- `wake report` names opencode's skills and subagents rather than showing
+  nothing for either: they were being collected correctly but had no discovered
+  counterpart to publish against, so every one of them was silently dropped
+  from the table. Skills are now discovered from opencode's own `command`
+  directory, the same reading Claude Code's own skill and agent directories
+  already get. Subagents have no such directory to discover — `general` and
+  `explore` are declared nowhere on disk — so a real subagent invocation is
+  published anyway, flagged unmatched, on the same principle a used MCP server
+  no configuration names already renders rather than hides.
+
 ## [0.3.0] - 2026-09-11
 
 ### Added
