@@ -874,6 +874,84 @@ func TestRefreshReportsAServerWithNoDiscoveredMatchAsUnmatched(t *testing.T) {
 	}
 }
 
+// openCodeSubagentRecord is one opencode subagent invocation record, as
+// internal/adapter/opencode's subagentInvocation derives it: a real name
+// (session.agent), no id opencode discovery could ever have named it under.
+func openCodeSubagentRecord(id, name string, repo record.Hash, timestamp time.Time) record.Record {
+	r := inventoryRecord(id, name, timestamp)
+	r.Harness = "opencode"
+	r.Kind = record.KindSubagent
+	r.Repo = repo
+	return r
+}
+
+// opencode discovers no subagent at all (internal/inventory/opencode.go): there
+// is no directory, no config key, nothing this build can read to name one. A
+// real subagent invocation must still surface, flagged unmatched, exactly the
+// discipline TestRefreshReportsAServerWithNoDiscoveredMatchAsUnmatched already
+// gives an MCP server discovery cannot name.
+func TestRefreshReportsAnOpenCodeSubagentWithNoDiscoveryAtAllAsUnmatched(t *testing.T) {
+	repo := record.Hash("0123456789abcdef0123456789abcdef")
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	events := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	if _, err := events.Append([]record.Record{
+		openCodeSubagentRecord("one", "general", repo, at),
+	}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	// Discovery declares an opencode skill, but nothing of kind subagent — the
+	// real shape once OpenCodeInScope's command-directory scan lands, and the
+	// case discoveredKinds exists for: a kind a harness's discovery says nothing
+	// about at all, not merely a name it missed.
+	discovery := Discovery{Primitives: []Primitive{{Harness: "opencode", Kind: record.KindSkill, Name: "commit-message"}}}
+	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
+	if err := primitives.Refresh(events, discovery, nil); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	items, err := primitives.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	observed := usageNamed(t, items, "general")
+	if observed.Kind != record.KindSubagent || observed.Invocations != 1 || !observed.Unmatched {
+		t.Fatalf("observed row = %+v, want an unmatched subagent with 1 invocation", observed)
+	}
+}
+
+// A Claude Code subagent discovery does name (agents/ is scanned unconditionally
+// by claudeCodeGlobal), so a Claude Code subagent invocation with no exact
+// discovered match is real drift — a renamed or removed subagent file — and must
+// stay silently absent from the snapshot rather than being manufactured into an
+// unmatched row: discoveredKinds only fires where a harness's discovery says
+// nothing about the kind at all, never where it says something and missed.
+func TestClaudeCodeSubagentWithNoExactMatchStaysUnpublished(t *testing.T) {
+	repo := record.Hash("0123456789abcdef0123456789abcdef")
+	at := time.Date(2026, time.August, 13, 12, 0, 0, 0, time.UTC)
+	events := store.New(filepath.Join(t.TempDir(), "events.ndjson"))
+	renamed := inventoryRecord("one", "renamed-subagent", at)
+	renamed.Kind = record.KindSubagent
+	renamed.Repo = repo
+	if _, err := events.Append([]record.Record{renamed}); err != nil {
+		t.Fatalf("Append() error = %v", err)
+	}
+	discovery := Discovery{Primitives: []Primitive{{Harness: "claude-code", Kind: record.KindSubagent, Name: "some-other-subagent"}}}
+	primitives := New(filepath.Join(t.TempDir(), "primitives.json"))
+	if err := primitives.Refresh(events, discovery, nil); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	items, err := primitives.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	for _, item := range items {
+		if item.Name == "renamed-subagent" {
+			t.Fatalf("a Claude Code subagent discovery did not name was manufactured into a row: %+v", item)
+		}
+	}
+}
+
 // The roll-up is the same arithmetic the tool rows use, so the invariants
 // Usage.valid() asserts hold on a server row too: unknown outcomes stay out of the
 // failure denominator rather than counting as ok (ADR-0005, ADR-0006).
@@ -949,16 +1027,37 @@ func TestRefreshMergesAServerRowAcrossRepositories(t *testing.T) {
 	}
 }
 
-// Unmatched only ever describes an observed MCP server. A snapshot claiming
-// otherwise is refused rather than repaired (fail closed, plan §3.4).
-func TestReadRefusesAnUnmatchedFlagOnANonServerRow(t *testing.T) {
+// Unmatched describes an observed MCP server, skill or subagent row discovery
+// cannot vouch for — never any other kind. A snapshot claiming otherwise is
+// refused rather than repaired (fail closed, plan §3.4).
+func TestReadRefusesAnUnmatchedFlagOnAKindThatCannotCarryIt(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "primitives.json")
-	content := `{"version":3,"refreshed_at":"2026-08-13T12:00:00Z","primitives":[{"harness":"claude-code","kind":"skill","name":"review","repos":["0123456789abcdef0123456789abcdef"],"invocations":2,"unmatched":true,"last_used":"2026-08-13T12:00:00Z"}]}`
+	content := `{"version":3,"refreshed_at":"2026-08-13T12:00:00Z","primitives":[{"harness":"claude-code","kind":"command","name":"review","repos":["0123456789abcdef0123456789abcdef"],"invocations":2,"unmatched":true,"last_used":"2026-08-13T12:00:00Z"}]}`
 	if err := os.WriteFile(statePath, []byte(content), 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 	if _, err := New(statePath).Read(); err == nil {
-		t.Fatal("Read() accepted an unmatched flag on a skill row")
+		t.Fatal("Read() accepted an unmatched flag on a command row")
+	}
+}
+
+// A skill or subagent row CAN be unmatched now: opencode discovers neither
+// kind for subagents at all (internal/inventory/opencode.go), so an observed
+// subagent invocation is published flagged unmatched rather than dropped.
+func TestReadAcceptsAnUnmatchedFlagOnASkillOrSubagentRow(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "primitives.json")
+	content := `{"version":3,"refreshed_at":"2026-08-13T12:00:00Z","primitives":[` +
+		`{"harness":"opencode","kind":"subagent","name":"general","repos":["0123456789abcdef0123456789abcdef"],"invocations":2,"unmatched":true,"last_used":"2026-08-13T12:00:00Z"},` +
+		`{"harness":"opencode","kind":"skill","name":"review","repos":["0123456789abcdef0123456789abcdef"],"invocations":1,"unmatched":true,"last_used":"2026-08-13T12:00:00Z"}]}`
+	if err := os.WriteFile(statePath, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	items, err := New(statePath).Read()
+	if err != nil {
+		t.Fatalf("Read() rejected an unmatched skill/subagent row: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("items = %v, want both rows kept", items)
 	}
 }
 

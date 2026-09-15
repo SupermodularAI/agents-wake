@@ -52,12 +52,13 @@ type Usage struct {
 	Failures    uint64            `json:"failures,omitempty"`
 	Unknown     uint64            `json:"unknown,omitempty"`
 	LastUsed    time.Time         `json:"last_used,omitempty"`
-	// Unmatched marks a row derived from invocations of an MCP server that no
-	// discovered config key accounts for: the calls happened, and the server they
-	// belong to could not be named from the inventory. It is reported rather than
-	// silently rendered as zero, which is the same discipline ADR-0005 applies to an
-	// unreported outcome and plan §12 applies to doctor — "collects nothing" is not
-	// "collects zero" (plan §3.3, §12).
+	// Unmatched marks a row discovery cannot vouch for: the calls happened, and
+	// either the MCP server they name is not one any discovered config key
+	// accounts for, or the skill or subagent they name belongs to a harness whose
+	// discovery states nothing at all about that kind. Either way the row is
+	// reported rather than silently rendered as zero, which is the same
+	// discipline ADR-0005 applies to an unreported outcome and plan §12 applies
+	// to doctor — "collects nothing" is not "collects zero" (plan §3.3, §12).
 	//
 	// A bool, not a label: the snapshot's fields are identifiers, enums, timestamps
 	// and counters, and a bool is the tightest enumeration there is (ADR-0007).
@@ -314,30 +315,49 @@ func derive(summary metrics.Summary, available []Primitive, canonical map[identi
 	}
 
 	index, discovered := serverIndex(available)
-	// unnamed is which server rows this pass built from invocations of a server no
-	// discovered config key accounts for, so they can still be published below.
-	// Every other kind is published from the available side alone; an MCP server is
-	// the one case where an observed row with no discovered counterpart is the
-	// answer rather than noise, because the calls provably happened.
+	// discoveredKinds is which (harness, kind) pairs discovery names at least one
+	// primitive for. It is a coarser question than discovered's — not "is this
+	// exact name known" but "does this harness offer any declaration of this kind
+	// at all" — and it exists because opencode offers none for kind subagent: no
+	// directory, no config key, nothing this build could scan (see
+	// internal/inventory/opencode.go). Gating skill and subagent kinds on it,
+	// rather than folding them into the MCP-only discovered set above, keeps this
+	// new rule from ever touching a kind that already has a real discovery source
+	// (Claude Code's subagents included) and a real reason a row can be absent
+	// from it.
+	discoveredKinds := map[kindKey]bool{}
+	for _, primitive := range available {
+		discoveredKinds[kindKey{harness: primitive.Harness, kind: primitive.Kind}] = true
+	}
+	// unnamed is which rows this pass built from invocations discovery cannot
+	// name, so they can still be published below rather than silently dropped
+	// (ADR-0046): an MCP server no discovered config key accounts for, or a skill
+	// or subagent invoked under a harness that discovers no primitive of that kind
+	// at all. Every other kind is published from the available side alone.
 	unnamed := map[identity]struct{}{}
 
 	for _, primitive := range summary.Primitives {
 		if primitive.Kind == record.KindBuiltinTool {
 			continue
 		}
-		accumulate(canonicalIdentity(canonical, identity{harness: primitive.Harness, kind: primitive.Kind, name: primitive.Name}), primitive)
-		if primitive.Kind != record.KindMCPTool || primitive.MCPServer == "" {
-			continue
-		}
-		// Deliberately not through canonicalIdentity. This roll-up is cross-kind by
-		// construction — mcp_tool events onto an mcp_server row — but no harness
-		// declaration licenses it: it is the arithmetic ADR-0039 defines, not a
-		// spelling the harness stated, so it stays its own path rather than being
-		// expressed as a canonical fold.
-		server := identity{harness: primitive.Harness, kind: record.KindMCPServer, name: serverName(index, primitive.Harness, primitive.MCPServer)}
-		accumulate(server, primitive)
-		if _, found := discovered[server]; !found {
-			unnamed[server] = struct{}{}
+		id := canonicalIdentity(canonical, identity{harness: primitive.Harness, kind: primitive.Kind, name: primitive.Name})
+		accumulate(id, primitive)
+		switch {
+		case primitive.Kind == record.KindMCPTool && primitive.MCPServer != "":
+			// Deliberately not through canonicalIdentity. This roll-up is cross-kind
+			// by construction — mcp_tool events onto an mcp_server row — but no
+			// harness declaration licenses it: it is the arithmetic ADR-0039
+			// defines, not a spelling the harness stated, so it stays its own path
+			// rather than being expressed as a canonical fold.
+			server := identity{harness: primitive.Harness, kind: record.KindMCPServer, name: serverName(index, primitive.Harness, primitive.MCPServer)}
+			accumulate(server, primitive)
+			if _, found := discovered[server]; !found {
+				unnamed[server] = struct{}{}
+			}
+		case primitive.Kind == record.KindSkill || primitive.Kind == record.KindSubagent:
+			if !discoveredKinds[kindKey{harness: primitive.Harness, kind: primitive.Kind}] {
+				unnamed[id] = struct{}{}
+			}
 		}
 	}
 
@@ -414,6 +434,15 @@ type identity struct {
 	name    record.Identifier
 }
 
+// kindKey is identity one grain coarser: a harness and a kind, with no name. It
+// answers "does this harness's discovery say anything at all about this kind",
+// which is a different question from identity's "does it name this primitive" —
+// see discoveredKinds in derive.
+type kindKey struct {
+	harness record.Identifier
+	kind    record.Kind
+}
+
 // canonicalIdentity applies the fold discovery proved for one primitive: the two
 // discovered spellings of one skill collapse onto one row, and usage recorded under
 // either spelling accumulates there.
@@ -471,11 +500,21 @@ func (u Usage) valid() bool {
 	if !validKind(u.Kind) {
 		return false
 	}
-	// Unmatched only ever describes an observed MCP server: a row of another kind,
-	// or one with no invocations, cannot be unmatched, and a snapshot claiming
-	// otherwise is refused rather than repaired (fail closed, plan §3.4).
-	if u.Unmatched && (u.Kind != record.KindMCPServer || u.Invocations == 0) {
-		return false
+	// Unmatched describes an observed row discovery cannot vouch for: an MCP
+	// server, or a skill or subagent from a harness whose discovery states
+	// nothing about that kind at all (see discoveredKinds in derive). A row of
+	// any other kind, or one with no invocations, cannot be unmatched, and a
+	// snapshot claiming otherwise is refused rather than repaired (fail closed,
+	// plan §3.4).
+	if u.Unmatched {
+		switch u.Kind {
+		case record.KindMCPServer, record.KindSkill, record.KindSubagent:
+		default:
+			return false
+		}
+		if u.Invocations == 0 {
+			return false
+		}
 	}
 	if u.Unknown > u.Invocations || u.Failures > u.Invocations-u.Unknown {
 		return false
