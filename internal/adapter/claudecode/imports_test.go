@@ -32,6 +32,7 @@ var frozenPackageImports = map[string][]string{
 		"cmp",
 		"encoding/json",
 		"errors",
+		"github.com/SupermodularAI/agents-wake/internal/adapter",
 		"github.com/SupermodularAI/agents-wake/internal/record",
 		"io",
 		"slices",
@@ -40,6 +41,7 @@ var frozenPackageImports = map[string][]string{
 	"scan.go": {
 		"encoding/json",
 		"errors",
+		"github.com/SupermodularAI/agents-wake/internal/adapter",
 		"github.com/SupermodularAI/agents-wake/internal/jsonl",
 		"github.com/SupermodularAI/agents-wake/internal/record",
 		"io",
@@ -50,6 +52,7 @@ var frozenPackageImports = map[string][]string{
 	// already holds (ADR-0019 §1, ADR-0035 §2).
 	"parent.go": {
 		"cmp",
+		"github.com/SupermodularAI/agents-wake/internal/adapter",
 		"github.com/SupermodularAI/agents-wake/internal/record",
 		"slices",
 	},
@@ -61,6 +64,7 @@ var frozenPackageImports = map[string][]string{
 		"time",
 	},
 	"session.go": {
+		"github.com/SupermodularAI/agents-wake/internal/adapter",
 		"github.com/SupermodularAI/agents-wake/internal/record",
 		"time",
 	},
@@ -68,6 +72,7 @@ var frozenPackageImports = map[string][]string{
 		"bytes",
 		"cmp",
 		"encoding/json",
+		"github.com/SupermodularAI/agents-wake/internal/adapter",
 		"github.com/SupermodularAI/agents-wake/internal/record",
 		"math",
 		"slices",
@@ -75,11 +80,13 @@ var frozenPackageImports = map[string][]string{
 	},
 	"subagent.go": {
 		"cmp",
+		"github.com/SupermodularAI/agents-wake/internal/adapter",
 		"github.com/SupermodularAI/agents-wake/internal/record",
 		"slices",
 		"time",
 	},
 	"typed.go": {
+		"github.com/SupermodularAI/agents-wake/internal/adapter",
 		"github.com/SupermodularAI/agents-wake/internal/record",
 		"strings",
 	},
@@ -102,6 +109,13 @@ var frozenPackageImports = map[string][]string{
 // harness directory and consent lives in the project table; a reader that imported
 // either would be reading the filesystem through a package that does it on its behalf,
 // which is the same violation one import removed.
+//
+// internal/adapter is deliberately not on it, and the frozen sets above now admit it.
+// That package holds values only — the consent seam, two thresholds, the shared
+// counter vocabulary and a two-method interface — so importing it acquires no
+// capability at all. It is what ADR-0013 asked for, extracted once two concrete
+// readers existed, and a reader naming its own copy of those types instead would be
+// the drift the extraction removes.
 var forbiddenReaderImports = []string{
 	"os",
 	"path/filepath",

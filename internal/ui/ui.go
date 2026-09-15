@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/SupermodularAI/agents-wake/internal/errorcell"
@@ -53,13 +54,14 @@ func Handler(source *store.Store, primitives *inventory.Store, labels repolabel.
 		for _, entry := range entries {
 			records = append(records, entry.Record)
 		}
-		available, err := primitives.Read()
+		snapshot, err := primitives.Snapshot()
 		if err != nil {
 			http.Error(writer, "cannot read local Wake primitive inventory", http.StatusInternalServerError)
 			return
 		}
+		available := snapshot.Primitives
 		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := page.Execute(writer, view(metrics.Aggregate(records, rollup), available, labels)); err != nil {
+		if err := page.Execute(writer, view(metrics.Aggregate(records, rollup), available, snapshot.Harnesses, labels)); err != nil {
 			return
 		}
 	})
@@ -119,11 +121,18 @@ type dashboardView struct {
 	ErrorDetail  string
 	Usage        []primitiveView
 	Unused       []primitiveView
+	// Observed and Unobserved are the harnesses the last scan read and did not,
+	// already rendered as one phrase each, like every other field of this struct.
+	// The page names them from the scan's own record rather than from a sentence in
+	// the template, so a build with no reader for a harness cannot claim anything
+	// about it, and a harness nobody read is never drawn as a zero (ADR-0046).
+	Observed   string
+	Unobserved string
 }
 
 type primitiveView struct{ Name, Kind, Harness, Repo, LastUsed, Invocations, Errors string }
 
-func view(summary metrics.Summary, available []inventory.Usage, labels repolabel.Labels) dashboardView {
+func view(summary metrics.Summary, available []inventory.Usage, harnesses []inventory.HarnessObservation, labels repolabel.Labels) dashboardView {
 	result := dashboardView{Empty: !summary.Observed() && len(available) == 0, Invocations: number(summary.Invocations), Sessions: number(summary.Sessions), ErrorRate: rate(summary.ErrorRate), ErrorDetail: ratioDetail(summary.ErrorRate)}
 	if !summary.LastObserved.IsZero() {
 		result.Updated = "Last observed " + summary.LastObserved.Local().Format("2006-01-02 15:04")
@@ -132,6 +141,7 @@ func view(summary metrics.Summary, available []inventory.Usage, labels repolabel
 		result.Updated = "No activity observed yet"
 		result.LastObserved = "-"
 	}
+	result.Observed, result.Unobserved = harnessPhrases(harnesses)
 	for _, primitive := range available {
 		view := primitiveView{Name: string(primitive.Name), Kind: primitive.KindLabel(), Harness: string(primitive.Harness), Repo: labels.DisplayAll(primitive.Repos), Invocations: number(primitive.Invocations)}
 		if primitive.Invocations == 0 {
@@ -143,6 +153,30 @@ func view(summary metrics.Summary, available []inventory.Usage, labels repolabel
 		result.Usage = append(result.Usage, view)
 	}
 	return result
+}
+
+// harnessPhrases renders the two halves of the observation line.
+//
+// Neither half can come back blank: "none" is a real answer and an empty run of
+// template output is not — a reader would see "Usage observed:" followed by
+// nothing and have to guess whether that meant none or meant broken.
+func harnessPhrases(harnesses []inventory.HarnessObservation) (observed, unobserved string) {
+	read, missed := []string{}, []string{}
+	for _, harness := range harnesses {
+		if harness.Observed {
+			read = append(read, string(harness.Harness))
+			continue
+		}
+		missed = append(missed, string(harness.Harness))
+	}
+	return phrase(read), phrase(missed)
+}
+
+func phrase(names []string) string {
+	if len(names) == 0 {
+		return "none"
+	}
+	return strings.Join(names, ", ")
 }
 
 func number(value uint64) string { return strconv.FormatUint(value, 10) }

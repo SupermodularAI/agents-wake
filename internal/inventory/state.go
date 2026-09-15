@@ -52,12 +52,13 @@ type Usage struct {
 	Failures    uint64            `json:"failures,omitempty"`
 	Unknown     uint64            `json:"unknown,omitempty"`
 	LastUsed    time.Time         `json:"last_used,omitempty"`
-	// Unmatched marks a row derived from invocations of an MCP server that no
-	// discovered config key accounts for: the calls happened, and the server they
-	// belong to could not be named from the inventory. It is reported rather than
-	// silently rendered as zero, which is the same discipline ADR-0005 applies to an
-	// unreported outcome and plan §12 applies to doctor — "collects nothing" is not
-	// "collects zero" (plan §3.3, §12).
+	// Unmatched marks a row discovery cannot vouch for: the calls happened, and
+	// either the MCP server they name is not one any discovered config key
+	// accounts for, or the skill or subagent they name belongs to a harness whose
+	// discovery states nothing at all about that kind. Either way the row is
+	// reported rather than silently rendered as zero, which is the same
+	// discipline ADR-0005 applies to an unreported outcome and plan §12 applies
+	// to doctor — "collects nothing" is not "collects zero" (plan §3.3, §12).
 	//
 	// A bool, not a label: the snapshot's fields are identifiers, enums, timestamps
 	// and counters, and a bool is the tightest enumeration there is (ADR-0007).
@@ -191,36 +192,92 @@ func (s *Store) available(discovered Discovery) []Primitive {
 // there is nothing here this build can read, and neither is a reason to fail a
 // command over derived state the next Refresh republishes.
 func (s *Store) Read() ([]Usage, error) {
+	snapshot, err := s.Snapshot()
+	return snapshot.Primitives, err
+}
+
+// Snapshot is the persisted inventory plus what the last scan actually read.
+//
+// The two halves answer different questions, and both renderers need both: the
+// primitives are what this machine has, and the harness observations are which
+// harnesses the scan reached. A harness with no primitive rows could be one that
+// declares none or one nobody looked at, and only the second half separates them
+// (ADR-0046).
+type Snapshot struct {
+	Harnesses  []HarnessObservation
+	Primitives []Usage
+}
+
+// Snapshot reads both halves in one pass, on Read's terms: a missing file and one
+// written by another version of this format are both an empty answer rather than a
+// failed command.
+func (s *Store) Snapshot() (Snapshot, error) {
+	file, err := s.readFile()
+	if err != nil {
+		return Snapshot{}, err
+	}
+	return Snapshot{Harnesses: file.Harnesses, Primitives: file.Primitives}, nil
+}
+
+// RecordHarnesses stamps which harnesses the last scan read, leaving the primitive
+// rows exactly as they are.
+//
+// A separate write from Refresh because the two answer different questions and are
+// produced at different moments: Refresh republishes what discovery found, and this
+// republishes what the scan reached. A harness whose store is unreadable was
+// discovered and not read, and only that distinction makes "not observed" honest.
+//
+// It takes the same lock Refresh does and is read-modify-write, so neither erases
+// the other's half.
+func (s *Store) RecordHarnesses(observed []HarnessObservation) error {
+	return lockfile.WithLock(s.lockPath, func() error {
+		file, err := s.readFile()
+		if err != nil {
+			return err
+		}
+		file.Harnesses = observed
+		return s.writeFile(file)
+	})
+}
+
+// readFile is Read's decode, shared by both halves.
+func (s *Store) readFile() (primitiveFile, error) {
 	raw, err := os.ReadFile(s.path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
+		return primitiveFile{}, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("reading primitive inventory: %w", err)
+		return primitiveFile{}, fmt.Errorf("reading primitive inventory: %w", err)
 	}
 	var snapshot primitiveFile
 	if err := json.Unmarshal(raw, &snapshot); err != nil || snapshot.RefreshedAt.IsZero() {
-		return nil, errors.New("invalid primitive inventory")
+		return primitiveFile{}, errors.New("invalid primitive inventory")
 	}
 	// A snapshot this build does not write is not a corrupt one: the row grain
 	// changed, so a file from another version says nothing this build can read. It
 	// is derived, regenerable local state — the next Refresh republishes it — so it
 	// answers like a missing snapshot rather than failing `wake report`.
 	if snapshot.Version != primitiveFileVersion {
-		return nil, nil
+		return primitiveFile{}, nil
 	}
 	for _, usage := range snapshot.Primitives {
 		if !usage.valid() {
-			return nil, errors.New("invalid primitive inventory")
+			return primitiveFile{}, errors.New("invalid primitive inventory")
 		}
 	}
-	return snapshot.Primitives, nil
+	return snapshot, nil
 }
 
 type primitiveFile struct {
 	Version     int       `json:"version"`
 	RefreshedAt time.Time `json:"refreshed_at"`
-	Primitives  []Usage   `json:"primitives"`
+	// Harnesses is which harnesses the last scan read. The version stays 3: a file
+	// written before this field existed decodes with it nil, which is "no harness
+	// observation recorded", which every renderer treats as not observed — the
+	// correct answer for a scan that predates the field. Bumping would throw away
+	// every counter on upgrade to say the same thing.
+	Harnesses  []HarnessObservation `json:"harnesses,omitempty"`
+	Primitives []Usage              `json:"primitives"`
 }
 
 // derive joins the aggregate against what discovery may write. canonical is the
@@ -258,30 +315,49 @@ func derive(summary metrics.Summary, available []Primitive, canonical map[identi
 	}
 
 	index, discovered := serverIndex(available)
-	// unnamed is which server rows this pass built from invocations of a server no
-	// discovered config key accounts for, so they can still be published below.
-	// Every other kind is published from the available side alone; an MCP server is
-	// the one case where an observed row with no discovered counterpart is the
-	// answer rather than noise, because the calls provably happened.
+	// discoveredKinds is which (harness, kind) pairs discovery names at least one
+	// primitive for. It is a coarser question than discovered's — not "is this
+	// exact name known" but "does this harness offer any declaration of this kind
+	// at all" — and it exists because opencode offers none for kind subagent: no
+	// directory, no config key, nothing this build could scan (see
+	// internal/inventory/opencode.go). Gating skill and subagent kinds on it,
+	// rather than folding them into the MCP-only discovered set above, keeps this
+	// new rule from ever touching a kind that already has a real discovery source
+	// (Claude Code's subagents included) and a real reason a row can be absent
+	// from it.
+	discoveredKinds := map[kindKey]bool{}
+	for _, primitive := range available {
+		discoveredKinds[kindKey{harness: primitive.Harness, kind: primitive.Kind}] = true
+	}
+	// unnamed is which rows this pass built from invocations discovery cannot
+	// name, so they can still be published below rather than silently dropped
+	// (ADR-0046): an MCP server no discovered config key accounts for, or a skill
+	// or subagent invoked under a harness that discovers no primitive of that kind
+	// at all. Every other kind is published from the available side alone.
 	unnamed := map[identity]struct{}{}
 
 	for _, primitive := range summary.Primitives {
 		if primitive.Kind == record.KindBuiltinTool {
 			continue
 		}
-		accumulate(canonicalIdentity(canonical, identity{harness: primitive.Harness, kind: primitive.Kind, name: primitive.Name}), primitive)
-		if primitive.Kind != record.KindMCPTool || primitive.MCPServer == "" {
-			continue
-		}
-		// Deliberately not through canonicalIdentity. This roll-up is cross-kind by
-		// construction — mcp_tool events onto an mcp_server row — but no harness
-		// declaration licenses it: it is the arithmetic ADR-0039 defines, not a
-		// spelling the harness stated, so it stays its own path rather than being
-		// expressed as a canonical fold.
-		server := identity{harness: primitive.Harness, kind: record.KindMCPServer, name: serverName(index, primitive.Harness, primitive.MCPServer)}
-		accumulate(server, primitive)
-		if _, found := discovered[server]; !found {
-			unnamed[server] = struct{}{}
+		id := canonicalIdentity(canonical, identity{harness: primitive.Harness, kind: primitive.Kind, name: primitive.Name})
+		accumulate(id, primitive)
+		switch {
+		case primitive.Kind == record.KindMCPTool && primitive.MCPServer != "":
+			// Deliberately not through canonicalIdentity. This roll-up is cross-kind
+			// by construction — mcp_tool events onto an mcp_server row — but no
+			// harness declaration licenses it: it is the arithmetic ADR-0039
+			// defines, not a spelling the harness stated, so it stays its own path
+			// rather than being expressed as a canonical fold.
+			server := identity{harness: primitive.Harness, kind: record.KindMCPServer, name: serverName(index, primitive.Harness, primitive.MCPServer)}
+			accumulate(server, primitive)
+			if _, found := discovered[server]; !found {
+				unnamed[server] = struct{}{}
+			}
+		case primitive.Kind == record.KindSkill || primitive.Kind == record.KindSubagent:
+			if !discoveredKinds[kindKey{harness: primitive.Harness, kind: primitive.Kind}] {
+				unnamed[id] = struct{}{}
+			}
 		}
 	}
 
@@ -358,6 +434,15 @@ type identity struct {
 	name    record.Identifier
 }
 
+// kindKey is identity one grain coarser: a harness and a kind, with no name. It
+// answers "does this harness's discovery say anything at all about this kind",
+// which is a different question from identity's "does it name this primitive" —
+// see discoveredKinds in derive.
+type kindKey struct {
+	harness record.Identifier
+	kind    record.Kind
+}
+
 // canonicalIdentity applies the fold discovery proved for one primitive: the two
 // discovered spellings of one skill collapse onto one row, and usage recorded under
 // either spelling accumulates there.
@@ -375,8 +460,28 @@ func canonicalIdentity(canonical map[identity]identity, id identity) identity {
 	return id
 }
 
+// write republishes the primitive rows, carrying the harness observations the
+// file already holds: Refresh answers what discovery found and has nothing to say
+// about what the scan reached, so it must not erase the other half.
 func (s *Store) write(primitives []Usage) error {
-	snapshot := primitiveFile{Version: primitiveFileVersion, RefreshedAt: time.Now().UTC(), Primitives: primitives}
+	held, err := s.readFile()
+	if err != nil {
+		// A snapshot this build refuses is not worth preserving half of either
+		// (fail closed): the observations go back to unrecorded, which reads as
+		// not observed until the next scan stamps them.
+		held = primitiveFile{}
+	}
+	return s.writeFile(primitiveFile{Primitives: primitives, Harnesses: held.Harnesses})
+}
+
+// writeFile publishes one snapshot, stamping the version and the refresh instant.
+func (s *Store) writeFile(file primitiveFile) error {
+	snapshot := primitiveFile{
+		Version:     primitiveFileVersion,
+		RefreshedAt: time.Now().UTC(),
+		Harnesses:   file.Harnesses,
+		Primitives:  file.Primitives,
+	}
 	raw, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encoding primitive inventory: %w", err)
@@ -395,11 +500,21 @@ func (u Usage) valid() bool {
 	if !validKind(u.Kind) {
 		return false
 	}
-	// Unmatched only ever describes an observed MCP server: a row of another kind,
-	// or one with no invocations, cannot be unmatched, and a snapshot claiming
-	// otherwise is refused rather than repaired (fail closed, plan §3.4).
-	if u.Unmatched && (u.Kind != record.KindMCPServer || u.Invocations == 0) {
-		return false
+	// Unmatched describes an observed row discovery cannot vouch for: an MCP
+	// server, or a skill or subagent from a harness whose discovery states
+	// nothing about that kind at all (see discoveredKinds in derive). A row of
+	// any other kind, or one with no invocations, cannot be unmatched, and a
+	// snapshot claiming otherwise is refused rather than repaired (fail closed,
+	// plan §3.4).
+	if u.Unmatched {
+		switch u.Kind {
+		case record.KindMCPServer, record.KindSkill, record.KindSubagent:
+		default:
+			return false
+		}
+		if u.Invocations == 0 {
+			return false
+		}
 	}
 	if u.Unknown > u.Invocations || u.Failures > u.Invocations-u.Unknown {
 		return false

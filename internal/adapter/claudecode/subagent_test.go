@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/adapter"
 	"github.com/SupermodularAI/agents-wake/internal/metrics"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 )
@@ -75,7 +76,7 @@ func subagentRecords(records []record.Record) []record.Record {
 // three distinct names — not one named after the tool that entered them (ADR-0002's
 // invocation grain, ADR-0036 §1's precedence table).
 func TestScanNamesEachSubagentFromItsOwnTranscript(t *testing.T) {
-	records, result := twoSources(t, closedSession, Idleness{},
+	records, result := twoSources(t, closedSession, adapter.Idleness{},
 		subagentTranscript(t, "agent-1", "session-1", "explorer"),
 		subagentTranscript(t, "agent-2", "session-1", "code-reviewer"),
 		subagentTranscript(t, "agent-3", "session-1", "general-purpose"))
@@ -106,7 +107,7 @@ func TestScanNamesEachSubagentFromItsOwnTranscript(t *testing.T) {
 // AC 2: the name comes from the transcript, so an invoking call that named no
 // subagent type costs nothing. That call is 18% of real ones (26 of 144 measured).
 func TestScanNamesASubagentWhoseInvocationNamedNoType(t *testing.T) {
-	records, result := twoSources(t, closedSession, Idleness{},
+	records, result := twoSources(t, closedSession, adapter.Idleness{},
 		subagentInvocationLines("call-1", "session-1", ""),
 		subagentTranscript(t, "agent-1", "session-1", "explorer"))
 
@@ -121,7 +122,7 @@ func TestScanNamesASubagentWhoseInvocationNamedNoType(t *testing.T) {
 // AC 3: a transcript that declares no name is refused and counted, never named by
 // inference from the harness's documented default (ADR-0036 §2 and its Alternatives).
 func TestScanRefusesAndCountsASubagentTranscriptDeclaringNoName(t *testing.T) {
-	records, result := twoSources(t, closedSession, Idleness{},
+	records, result := twoSources(t, closedSession, adapter.Idleness{},
 		subagentTranscript(t, "agent-1", "session-1", ""))
 
 	if len(records) != 0 {
@@ -144,7 +145,7 @@ func TestScanRefusesAndCountsASubagentTranscriptDeclaringNoName(t *testing.T) {
 // twice — the parent's invoking tool_use/tool_result pair, and the subagent's own
 // transcript. Only the transcript is the canonical source (ADR-0036 §1-§2).
 func TestScanCountsOneSubagentRunAsOneRecord(t *testing.T) {
-	records, result := twoSources(t, closedSession, Idleness{},
+	records, result := twoSources(t, closedSession, adapter.Idleness{},
 		subagentInvocationLines("call-1", "session-1", "explorer"),
 		subagentTranscript(t, "agent-1", "session-1", "explorer"))
 
@@ -170,7 +171,7 @@ func TestScanCountsOneSubagentRunAsOneRecord(t *testing.T) {
 // ADR-0002's invocation grain: two runs of one subagent are two rows that aggregate
 // to one primitive, so nothing is lost before aggregation collapses them.
 func TestScanDerivesTwoRecordsForTwoRunsOfOneSubagent(t *testing.T) {
-	records, result := twoSources(t, closedSession, Idleness{},
+	records, result := twoSources(t, closedSession, adapter.Idleness{},
 		subagentTranscript(t, "agent-1", "session-1", "explorer"),
 		subagentTranscript(t, "agent-2", "session-1", "explorer"))
 
@@ -214,8 +215,8 @@ func TestScanCountsASubagentRecordAsAToolCall(t *testing.T) {
 func TestScanDefersASubagentUntilItsSessionCloses(t *testing.T) {
 	source := subagentTranscript(t, "agent-1", "session-1", "explorer")
 
-	open := Staleness{Timeout: time.Hour, Now: callInstant.Add(30 * time.Minute)}
-	records, result := twoSources(t, open, Idleness{}, source)
+	open := adapter.Staleness{Timeout: time.Hour, Now: callInstant.Add(30 * time.Minute)}
+	records, result := twoSources(t, open, adapter.Idleness{}, source)
 	if len(records) != 0 {
 		t.Fatalf("records = %+v, want none while the session is open", records)
 	}
@@ -223,7 +224,7 @@ func TestScanDefersASubagentUntilItsSessionCloses(t *testing.T) {
 		t.Errorf("result = %+v, want one open session, nothing pending and no refusal", result)
 	}
 
-	closed, _ := twoSources(t, closedSession, Idleness{}, source)
+	closed, _ := twoSources(t, closedSession, adapter.Idleness{}, source)
 	if len(closed) != 1 {
 		t.Fatalf("records = %+v, want the record once the session closed", closed)
 	}
@@ -233,7 +234,7 @@ func TestScanDefersASubagentUntilItsSessionCloses(t *testing.T) {
 // ones, so a single fold would refuse a subagent whose name arrives three entries
 // later — permanently, and at a far higher rate than ADR-0036's measured 2%.
 func TestScanDoesNotRefuseASubagentWhoseNameArrivesLater(t *testing.T) {
-	records, result := twoSources(t, closedSession, Idleness{},
+	records, result := twoSources(t, closedSession, adapter.Idleness{},
 		subagentTranscript(t, "agent-1", "session-1", "explorer"))
 
 	if len(records) != 1 || records[0].Name != "explorer" {
@@ -252,8 +253,8 @@ func TestScanDerivesTheSameSubagentRecordInEitherSourceOrder(t *testing.T) {
 	second := subagentTranscript(t, "agent-2", "session-1", "code-reviewer")
 	third := subagentTranscript(t, "agent-3", "session-1", "general-purpose")
 
-	forward, _ := twoSources(t, closedSession, Idleness{}, first, second, third)
-	reverse, _ := twoSources(t, closedSession, Idleness{}, third, second, first)
+	forward, _ := twoSources(t, closedSession, adapter.Idleness{}, first, second, third)
+	reverse, _ := twoSources(t, closedSession, adapter.Idleness{}, third, second, first)
 
 	if len(forward) != len(reverse) {
 		t.Fatalf("record counts differ: %d forward, %d reversed", len(forward), len(reverse))
@@ -301,7 +302,7 @@ func TestScanDerivesTheSameSubagentRecordOnReingest(t *testing.T) {
 // identity ambiguous, so nothing is derived from it and nothing is reported lost.
 func TestScanSkipsASubagentTranscriptWhoseAgentIDIsOutsideTheTokenDomain(t *testing.T) {
 	for _, value := range hostileValues {
-		records, result := twoSources(t, closedSession, Idleness{},
+		records, result := twoSources(t, closedSession, adapter.Idleness{},
 			subagentTranscript(t, value, "session-1", "explorer"))
 
 		if len(records) != 0 || result.RefusedSubagentRuns != 0 {
@@ -315,7 +316,7 @@ func TestScanSkipsASubagentTranscriptWhoseAgentIDIsOutsideTheTokenDomain(t *test
 // operation (BC-7, ADR-0019 §1). An unconsented directory is outside collection
 // rather than lost from it, so it is neither a record nor a refusal.
 func TestScanSkipsASubagentTranscriptInAnUnconsentedRepository(t *testing.T) {
-	scan := NewScan(deny, names, installedPrimitives, closedSession, Idleness{})
+	scan := NewScan(deny, names, installedPrimitives, closedSession, adapter.Idleness{})
 	if _, err := scan.Read(strings.NewReader(subagentTranscript(t, "agent-1", "session-1", "explorer"))); err != nil {
 		t.Fatalf("Scan.Read() error = %v", err)
 	}
@@ -336,7 +337,7 @@ func TestScanSkipsASubagentTranscriptInAnUnconsentedRepository(t *testing.T) {
 // collection, and the count is what stops the loss being silent (ADR-0036 §2).
 func TestScanRefusesASubagentTranscriptWithAHostileName(t *testing.T) {
 	for _, value := range hostileValues {
-		records, result := twoSources(t, closedSession, Idleness{},
+		records, result := twoSources(t, closedSession, adapter.Idleness{},
 			subagentTranscript(t, "agent-1", "session-1", value))
 
 		if len(records) != 0 {
@@ -351,7 +352,7 @@ func TestScanRefusesASubagentTranscriptWithAHostileName(t *testing.T) {
 // A subagent can be directory-scoped, and only Namer may digest a scope: the record
 // carries the keyed digest and never the path fragment behind it (ADR-0020).
 func TestScanDerivesADirectoryScopedSubagentName(t *testing.T) {
-	records, result := twoSources(t, closedSession, Idleness{},
+	records, result := twoSources(t, closedSession, adapter.Idleness{},
 		subagentTranscript(t, "agent-1", "session-1", "apps/web:reviewer"))
 
 	if len(records) != 1 {
@@ -373,7 +374,7 @@ func TestScanDerivesADirectoryScopedSubagentName(t *testing.T) {
 // A Namer with no key cannot digest a scope, so the run is refused rather than named
 // with an unkeyed digest of a repository path fragment (ADR-0020, fail closed).
 func TestScanRefusesAScopedSubagentNameWithoutAScopeKey(t *testing.T) {
-	scan := NewScan(resolver, record.Namer{}, installedPrimitives, closedSession, Idleness{})
+	scan := NewScan(resolver, record.Namer{}, installedPrimitives, closedSession, adapter.Idleness{})
 	if _, err := scan.Read(strings.NewReader(subagentTranscript(t, "agent-1", "session-1", "apps/web:reviewer"))); err != nil {
 		t.Fatalf("Scan.Read() error = %v", err)
 	}
@@ -490,7 +491,7 @@ func subagentTranscriptWithMarker(t *testing.T, agentID, session, name string, m
 // error. The signal is read from the canonical source itself (ADR-0036 §2 as
 // amended), never by correlating with the invoking call (ADR-0036 §5).
 func TestScanDerivesErrorForASubagentWhoseTranscriptEndsInAnAPIError(t *testing.T) {
-	records, result := twoSources(t, closedSession, Idleness{},
+	records, result := twoSources(t, closedSession, adapter.Idleness{},
 		subagentTranscriptWithMarker(t, "agent-1", "session-1", "explorer", 2))
 
 	subagents := subagentRecords(records)
@@ -514,7 +515,7 @@ func TestScanDerivesErrorForASubagentWhoseTranscriptEndsInAnAPIError(t *testing.
 // survived an API error did not fail, and deriving error from a marker anywhere would
 // invent a failure the user cannot reproduce (ADR-0005, ADR-0015's terminal rule).
 func TestScanKeepsNilForASubagentThatRecoveredAfterAnAPIError(t *testing.T) {
-	records, result := twoSources(t, closedSession, Idleness{},
+	records, result := twoSources(t, closedSession, adapter.Idleness{},
 		subagentTranscriptWithMarker(t, "agent-1", "session-1", "explorer", 1))
 
 	subagents := subagentRecords(records)
@@ -547,7 +548,7 @@ func TestScanNeverDerivesOKForASubagent(t *testing.T) {
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			records, result := twoSources(t, closedSession, Idleness{}, test.sources...)
+			records, result := twoSources(t, closedSession, adapter.Idleness{}, test.sources...)
 			if len(subagentRecords(records)) != 1 {
 				t.Fatalf("subagent records = %+v, want exactly one (result = %+v)", subagentRecords(records), result)
 			}
@@ -572,8 +573,8 @@ func TestScanDerivesTheSameSubagentOutcomeInEitherEntryOrder(t *testing.T) {
 	slices.Reverse(lines)
 	reversed := strings.Join(lines, "\n")
 
-	first, _ := twoSources(t, closedSession, Idleness{}, forward)
-	second, _ := twoSources(t, closedSession, Idleness{}, reversed)
+	first, _ := twoSources(t, closedSession, adapter.Idleness{}, forward)
+	second, _ := twoSources(t, closedSession, adapter.Idleness{}, reversed)
 
 	forwardRecords, reversedRecords := subagentRecords(first), subagentRecords(second)
 	if len(forwardRecords) != 1 || len(reversedRecords) != 1 {
@@ -595,7 +596,7 @@ func TestScanDerivesTheSameSubagentOutcomeInEitherEntryOrder(t *testing.T) {
 // pair and the subagent's own transcript — and only the transcript is canonical
 // (ADR-0036 §1-§2, whose anti-duplication rule the amendment leaves untouched).
 func TestScanCountsOneFailedSubagentRunAsOneRecord(t *testing.T) {
-	records, result := twoSources(t, closedSession, Idleness{},
+	records, result := twoSources(t, closedSession, adapter.Idleness{},
 		subagentInvocationLines("call-1", "session-1", "explorer"),
 		subagentTranscriptWithMarker(t, "agent-1", "session-1", "explorer", 2))
 

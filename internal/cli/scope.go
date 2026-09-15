@@ -49,10 +49,26 @@ func resolveDiscoveryScope(cmd *cobra.Command, paths config.Paths) (inventory.Sc
 // filters"). resolveDiscoveryScope alone cannot do this: its Scope names at
 // most one root, cwd's, which is right for the notice it prints but wrong for
 // what the dashboard and report are meant to aggregate.
+//
+// Every harness, not only Claude Code. This discovery is what report and serve
+// republish the snapshot from, so a Claude-Code-only one here silently drops the
+// other harness's declared primitives: its MCP servers would render as unmatched
+// on every row — invocations of a server nothing in the inventory accounts for —
+// and a server it declares but never invokes would vanish from the unused list
+// entirely, which is the one list that exists to name unused things.
 func discoverAllRepos(paths config.Paths, claudeDir string) (inventory.Discovery, error) {
 	roots, names, err := activation.AllRepoRoots(paths)
 	if err != nil {
 		return inventory.Discovery{}, err
 	}
-	return inventory.ClaudeCodeAcrossRepos(claudeDir, roots, names), nil
+	// A config file this build cannot resolve leaves the path empty, which reads as
+	// "this machine declares none" — not observed, never zero.
+	openCodeConfig, configErr := config.OpenCodeConfigFile()
+	if configErr != nil {
+		openCodeConfig = ""
+	}
+	return inventory.Merge(
+		inventory.ClaudeCodeAcrossRepos(claudeDir, roots, names),
+		inventory.OpenCodeInScope(openCodeConfig, names),
+	), nil
 }

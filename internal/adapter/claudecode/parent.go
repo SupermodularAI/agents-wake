@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"slices"
 
+	"github.com/SupermodularAI/agents-wake/internal/adapter"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 )
 
@@ -177,7 +178,7 @@ func (p parentage) parentOf(child deferredChild) (record.Hash, bool) {
 // source it came from — the distinction doctor's Skipped counter rests on for a source
 // whose only contribution was a deferred child.
 func resolveDeferredChildren(deferred []deferredChild, sessions *SessionState,
-	stale Staleness, targets parentage) []derivation {
+	stale adapter.Staleness, targets parentage) []derivation {
 	type resolvedChild struct {
 		event  record.Record
 		source int

@@ -1,0 +1,200 @@
+// Package opencode derives safe terminal records from opencode's own store.
+//
+// It consumes value rows and nothing else: the caller opens the store, pages it,
+// and hands this package rows whose fields are already the allowlist (ADR-0019
+// §1). Nothing here touches the filesystem, a database handle, config or the
+// inventory — the consent answer, the configured MCP servers and both thresholds
+// all arrive as data, so no reader can widen what is collected.
+package opencode
+
+import (
+	"time"
+
+	"github.com/SupermodularAI/agents-wake/internal/adapter"
+	"github.com/SupermodularAI/agents-wake/internal/record"
+)
+
+// harness is the slug every record this package derives carries, and the
+// namespace ADR-0004 derives every id inside.
+const harness = record.Identifier("opencode")
+
+// No call separator is declared here, and that is worth stating. opencode's
+// canonical source event is a single primary key, so an invocation's id shape is
+// a bare part.id with no composed separator at all — structurally disjoint from
+// every Claude Code id shape, and namespaced by harness inside DeriveEventID in
+// any case. The two composed ids this package builds are both in session.go, and
+// both hang off a session id: the session grain's, delimited by \x1e, and a
+// subagent invocation's, delimited by \x1d. A tool invocation's id stays a bare
+// part.id carrying no separator at all, so the three shapes stay structurally
+// disjoint.
+
+// Harness is the slug every record this reader derives carries. Exported so a
+// caller folding per-harness diagnostics can name it without holding a Scan.
+func Harness() record.Identifier { return harness }
+
+// init declares this build's opencode reader to the registry, so nothing has to
+// hardcode a list of the harnesses this binary reads (ADR-0013).
+func init() { adapter.Register(harness) }
+
+// Result is one walk's derived records plus its collection health counters.
+type Result struct {
+	Records []record.Record
+	// Pending is the count of tool parts this walk is holding because they have no
+	// terminal status yet (ADR-0015). It is a number that is not final rather than
+	// collection that was lost.
+	Pending int
+	// Interrupted is the count of parts the staleness rule gave up on, each now in
+	// Records with outcome interrupted.
+	Interrupted int
+	// Refused is the count of parts a validated field refused — a tool name the
+	// name grammar will not admit, a session id outside the token domain, a part
+	// whose session this walk never saw. Lost collection, counted so doctor can
+	// say so (plan §3.3, §12). The refused value is never carried, only the count.
+	Refused int
+	// UnknownOutcomes is the count of parts carrying a state.status this build does
+	// not recognise. It is the format-drift detector for this harness: blindness,
+	// not a clean zero, and doctor's per-harness state word follows it.
+	UnknownOutcomes int
+	// SkippedSources is the count of sessions this walk read that yielded no record
+	// at all — most often because their directory belongs to no consented
+	// repository. An honest zero, never a failure.
+	SkippedSources int
+	// OutOfOrderPairs is the count of parts whose end instant precedes their start.
+	// The record is written with a nil duration rather than a clamped 0: a clamped
+	// 0 would be a measurement, and nothing measured it (ADR-0027).
+	OutOfOrderPairs int
+}
+
+// Common is the counter vocabulary this reader shares with every other
+// (adapter.Result). UnknownOutcomes stays on this type: it is the format-drift
+// signal for a harness whose statuses are a closed set, and the first adapter has
+// no such set to drift.
+func (r Result) Common() adapter.Result {
+	return adapter.Result{
+		Records:         r.Records,
+		Pending:         r.Pending,
+		Interrupted:     r.Interrupted,
+		Refused:         r.Refused,
+		SkippedSources:  r.SkippedSources,
+		OutOfOrderPairs: r.OutOfOrderPairs,
+	}
+}
+
+// derivation is one attempt at a record: what it produced, and whether a
+// validated field refused its source value. A refusal carries the fact and never
+// the value (plan §4.2).
+type derivation struct {
+	record  record.Record
+	refused bool
+}
+
+// invocation derives the record for one terminal tool part.
+//
+// KindSkill is claimed here, from the skill part's own declared name. ADR-0007's
+// Consequences license reading free text in order to derive a name, and plan §3.3
+// repeats it: reading is not persisting, and what is persisted is a value the name
+// domain admits or nothing at all.
+//
+// KindSubagent is claimed by this package but not here. Its canonical source event
+// is the child session row — the harness's own record of the run — so it is
+// derived in session.go, and the invoking tool='task' part produces no record at
+// all (ADR-0036 §1-§2).
+//
+// Deliberately absent, and stated rather than implied: ViaSkill, ViaAgent, Model,
+// Effort, Entrypoint and Package. ParentEventID is absent across this whole
+// adapter, which is a pre-existing gap owned by the adapter's own ticket rather
+// than anything this derivation narrows or widens. Each is an absence observed and
+// reported as such, never a zero (ADR-0046).
+func invocation(part ToolPart, from Session, repo record.Hash, servers Servers,
+	names record.Namer, outcome record.Outcome, duration *int64) derivation {
+	derived := record.Record{
+		SchemaVersion: record.SchemaVersion,
+		EventID:       record.DeriveEventID(harness, record.Identifier(part.ID)),
+		Timestamp:     record.NormalizedTimestamp(time.UnixMilli(part.StartMS).UTC()),
+		Harness:       harness,
+		Repo:          repo,
+		// A part hangs off an assistant message: opencode records no user-issued
+		// tool call, so there is no second case to distinguish here.
+		Invoker:    record.InvokerModel,
+		Outcome:    &outcome,
+		DurationMS: duration,
+	}
+	// The version is an optional field, so a value outside its domain leaves it
+	// empty rather than refusing an invocation that really happened.
+	if version, err := record.BoundedVersion(from.Version); err == nil {
+		derived.HarnessVersion = version
+	}
+	sessionID, err := record.BoundedToken(part.SessionID)
+	if err != nil {
+		return derivation{refused: true}
+	}
+	derived.SessionID = sessionID
+
+	if part.Tool == toolSkill {
+		// opencode's own spelling fixes the kind (ADR-0041), and the skill's own
+		// declared name fixes its identity. DerivedName rather than
+		// BoundedIdentifier: the name domain admits ':', so a source value already
+		// wearing the keyed scope digest's shape would otherwise be persisted
+		// verbatim and merge a crafted name onto a real scope (ADR-0020).
+		//
+		// A name the grammar refuses refuses the record — the kind is known and the
+		// identity is not, and a skill collected as a builtin named "skill" is the
+		// grain violation ADR-0002 forbids. Returning here is also what keeps the
+		// MCP-server branch below from reclassifying a skill.
+		name, nameErr := names.DerivedName(part.SkillName)
+		if nameErr != nil {
+			return derivation{refused: true}
+		}
+		derived.Kind, derived.Name = record.KindSkill, name
+		return finish(derived)
+	}
+
+	name, err := record.BoundedIdentifier(part.Tool)
+	if err != nil {
+		return derivation{refused: true}
+	}
+	derived.Name = name
+
+	derived.Kind = record.KindBuiltinTool
+	if server, matched := servers.Match(part.Tool); matched {
+		derived.Kind = record.KindMCPTool
+		derived.MCPServer = server
+	}
+	return finish(derived)
+}
+
+// toolDuration is the exact interval between the two instants the harness itself
+// recorded, or nil where there is none to state.
+//
+// A missing end instant and an end that precedes its start both yield nil: the
+// first measured nothing, and the second measured something impossible. Neither
+// becomes 0, which on this field means a call that returned inside the source's
+// resolution (ADR-0027).
+func toolDuration(part ToolPart) (*int64, bool) {
+	if !part.HasEnd {
+		return nil, false
+	}
+	elapsed := part.EndMS - part.StartMS
+	if elapsed < 0 {
+		return nil, true
+	}
+	return &elapsed, false
+}
+
+// finish is the fail-closed gate every derived record passes through: a record
+// this package would not itself accept is dropped and counted, never written and
+// never repaired (ADR-0007, plan §3.4).
+//
+// It is also where a timestamp outside the representable range is caught. A
+// hostile or corrupt instant can put a record's time outside the year range JSON
+// can encode, and a record that cannot be marshalled is one the store would drop
+// later, further from the counter that can explain it.
+func finish(derived record.Record) derivation {
+	if year := derived.Timestamp.Year(); year < 1 || year > 9999 {
+		return derivation{refused: true}
+	}
+	if err := record.Validate(derived); err != nil {
+		return derivation{refused: true}
+	}
+	return derivation{record: derived}
+}

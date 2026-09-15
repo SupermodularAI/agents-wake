@@ -20,8 +20,8 @@
 </head>
 <body><main class="shell">
   <header class="topbar"><div class="brand"><i class="brand-mark"></i>wake <span>local dashboard</span></div><span class="local">127.0.0.1 only</span></header>
-  <section class="intro"><div><h1>Agent primitives, without the guesswork.</h1><p class="subtitle">Derived from Wake's local Claude Code event store.</p></div><p class="updated">{{.Updated}}</p></section>
-   <p class="note"><strong>Usage observed:</strong> Claude Code. <strong>Not observed:</strong> OpenCode, Codex, Cursor and pi are never represented as zero.</p>
+  <section class="intro"><div><h1>Agent primitives, without the guesswork.</h1><p class="subtitle">Derived from Wake's local event store.</p></div><p class="updated">{{.Updated}}</p></section>
+   <p class="note"><strong>Usage observed:</strong> {{.Observed}}. <strong>Not observed:</strong> {{.Unobserved}} &mdash; never represented as zero.</p>
    {{if .Empty}}<section class="section"><div class="empty">No primitive inventory or terminal events yet. Run <code>wake ingest</code> after using a consented harness, then refresh this page.</div></section>{{else}}
   <section class="section"><div class="section-heading"><h2>Overview</h2><p class="section-note">Health rates exclude unknown outcomes.</p></div><div class="stats">
     <article class="stat"><p class="eyebrow">Terminal invocations</p><p class="stat-value">{{.Invocations}}</p><p class="stat-detail">stored local events</p></article>

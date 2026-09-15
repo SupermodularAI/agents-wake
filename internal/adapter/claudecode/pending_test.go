@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/adapter"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 )
 
@@ -12,7 +13,7 @@ import (
 // produced: the earlier anchor wins, the earlier declaration wins, and the
 // session, repo and span follow the anchor that won.
 func TestRestorePendingFoldsWithFreshEntries(t *testing.T) {
-	scan := NewScan(nil, record.Namer{}, Installed{}, Staleness{}, Idleness{})
+	scan := NewScan(nil, record.Namer{}, Installed{}, adapter.Staleness{}, adapter.Idleness{})
 	carried := PendingSubagentRun{
 		AgentID:    "agent-1",
 		SessionID:  "session-1",
@@ -44,7 +45,7 @@ func TestRestorePendingFoldsWithFreshEntries(t *testing.T) {
 // to was never observed here, so Close cannot conclude it ended and the child
 // stays carried.
 func TestRestorePendingChildRoundTrips(t *testing.T) {
-	scan := NewScan(nil, record.Namer{}, Installed{}, Staleness{}, Idleness{})
+	scan := NewScan(nil, record.Namer{}, Installed{}, adapter.Staleness{}, adapter.Idleness{})
 	child := PendingChild{
 		Event:   record.Record{EventID: "event-1", SessionID: "session-1", Kind: record.KindBuiltinTool, Name: "Bash"},
 		AgentID: "agent-1",

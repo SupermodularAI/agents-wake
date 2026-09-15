@@ -128,10 +128,16 @@ type Report struct {
 // would make one historical read failure mark every later clean scan as dirty,
 // destroying the distinction this package exists to draw.
 type Scan struct {
-	At          time.Time `json:"at"`
-	Transcripts int       `json:"transcripts"`
-	Unreadable  int       `json:"unreadable"`
-	ParseErrors int       `json:"parse_errors"`
+	At time.Time `json:"at"`
+	// ClaudeCode and OpenCode are the per-harness halves of this scan, and the
+	// counters around them stay machine-wide: six tests and one state machine read
+	// those. Two named fields rather than a list, because a list would have to
+	// carry a harness name and this file holds no string (see HarnessScan).
+	ClaudeCode  HarnessScan `json:"claude_code"`
+	OpenCode    HarnessScan `json:"opencode"`
+	Transcripts int         `json:"transcripts"`
+	Unreadable  int         `json:"unreadable"`
+	ParseErrors int         `json:"parse_errors"`
 	// Skipped counts transcripts a scan read successfully that yielded no terminal
 	// event. It is an honest zero and never a failure — and it summed three unrelated
 	// populations, which is why the six counters below break it down: a transcript from
@@ -386,6 +392,43 @@ type Scan struct {
 	// It is stamped by the one function that already carries the scope
 	// (activation.scanWithBoundary) and is never derived from the counters.
 	Scope Scope `json:"scope"`
+}
+
+// HarnessScan is one harness's half of a scan's diagnostics.
+//
+// It carries no harness name: the name is the field it hangs off, so this file
+// still holds no string at all (ADR-0019 §7, ADR-0007 applied to diagnostics).
+// Two named fields on Scan rather than a list, for that reason — a list would have
+// to carry the name as data, which is exactly the field this package forbids.
+//
+// Every counter above it on Scan keeps the machine-wide meaning it has always had.
+// These are what doctor's per-harness lines read, and they are per harness because
+// adapters fail independently and soft (plan §12): an unreadable opencode store
+// must not make Claude Code look broken.
+type HarnessScan struct {
+	// Observed is whether this scan read this harness's storage at all. False is
+	// "not observed", which is never "zero" (ADR-0046) — a harness this build has
+	// no reader for, one the scan.harnesses key excludes, and one whose store is
+	// absent all report it.
+	Observed bool
+	// Sources is how many units of that storage the walk read: transcripts for
+	// Claude Code, tool part rows for opencode.
+	Sources          int
+	Unreadable       int
+	ParseErrors      int
+	RefusedCalls     int
+	PendingCalls     int
+	InterruptedCalls int
+	// UnknownOutcomes is how many invocations carried a status this build does not
+	// recognise. It is deliberately in the "collects nothing" arm: a harness that
+	// renamed its statuses stops collection while every other counter still looks
+	// healthy, and this is the only line that would say so (plan §3.3, §12).
+	UnknownOutcomes int
+	// Skipped is how many of that harness's sources yielded nothing — an honest
+	// zero, never a failure.
+	Skipped         int
+	OutOfOrderPairs int
+	EventsWritten   int
 }
 
 // Scope is which of the two collection scopes a scan ran under, and it is exactly

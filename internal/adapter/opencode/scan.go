@@ -1,0 +1,211 @@
+package opencode
+
+import (
+	"cmp"
+	"slices"
+	"time"
+
+	"github.com/SupermodularAI/agents-wake/internal/adapter"
+	"github.com/SupermodularAI/agents-wake/internal/record"
+)
+
+// Scan is one opencode collection pass. Sessions are registered first, then parts
+// are offered in any order; Close resolves the walk once.
+//
+// The carry is empty by construction, and that is a decision rather than an
+// omission. ADR-0049's pending carry is load-bearing for the first adapter
+// because the entries behind it are declined rather than re-derived. This reader
+// declines none: its caller re-reads the whole part table on every scan with no
+// persisted cursor, so a part buffered by one scan is re-read and re-judged by the
+// next. There is therefore nothing to carry, no pending section to add and no
+// pending version to bump. That holds only while the reader has no cursor — a
+// future cursor would make the carry due, and this comment is where that is
+// recorded.
+type Scan struct {
+	resolve adapter.Resolver
+	servers Servers
+	names   record.Namer
+	stale   adapter.Staleness
+	idle    adapter.Idleness
+
+	sessions map[string]Session
+	// buffered holds every part with no terminal status yet, in arrival order.
+	// ADR-0015 forbids emitting them and forbids advancing a cursor past them.
+	buffered []ToolPart
+	// contributed names the sessions that produced at least one record, so Close
+	// can report how many yielded nothing.
+	contributed map[string]struct{}
+
+	records []record.Record
+	result  Result
+}
+
+// The reader satisfies the contract every reader owes its caller (ADR-0013). The
+// assertion is here rather than in a test so a change to either side stops the
+// build rather than one package's tests.
+var _ adapter.Scan = (*Scan)(nil)
+
+// NewScan starts one walk. Every capability it needs about the machine — the
+// consent answer, the configured servers, the name key, both thresholds — arrives
+// here as a value, because derivation may not read the filesystem (ADR-0019 §1).
+//
+// The Namer holds the key a directory-scoped primitive name's scope is digested
+// under. It arrives as data for the same reason the rest does, and its zero value
+// refuses every scoped reference rather than digesting it unkeyed: a plain digest
+// of a path fragment is recoverable from a wordlist, so a caller that could not
+// resolve the key must collect less, never more (ADR-0020, fail closed).
+func NewScan(resolve adapter.Resolver, names record.Namer, servers Servers, stale adapter.Staleness, idle adapter.Idleness) *Scan {
+	return &Scan{
+		resolve:     resolve,
+		servers:     servers,
+		names:       names,
+		stale:       stale,
+		idle:        idle,
+		sessions:    map[string]Session{},
+		contributed: map[string]struct{}{},
+	}
+}
+
+// Harness is the slug every record this scan derives carries, so a caller folding
+// per-harness diagnostics never has to hold it beside the reader.
+func (s *Scan) Harness() record.Identifier { return harness }
+
+// Session registers one session's directory, version and totals.
+func (s *Scan) Session(registered Session) { s.sessions[registered.ID] = registered }
+
+// Part offers one tool part. A part whose status is terminal derives its record
+// immediately; one that is not is buffered (ADR-0015) and resolved by Close.
+//
+// A part whose session was never registered derives nothing and is counted as
+// refused: its directory is unknown, so its consent is unknown, and an unknown
+// consent is a refusal rather than an assumption (fail closed).
+//
+// A part the harness recorded no start instant for is refused on the same terms,
+// and before anything else reads it. Its instant is what the record is stamped
+// with, what consent is judged at, and what a duration is measured from, so
+// substituting one would put a number nothing measured into all three — and a
+// substituted epoch is a valid-looking 1970 record that no counter would mark,
+// which is inferring structure and counting on (plan §3.3, §12). It is the answer
+// the first adapter already gives an entry with no timestamp. Terminal or not:
+// buffering it would only defer the same substitution to Close.
+//
+// The invoking tool='task' part is skipped before either refusal, and skipping is
+// not refusing: see the gate itself.
+func (s *Scan) Part(part ToolPart) {
+	if part.Tool == toolTask {
+		// Skipped, not refused, and before every other gate: this part was never
+		// Wake's to collect, so counting it as lost collection would report a
+		// permanent fault for a rule working as designed. The subagent's own
+		// session row is the canonical source event and this part is the same
+		// logical event seen from the other side (ADR-0036 §2), so it produces no
+		// record of its own — not an unnamed builtin, and not a refusal.
+		return
+	}
+	if !part.HasStart {
+		s.result.Refused++
+		return
+	}
+	from, registered := s.sessions[part.SessionID]
+	if !registered {
+		s.result.Refused++
+		return
+	}
+	outcome, terminal, known := statusOutcome(part.Status)
+	if !known {
+		s.result.UnknownOutcomes++
+	}
+	if !terminal {
+		s.buffered = append(s.buffered, part)
+		return
+	}
+	duration, outOfOrder := toolDuration(part)
+	if outOfOrder {
+		s.result.OutOfOrderPairs++
+	}
+	s.emit(part, from, outcome, duration)
+}
+
+// Buffered is how many parts this scan is holding unterminated. It is the count
+// ADR-0015 forbids emitting and forbids advancing a cursor past.
+func (s *Scan) Buffered() int { return len(s.buffered) }
+
+// Close resolves the walk once: the buffered parts the staleness rule gives up
+// on, and one session_end per finished session.
+//
+// Order is fixed rather than incidental — parts in arrival order, then the
+// interrupted ones by part id, then the session grain by session id. Two scans
+// over the same rows have to produce byte-identical store contents (ADR-0004),
+// and map iteration order is randomised.
+func (s *Scan) Close() Result {
+	s.resolveStaleParts()
+	s.resolveFinishedSessions()
+
+	s.result.Records = s.records
+	for id := range s.sessions {
+		if _, yielded := s.contributed[id]; !yielded {
+			s.result.SkippedSources++
+		}
+	}
+	return s.result
+}
+
+// resolveStaleParts emits the buffered parts whose session has gone quiet past the
+// staleness threshold, through the same derivation the completed record would have
+// used — so the id it carries is the id a later result would derive, and the
+// duplicate is deduplicated away rather than upserted (ADR-0004, ADR-0015).
+//
+// A part with an unknown status is never given up on this way. An unrecognised
+// status may be terminal, so writing "interrupted" for it would be a permanent
+// wrong record; it stays buffered and is counted as blindness instead.
+func (s *Scan) resolveStaleParts() {
+	stale := make([]ToolPart, 0, len(s.buffered))
+	for _, part := range s.buffered {
+		if _, _, known := statusOutcome(part.Status); !known {
+			continue
+		}
+		from := s.sessions[part.SessionID]
+		// Strictly greater, matching the first adapter's rule: a session silent for
+		// exactly the threshold is still open, which errs toward not writing a
+		// record that cannot be taken back. A session with no last-activity instant
+		// is never silent for long enough: "no instant" is not a measurement of
+		// silence, and interrupted is a verdict that cannot be taken back either.
+		if s.stale.Enabled() && from.HasUpdated &&
+			s.stale.Now.Sub(time.UnixMilli(from.UpdatedMS)) > s.stale.Timeout {
+			stale = append(stale, part)
+			continue
+		}
+		s.result.Pending++
+	}
+	slices.SortFunc(stale, func(a, b ToolPart) int { return cmp.Compare(a.ID, b.ID) })
+	for _, part := range stale {
+		from := s.sessions[part.SessionID]
+		before := len(s.records)
+		s.emit(part, from, record.OutcomeInterrupted, nil)
+		if len(s.records) > before {
+			s.result.Interrupted++
+		}
+	}
+}
+
+// emit derives one invocation record and files it, or files what the attempt cost.
+// Consent is asked once per record, with the record's own instant, so the caller's
+// two-dimensional answer decides every row (ADR-0025).
+func (s *Scan) emit(part ToolPart, from Session, outcome record.Outcome, duration *int64) {
+	at := time.UnixMilli(part.StartMS).UTC()
+	repo, consented := s.resolve(from.Directory, at)
+	if !consented {
+		return
+	}
+	derived := invocation(part, from, repo, s.servers, s.names, outcome, duration)
+	if derived.refused {
+		s.result.Refused++
+		return
+	}
+	s.file(from.ID, derived.record)
+}
+
+// file appends one derived record and credits the session that produced it.
+func (s *Scan) file(sessionID string, derived record.Record) {
+	s.records = append(s.records, derived)
+	s.contributed[sessionID] = struct{}{}
+}

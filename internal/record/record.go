@@ -53,7 +53,15 @@ import (
 // a secret and cannot carry a normalised guess either. It is a separate number from 7
 // rather than a second meaning for it: 7 shipped on main carrying only the rename, and
 // a version whose records two builds disagree about is the one thing this constant
-// exists to prevent.
+// exists to prevent. Version 9 adds no field either: it changes how an opencode
+// subagent invocation's event_id is derived — from the child session's own id, the
+// row opencode itself writes for the run, rather than from the invoking task tool
+// part (ADR-0036 §1-§2) — which ADR-0004 classes as a schema change for the reason
+// 4 and 5 state, because a stored id no build can re-derive is a record no rescan
+// can deduplicate. The invoking part now produces no record at all, so the
+// builtin_tool rows named "task" that an earlier build of this reader wrote have no
+// derivation left to deduplicate them away; the bump is what routes those spools to
+// the rebuild arm instead of leaving them as permanent phantoms.
 //
 // "Refused on read" is only half of that, and the half on its own is a silent
 // shrink: every consumer reads the spool through store.Entries, so a spool nobody
@@ -66,7 +74,7 @@ import (
 // delivery watermark, which stamps this number and starts over when it changes
 // (internal/remote). What a rebuild cannot recover is a period the harness has since
 // pruned: the store was the only surviving copy of it, and ADR-0014 accepts that.
-const SchemaVersion uint = 8
+const SchemaVersion uint = 9
 
 // ErrUnsupportedVersion is the one refusal from Validate a caller is meant to
 // recognise. Every other refusal means the record was never valid; this one means

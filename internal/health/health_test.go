@@ -260,7 +260,7 @@ func TestEveryCounterFieldIsACountOrATime(t *testing.T) {
 	// of something is not that something.
 	forbidden := []string{"path", "root", "label", "dir", "cwd", "name", "line", "message", "reason"}
 
-	for _, sample := range []any{Report{}, Scan{}, Hooks{}} {
+	for _, sample := range []any{Report{}, Scan{}, Hooks{}, HarnessScan{}} {
 		typ := reflect.TypeOf(sample)
 		t.Run(typ.Name(), func(t *testing.T) {
 			for i := range typ.NumField() {
@@ -275,7 +275,7 @@ func TestEveryCounterFieldIsACountOrATime(t *testing.T) {
 				// does not count.
 				case reflect.Bool:
 				case reflect.Struct:
-					if name := field.Type.Name(); name != "Time" && name != "Scan" && name != "Hooks" {
+					if name := field.Type.Name(); name != "Time" && name != "Scan" && name != "Hooks" && name != "HarnessScan" {
 						t.Errorf("field %s is a %s; only a time or another counter section is allowed", field.Name, name)
 					}
 				default:
@@ -437,5 +437,56 @@ func TestAScanCarriesItsSkippedBreakdown(t *testing.T) {
 	}
 	if got.Scan != want {
 		t.Errorf("Scan round-tripped as %+v, want %+v", got.Scan, want)
+	}
+}
+
+// A report written before the per-harness sections existed decodes with both of
+// them zero-valued, which is Observed false, which renders "not observed" — the
+// correct answer for a scan that predates them. That is why reportVersion is not
+// bumped: bumping would discard every counter on upgrade to say the same thing.
+func TestAReportWithoutHarnessSectionsReadsAsNotObserved(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "health.json")
+	store := New(path)
+	if err := store.RecordScan(Scan{At: time.Now().UTC().Truncate(time.Second), EventsWritten: 3}); err != nil {
+		t.Fatalf("RecordScan() error = %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if strings.Contains(string(raw), `"observed"`) {
+		t.Fatal("an unobserved harness section was written as data; the zero value is the absence")
+	}
+
+	report, err := store.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if report.Scan.ClaudeCode.Observed || report.Scan.OpenCode.Observed {
+		t.Fatalf("harness sections = %+v / %+v, want both unobserved", report.Scan.ClaudeCode, report.Scan.OpenCode)
+	}
+	if DiagnoseHarness(report.Scan.OpenCode) != StateNotObserved {
+		t.Fatal("an unrecorded harness section did not read as not observed")
+	}
+}
+
+func TestHarnessSectionsSurviveARoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "health.json")
+	store := New(path)
+	written := Scan{
+		At:         time.Now().UTC().Truncate(time.Second),
+		ClaudeCode: HarnessScan{Observed: true, Sources: 12, EventsWritten: 40},
+		OpenCode:   HarnessScan{Observed: true, Sources: 3756, UnknownOutcomes: 2, EventsWritten: 3692},
+	}
+	if err := store.RecordScan(written); err != nil {
+		t.Fatalf("RecordScan() error = %v", err)
+	}
+	report, err := store.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if report.Scan.ClaudeCode != written.ClaudeCode || report.Scan.OpenCode != written.OpenCode {
+		t.Fatalf("round trip = %+v / %+v, want %+v / %+v",
+			report.Scan.ClaudeCode, report.Scan.OpenCode, written.ClaudeCode, written.OpenCode)
 	}
 }

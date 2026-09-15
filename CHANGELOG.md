@@ -9,6 +9,46 @@ called out under Changed.
 
 ## [Unreleased]
 
+### Added
+
+- opencode is read alongside Claude Code, autodetected and with no new
+  configuration: a scan reads a harness when `scan.harnesses` names it and that
+  harness's store is on the machine. One consent covers both — the project table
+  is the only consent mechanism, and opencode's session directories resolve
+  through it exactly as a transcript's working directory does. Invocations carry
+  an exact duration, because opencode records both instants itself, and the
+  session grain carries opencode's own five token totals rather than an estimate.
+- `doctor` answers per harness: whether this scan looked at a harness at all, and
+  — where it did — whether it collected nothing or collected zero. A harness
+  nobody read prints `not observed` on every line and never `0`.
+- `report` names which harnesses the scan read and which it did not, and the
+  dashboard's observed / not-observed line is now derived from what the build
+  actually reads. It previously named OpenCode, Codex, Cursor and pi in a
+  hardcoded sentence — an absence claimed about harnesses that build could not
+  have observed.
+- opencode's skill and subagent invocations are collected as themselves: a skill
+  part carries the skill's own name, and a subagent run carries the agent its own
+  session row declares. Both previously collapsed into two built-in tool rows
+  named `skill` and `task`, so every skill on the machine shared one row and
+  every subagent shared another. A name the record grammar refuses is dropped and
+  counted as lost collection rather than written with a partial identity.
+
+### Changed
+
+- `wake init` no longer names a single harness in its output or its help. Consent
+  is per repository and every harness Wake reads collects under it, so naming one
+  would be false on a machine that runs two.
+- The record schema version moves to 9. It adds no field; it changes how an
+  opencode subagent invocation's `event_id` is derived — from the child session's
+  own id rather than from the invoking `task` tool part — which is a rebuild
+  rather than a migration: the next scan discards the spool and re-derives it
+  from the harnesses' own history. `event_id` for every other opencode record,
+  skills included, is unchanged.
+- `modernc.org/sqlite` is a new direct dependency, confined to `internal/sqlitex`
+  and pure Go, so the four release targets still cross-compile with
+  `CGO_ENABLED=0`. A test walks the whole module and asserts that one file
+  imports the driver and one package imports `database/sql`.
+
 ## [0.3.0] - 2026-09-11
 
 ### Added

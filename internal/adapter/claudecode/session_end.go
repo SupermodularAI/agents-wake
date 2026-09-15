@@ -8,34 +8,9 @@ import (
 	"slices"
 	"time"
 
+	"github.com/SupermodularAI/agents-wake/internal/adapter"
 	"github.com/SupermodularAI/agents-wake/internal/record"
 )
-
-// Idleness carries ADR-0014's session-end inference threshold —
-// session.idle_timeout — into one scan, with the instant last activity is
-// compared against.
-//
-// It is a second type beside Staleness rather than a field on it, deliberately.
-// ADR-0023 §3 requires Staleness.Timeout to be scan.stale_call_timeout for every
-// caller, and session.go's own doc comment states that session.idle_timeout "must
-// not be wired in here"; ADR-0034's Consequences require this ticket's closure
-// predicate to be separate rather than an overload of SessionState.Closed. Two
-// thresholds, two types, two predicates, one each.
-//
-// The zero value disables session_end derivation entirely, which is what a caller
-// that cannot read the threshold must do: ADR-0015 rejects upsert and ADR-0004
-// deduplicates, so a session_end written on a guessed threshold is permanent.
-type Idleness struct {
-	// Timeout is how long a session id may be silent before it is believed finished.
-	Timeout time.Duration
-	// Now is the instant this scan compares last activity against.
-	Now time.Time
-}
-
-// enabled reports whether this scan may believe any session finished. A zero Now
-// would make every session look infinitely idle and a non-positive Timeout would
-// finish every session on sight; both write records that cannot be taken back.
-func (i Idleness) enabled() bool { return i.Timeout > 0 && !i.Now.IsZero() }
 
 // sessionSeparator delimits the two halves of a session_end's source identity. It
 // is a record separator, and it is a different byte from callSeparator on purpose:
@@ -91,8 +66,8 @@ func sessionEndSourceEvent(sessionID record.Identifier) record.Identifier {
 // Sorted rather than map order: two scans of one transcript have to produce
 // byte-identical store contents (ADR-0004), and a session id is unique per entry
 // so the order is total.
-func (s *SessionState) finishedSessions(idle Idleness) []record.Identifier {
-	if !idle.enabled() {
+func (s *SessionState) finishedSessions(idle adapter.Idleness) []record.Identifier {
+	if !idle.Enabled() {
 		return nil
 	}
 	sessions := make([]record.Identifier, 0, len(s.sessions))
@@ -269,7 +244,7 @@ type sessionGrain struct {
 // source is the ordinal of the source this entry was read from, recorded for every
 // consented entry the grain folds — the sources this session's numbers actually
 // came from, and no more.
-func observeSessionGrain(grains map[record.Identifier]*sessionGrain, source int, entry transcriptEntry, resolve Resolver) {
+func observeSessionGrain(grains map[record.Identifier]*sessionGrain, source int, entry transcriptEntry, resolve adapter.Resolver) {
 	sessionID, err := record.BoundedToken(entry.SessionID)
 	if err != nil {
 		return
@@ -416,7 +391,7 @@ func (t *invocationTally) observeOne(event record.Record) {
 // parent transcript and one file per subagent, and a per-file total would report
 // each partial view as if it were the session's (ADR-0036 §Consequences).
 func resolveSessionEnds(grains map[record.Identifier]*sessionGrain, sessions *SessionState,
-	idle Idleness, tally *invocationTally) []record.Record {
+	idle adapter.Idleness, tally *invocationTally) []record.Record {
 	finished := sessions.finishedSessions(idle)
 	if len(finished) == 0 {
 		return nil

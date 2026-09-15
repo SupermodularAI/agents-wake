@@ -93,7 +93,7 @@ func TestInitRegistersTheEnclosingRepositoryRootFromASubdirectory(t *testing.T) 
 	for _, want := range []string{
 		paths.ConfigFile,
 		filepath.Join(claudeHome(t), "settings.json"),
-		"Claude Code collection enabled",
+		"Collection enabled",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("init output is missing %q; got:\n%s", want, out)
@@ -151,7 +151,7 @@ func TestInitDisclosesAndImportsHistoryOnlyWithFull(t *testing.T) {
 		paths.PrimitivesFile,
 		paths.HealthFile,
 		filepath.Join(claudeHome(t), "settings.json"),
-		"Existing Claude Code history will not be imported, so " + spool + " is not written;",
+		"Existing history will not be imported, so " + spool + " is not written;",
 		// The disclosure is about the triggers too, not only about this call: they are
 		// what would otherwise import the history one session later (ADR-0025).
 		"the session triggers this installs collect only what happens from now on",
@@ -189,10 +189,10 @@ func TestInitDisclosesAndImportsHistoryOnlyWithFull(t *testing.T) {
 		t.Errorf("init --full did not disclose the event spool it writes:\n%s", out)
 	}
 	for _, want := range []string{
-		"Existing Claude Code history will be imported now.",
+		"Existing history will be imported now.",
 		// Two: the transcript's one call, and the session_end for its long-silent
 		// session id (ADR-0034).
-		"Claude Code collection enabled; imported 2 terminal events.",
+		"Collection enabled; imported 2 terminal events.",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("init --full output is missing %q; got:\n%s", want, out)

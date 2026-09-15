@@ -36,7 +36,7 @@
                 {
                   "key": "wake.schema_version",
                   "value": {
-                    "intValue": "8"
+                    "intValue": "9"
                   }
                 },
                 {
@@ -265,7 +265,7 @@
                 {
                   "key": "wake.schema_version",
                   "value": {
-                    "intValue": "8"
+                    "intValue": "9"
                   }
                 },
                 {
@@ -345,7 +345,7 @@
                 {
                   "key": "wake.schema_version",
                   "value": {
-                    "intValue": "8"
+                    "intValue": "9"
                   }
                 },
                 {
@@ -568,7 +568,7 @@
                 {
                   "key": "wake.schema_version",
                   "value": {
-                    "intValue": "8"
+                    "intValue": "9"
                   }
                 },
                 {
