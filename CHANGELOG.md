@@ -11,7 +11,7 @@ called out under Changed.
 
 ### Changed
 
-- v2 is a rewrite in Rust, replacing the Go scanner and report. Wake is now a small binary that Claude Code
+- 1.0.0 is a rewrite in Rust, replacing the Go scanner and report of 0.x. Wake is now a small binary that Claude Code
   hooks call (`wake emit`, always exit 0, no output) and that sends skill, subagent, MCP tool and command
   usage as OTLP spans, with tokens and model as `gen_ai.*` so Langfuse prices them. Nothing is read from
   other harnesses yet, and `scan`, `doctor`, `report` and the project consent table are gone. Breaking.
