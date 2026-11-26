@@ -26,6 +26,10 @@ A value that fails the check is dropped, not truncated.
 | `wake.mcp.*` | per-server call, error and duration totals for MCP tools |
 | `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `.output_tokens`, `.cache_read_input_tokens`, `.cache_creation_input_tokens` | from the transcript's usage; absent when unknown. `input_tokens` is the total input, cached tokens included (OTel semconv; Langfuse subtracts the cache fields). Langfuse prices them |
 | `langfuse.observation.type` | `generation` on spans that carry a model or tokens |
+| `langfuse.observation.level` | `ERROR` when the outcome is error, `WARNING` when interrupted; absent otherwise |
+| `langfuse.version` | the primitive's version, so Langfuse can group by it; absent if local |
+| `langfuse.trace.name` | the repository, same value as `wake.repo` |
+| `gen_ai.operation.name`, `gen_ai.agent.name`, `gen_ai.tool.name` | OTel GenAI names: `invoke_agent` and the agent for subagents, `execute_tool` and the tool for MCP tools |
 | `session.id`, `wake.session.id` | the Claude Code session |
 | `user.id`, and `wake.user.email` or `wake.user.hash` | your email, or a salted HMAC with `identity: anonymous` |
 | `wake.repo` | `host/group/name` of the `origin` remote. Never a local path |

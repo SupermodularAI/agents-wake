@@ -1,6 +1,6 @@
 //! Invocations as an OTLP `ExportTraceServiceRequest` (JSON mapping).
 
-use crate::event::{Context, Invocation, Kind, UserId};
+use crate::event::{Context, Invocation, Kind, Outcome, UserId};
 use crate::ids::trace_id;
 use serde_json::{json, Value};
 
@@ -57,9 +57,13 @@ fn span(ctx: &Context, trace: &str, inv: &Invocation) -> Value {
         UserId::Unknown => {}
     }
     a.opt_str("wake.repo", &ctx.repo);
+    // Trace-level in Langfuse, accepted on any span: groups sessions by repository.
+    a.opt_str("langfuse.trace.name", &ctx.repo);
     a.str("wake.primitive.kind", inv.kind.as_str());
     a.str("wake.primitive.name", &inv.name);
     a.opt_str("wake.primitive.version", &inv.version);
+    // Observation version in Langfuse, so dashboards can break a primitive down by version.
+    a.opt_str("langfuse.version", &inv.version);
     a.opt_str("wake.plugin", &inv.plugin);
     a.opt_str("wake.marketplace", &inv.marketplace);
     a.opt_int("wake.primitive.context_tokens", inv.context_tokens);
@@ -68,6 +72,25 @@ fn span(ctx: &Context, trace: &str, inv: &Invocation) -> Value {
     }
     if let Some(o) = inv.outcome {
         a.str("wake.outcome", o.as_str());
+        // Langfuse groups observations by level but not by metadata, and its tags are
+        // trace-level (a trace is a whole session), so the outcome is carried as the level.
+        match o {
+            Outcome::Error => a.str("langfuse.observation.level", "ERROR"),
+            Outcome::Interrupted => a.str("langfuse.observation.level", "WARNING"),
+            Outcome::Ok => {}
+        }
+    }
+    // OTel GenAI semconv for the primitives it has a name for; skills and commands have none.
+    match inv.kind {
+        Kind::Subagent => {
+            a.str("gen_ai.operation.name", "invoke_agent");
+            a.str("gen_ai.agent.name", &inv.name);
+        }
+        Kind::McpTool => {
+            a.str("gen_ai.operation.name", "execute_tool");
+            a.str("gen_ai.tool.name", &inv.name);
+        }
+        Kind::Skill | Kind::Command | Kind::Inventory => {}
     }
     if inv.end_ns >= inv.start_ns {
         a.int(
@@ -133,6 +156,9 @@ fn span(ctx: &Context, trace: &str, inv: &Invocation) -> Value {
     });
     if let Some(p) = inv.parent_span_id {
         s["parentSpanId"] = json!(hex(&p));
+    }
+    if inv.outcome == Some(Outcome::Error) {
+        s["status"] = json!({"code": 2}); // STATUS_CODE_ERROR
     }
     s
 }

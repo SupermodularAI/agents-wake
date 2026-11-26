@@ -265,3 +265,84 @@ fn id_known_answers() {
     assert_eq!(hex(&trace_id("s1")), "dd76f1fcdb8bdd8cc57fccbc4a718289");
     assert_eq!(hex(&span_id("k1")), "ddd5aa5ec2ea342d");
 }
+
+fn str_attr<'a>(span: &'a Value, key: &str) -> Option<&'a str> {
+    attr(span, key).map(|v| v["stringValue"].as_str().unwrap())
+}
+
+fn one(i: Invocation) -> Value {
+    let v = encode(&ctx(UserId::Unknown), &[i]);
+    spans(&v)[0].clone()
+}
+
+#[test]
+fn outcome_sets_langfuse_level_and_span_status() {
+    // Langfuse can group observations by level but not by metadata, so the outcome is
+    // carried as the level too. Tags would not do: they are trace-level, and a trace is a session.
+    let mut i = inv(Kind::Skill, "a");
+    i.outcome = Some(Outcome::Error);
+    let s = one(i);
+    assert_eq!(str_attr(&s, "langfuse.observation.level"), Some("ERROR"));
+    assert_eq!(s["status"]["code"], 2);
+
+    let mut i = inv(Kind::Skill, "a");
+    i.outcome = Some(Outcome::Interrupted);
+    let s = one(i);
+    assert_eq!(str_attr(&s, "langfuse.observation.level"), Some("WARNING"));
+    assert!(s.get("status").is_none());
+
+    let mut i = inv(Kind::Skill, "a");
+    i.outcome = Some(Outcome::Ok);
+    let s = one(i);
+    assert!(attr(&s, "langfuse.observation.level").is_none());
+    assert!(s.get("status").is_none());
+}
+
+#[test]
+fn primitive_version_is_the_langfuse_observation_version() {
+    let mut i = inv(Kind::Skill, "a");
+    i.version = Some("1.2.0".into());
+    assert_eq!(str_attr(&one(i), "langfuse.version"), Some("1.2.0"));
+    assert!(attr(&one(inv(Kind::Skill, "a")), "langfuse.version").is_none());
+}
+
+#[test]
+fn repo_is_the_langfuse_trace_name() {
+    let s = one(inv(Kind::Skill, "a"));
+    assert_eq!(
+        str_attr(&s, "langfuse.trace.name"),
+        Some("github.com/acme/app")
+    );
+
+    let mut c = ctx(UserId::Unknown);
+    c.repo = None;
+    let v = encode(&c, &[inv(Kind::Skill, "a")]);
+    assert!(attr(&spans(&v)[0], "langfuse.trace.name").is_none());
+}
+
+#[test]
+fn subagent_carries_gen_ai_agent_semconv() {
+    let s = one(inv(Kind::Subagent, "web-fetch"));
+    assert_eq!(str_attr(&s, "gen_ai.operation.name"), Some("invoke_agent"));
+    assert_eq!(str_attr(&s, "gen_ai.agent.name"), Some("web-fetch"));
+    assert!(attr(&s, "gen_ai.tool.name").is_none());
+}
+
+#[test]
+fn mcp_tool_carries_gen_ai_tool_semconv() {
+    let s = one(inv(Kind::McpTool, "mcp__linear__get_issue"));
+    assert_eq!(str_attr(&s, "gen_ai.operation.name"), Some("execute_tool"));
+    assert_eq!(
+        str_attr(&s, "gen_ai.tool.name"),
+        Some("mcp__linear__get_issue")
+    );
+    assert!(attr(&s, "gen_ai.agent.name").is_none());
+}
+
+#[test]
+fn skill_and_command_carry_no_gen_ai_operation() {
+    for k in [Kind::Skill, Kind::Command] {
+        let s = one(inv(k, "a"));
+        assert!(attr(&s, "gen_ai.operation.name").is_none());
+    }
+}

@@ -20,6 +20,11 @@ called out under Changed.
 
 ### Added
 
+- Spans also set the Langfuse fields that dashboards can group by: `langfuse.observation.level` from the
+  outcome (`ERROR` for error, `WARNING` for interrupted, plus OTel span status error), `langfuse.version` from the
+  primitive's version, and `langfuse.trace.name` from the repository. Subagents carry
+  `gen_ai.operation.name=invoke_agent` and `gen_ai.agent.name`; MCP tools carry
+  `gen_ai.operation.name=execute_tool` and `gen_ai.tool.name`.
 - `wake install` / `wake uninstall [--purge]` manage the Claude Code hooks and the user config; `wake check`
   prints the resolved config and sends a test event.
 - GitHub Releases for macOS and Linux on arm64 and x86_64 (static musl on Linux), with `checksums.txt`,
