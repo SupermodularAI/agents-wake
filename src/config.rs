@@ -115,6 +115,17 @@ pub fn parse_headers(s: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// `<scheme>://<host>[:port]` of a URL: no userinfo, path, query or fragment.
+pub(crate) fn origin(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority.rsplit('@').next().unwrap_or("");
+    if scheme.is_empty() || authority.is_empty() {
+        return None;
+    }
+    Some(format!("{scheme}://{authority}"))
+}
+
 fn valid_endpoint(url: &str) -> bool {
     if url.starts_with("https://") {
         return true;
