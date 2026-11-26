@@ -69,6 +69,47 @@ fn ids_deterministic() {
     assert_eq!(trace_id("s").len(), 16);
 }
 
+/// OTel GenAI semconv (and Langfuse, which subtracts the cache fields from it):
+/// `gen_ai.usage.input_tokens` is the TOTAL input, cached tokens included. Claude Code's
+/// transcript `input_tokens` excludes cache, so wake adds the cache fields back in.
+#[test]
+fn input_tokens_include_cache_per_otel_semconv() {
+    let mut i = inv(Kind::Skill, "brainstorming");
+    i.tokens.input = Some(10);
+    i.tokens.output = Some(100);
+    i.tokens.cache_read = Some(50_000);
+    i.tokens.cache_creation = Some(2_000);
+    let v = encode(&ctx(UserId::Unknown), &[i]);
+    let s = &spans(&v)[0];
+    assert_eq!(
+        attr(s, "gen_ai.usage.input_tokens").unwrap()["intValue"],
+        "52010"
+    );
+    assert_eq!(
+        attr(s, "gen_ai.usage.cache_read_input_tokens").unwrap()["intValue"],
+        "50000"
+    );
+    assert_eq!(
+        attr(s, "gen_ai.usage.cache_creation_input_tokens").unwrap()["intValue"],
+        "2000"
+    );
+
+    // Cache only, no uncached input recorded: the total is still the cache sum.
+    let mut j = inv(Kind::Skill, "brainstorming");
+    j.tokens.cache_read = Some(7);
+    let v = encode(&ctx(UserId::Unknown), &[j]);
+    assert_eq!(
+        attr(&spans(&v)[0], "gen_ai.usage.input_tokens").unwrap()["intValue"],
+        "7"
+    );
+
+    // No input-side counts at all: the attribute stays absent, never 0.
+    let mut k = inv(Kind::Skill, "brainstorming");
+    k.tokens.output = Some(5);
+    let v = encode(&ctx(UserId::Unknown), &[k]);
+    assert!(attr(&spans(&v)[0], "gen_ai.usage.input_tokens").is_none());
+}
+
 #[test]
 fn encode_skill_span_shape() {
     let mut i = inv(Kind::Skill, "brainstorming");

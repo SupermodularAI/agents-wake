@@ -24,7 +24,7 @@ A value that fails the check is dropped, not truncated.
 | `wake.invoker`, `wake.outcome` | user, model or nested; ok, error or interrupted |
 | `wake.window.duration_ms`, `.tool_calls`, `.tool_errors`, `.tools` | what happened while the primitive was active |
 | `wake.mcp.*` | per-server call, error and duration totals for MCP tools |
-| `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `.output_tokens`, `.cache_read_input_tokens`, `.cache_creation_input_tokens` | from the transcript's usage; absent when unknown. Langfuse prices them |
+| `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `.output_tokens`, `.cache_read_input_tokens`, `.cache_creation_input_tokens` | from the transcript's usage; absent when unknown. `input_tokens` is the total input, cached tokens included (OTel semconv; Langfuse subtracts the cache fields). Langfuse prices them |
 | `langfuse.observation.type` | `generation` on spans that carry a model or tokens |
 | `session.id`, `wake.session.id` | the Claude Code session |
 | `user.id`, and `wake.user.email` or `wake.user.hash` | your email, or a salted HMAC with `identity: anonymous` |

@@ -89,7 +89,15 @@ fn span(ctx: &Context, trace: &str, inv: &Invocation) -> Value {
     }
     a.opt_str("gen_ai.request.model", &inv.model);
     let t = &inv.tokens;
-    a.opt_int("gen_ai.usage.input_tokens", t.input);
+    // OTel GenAI semconv: input_tokens is the total input, cached tokens included (Langfuse
+    // subtracts the cache fields from it). Claude Code's input_tokens excludes cache, so add
+    // the cache fields back. Absent only when no input-side count is known.
+    let total_input = [t.input, t.cache_read, t.cache_creation]
+        .iter()
+        .flatten()
+        .copied()
+        .reduce(u64::saturating_add);
+    a.opt_int("gen_ai.usage.input_tokens", total_input);
     a.opt_int("gen_ai.usage.output_tokens", t.output);
     a.opt_int("gen_ai.usage.cache_read_input_tokens", t.cache_read);
     a.opt_int("gen_ai.usage.cache_creation_input_tokens", t.cache_creation);

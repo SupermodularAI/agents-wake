@@ -425,7 +425,7 @@ Langfuse mapping (the builder confirms these against the current Langfuse OTel d
 | `wake.invoker` | user, model, nested |
 | `wake.outcome` | ok, error, interrupted |
 | `wake.window.duration_ms`, `.tool_calls`, `.tool_errors`, `.tools` | §5.5 |
-| `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `.output_tokens`, `.cache_read_input_tokens`, `.cache_creation_input_tokens` | transcript usage. Absent, never zero, when unknown. |
+| `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `.output_tokens`, `.cache_read_input_tokens`, `.cache_creation_input_tokens` | transcript usage. Absent, never zero, when unknown. `input_tokens` = input + cache read + cache creation: the OTel semconv total, which Langfuse splits back into its parts (verified live 2026-11-26). |
 | `langfuse.observation.type` | `generation` on spans that carry a model or tokens, so Langfuse prices them (an explicit type always wins over inference) |
 | `wake.session.id` | hook payload |
 | `wake.user.email` or `wake.user.hash` | §5.7 |
