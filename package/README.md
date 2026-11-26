@@ -13,7 +13,18 @@ inside an organisation. It holds no code and no secrets.
 4. Download the four binaries from a [wake release](https://github.com/SupermodularAI/agents-wake/releases)
    into `bin/`, check them against `checksums.txt`, and keep these names:
    `wake-darwin-arm64`, `wake-darwin-x64`, `wake-linux-arm64`, `wake-linux-x64`.
-5. Publish the package through your APM marketplace. Developers install it with:
+5. Make the launcher and the binaries executable, and commit them with the exec bit (git mode `100755`):
+
+   ```sh
+   chmod +x bin/wake bin/wake-*
+   git add bin/wake bin/wake-*
+   git update-index --chmod=+x bin/wake bin/wake-*
+   git ls-files -s bin   # wake and wake-* must show 100755
+   ```
+
+   This matters because the launcher fails safe: if the binary it picks is not executable, it exits 0 without
+   doing anything, so a package without the exec bit installs cleanly and then silently sends nothing.
+6. Publish the package through your APM marketplace. Developers install it with:
 
    ```sh
    apm install <package>@<marketplace> --target claude -g
