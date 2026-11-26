@@ -13,10 +13,12 @@ events as OTLP spans, and POSTs them with a 2 s timeout. Failed sends go to a bo
 per-session JSON files and the outbox, under `~/.local/state/wake`. Claude Code is one implementation of a harness
 module. Pi and Codex come in later plans.
 
-**Tech Stack:** Rust 2021 (stable), `serde` + `serde_json`, `ureq` 2 (rustls), `hmac` + `sha2`, `fs4`. No CLI
-framework, no OTel SDK.
+**Tech Stack:** Rust 2021 (stable, ≥ 1.89 for `std::fs::File::try_lock`), `serde` + `serde_json`, `ureq` 2
+(rustls), `hmac` + `sha2`. No CLI framework, no OTel SDK, no locking crate.
 
-**Spec:** `docs/superpowers/specs/2026-11-26-wake-v2-design.md` (approved, commit `c826e1f`). Executors read the spec
+**Spec:** `docs/superpowers/specs/2026-11-26-wake-v2-design.md` (approved in commit `c826e1f`, amended with this
+plan's review fixes: background subagents, `StopFailure`, MCP aggregation per turn, inventory format, stale-session
+flush). Executors read the spec
 alongside this plan. Section references (§n) point into it.
 
 **Out of scope for this plan:**
@@ -31,8 +33,9 @@ Each gets its own plan once this one ships a release.
 - **Binary size:** release profile `opt-level = "z"`, `lto = true`, `codegen-units = 1`, `strip = true`,
   `panic = "abort"`. Target binary ≤ 2 MB on darwin-arm64.
 - **Dependencies:** exactly `serde` (derive), `serde_json`, `ureq` (`default-features = false`,
-  `features = ["tls"]`), `hmac`, `sha2`, `fs4`. Adding any other runtime crate needs a note in the PR saying why.
-  Dev-dependencies are free.
+  `features = ["tls"]`), `hmac`, `sha2`. Locking uses `std::fs::File::try_lock` (stable since Rust 1.89), and
+  mtimes in tests use `std::fs::File::set_modified`. Set `rust-version = "1.89"` in `Cargo.toml`. Adding any other
+  runtime crate needs a note in the PR saying why. Dev-dependencies are free.
 - **`wake emit`:**
   - always exits 0;
   - never writes to stdout or stderr;
@@ -41,7 +44,8 @@ Each gets its own plan once this one ships a release.
   Work grows with the turn, not with the session (§5.3).
 - **What may leave the machine:** only the attributes listed in §5.6 and in Task 5's table. Never prompt text, tool
   inputs or outputs, Bash commands, file paths or local repo paths.
-- **String allowlist:** every string attribute passes `event::is_token` (`^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,127}$`),
+- **String allowlist:** every string attribute passes `event::is_token` (`^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,127}$`
+  with `_` in the second class, i.e. `[A-Za-z0-9._:@+_-]`: MCP names are `mcp__<server>__<tool>`),
   or `event::is_repo` for `wake.repo`, or `event::is_email` for `wake.user.email`. Failing values are dropped, never
   truncated or guessed.
 - **Generic OTel variables:** `OTEL_EXPORTER_OTLP_*` are never read.
@@ -67,8 +71,18 @@ These are failure modes the spec implies but does not spell out. Each one is pin
    entries or 7 days. *Task 6.*
 4. **A `settings.json` that is not plain JSON** (comments, trailing commas, a symlink, a non-object) makes
    `wake install` refuse and change nothing. *Task 14.*
-5. **Plugin-namespaced skill names** (`superpowers:brainstorming`) are kept. Names containing `/`, spaces or
-   newlines are dropped. *Task 2.*
+5. **Plugin-namespaced skill names** (`superpowers:brainstorming`) and MCP names with underscores
+   (`mcp__playwright__click`) are kept. Names containing `/`, spaces or newlines are dropped. *Task 2.*
+6. **Background subagents** (`run_in_background`) are the common case: 45 of 55 `Agent` results in a local sample
+   were `status: "async_launched"`. Their result has no usage, type or duration, and their transcript is still being
+   written at the parent's `Stop`. They stay open in the session state until their `<task-notification>` arrives.
+   They are never reported as errors just for being async. *Tasks 10 and 12.*
+7. **`<command-name>` inside other text** (skill bodies, pasted text, tool descriptions) is not a command. Only a
+   user entry whose content *starts* with the tag, and that is not `isMeta`, counts. *Task 7.*
+8. **Sessions that never get `SessionEnd`** (killed terminal, crash) still send their open invocations: GC closes
+   and sends any open invocation idle for more than 30 minutes before it deletes a state file. *Tasks 11 and 12.*
+9. **APM-installed hooks are not wake's to touch.** `wake install` / `uninstall` never match a hook whose command
+   lives under `~/.claude/hooks/`. *Task 14.*
 
 ---
 
@@ -108,9 +122,13 @@ README.md  docs/langfuse-setup.md
 
 **Files:**
 - Delete: `cmd/`, `internal/`, `e2e/`, `testdata/`, `go.mod`, `go.sum`, `go.tools.mod`, `go.tools.sum`, `Makefile`,
-  and the v1 contents of `.github/workflows/`
+  `.golangci.yml`, `.goreleaser.yaml`, v1's `install.sh` (Task 15 writes the v2 one), and `.github/workflows/ci.yml`
+  and `release.yml`
+- Modify: `.github/workflows/oss-gates.yml`. Keep the `secrets` (gitleaks) and `commit-style` jobs. Replace the
+  Go `vulnerabilities` job (`setup-go` + `govulncheck`) with `cargo audit` (installed with `cargo install --locked
+  cargo-audit`).
 - Keep: `LICENSE`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md` (update the build commands), `SECURITY.md`, `CHANGELOG.md`,
-  `docs/`
+  `.gitleaks.toml`, `docs/`
 - Create: `Cargo.toml`, `src/main.rs`, `src/lib.rs`, `.github/workflows/ci.yml`, `tests/cli_smoke.rs`
 
 **Interfaces:**
@@ -175,6 +193,7 @@ README.md  docs/langfuse-setup.md
 
 - [ ] **Step 1: Write the failing tests** in `tests/event.rs`:
   - `token_accepts_plugin_namespace`: `is_token("superpowers:brainstorming")` is true.
+  - `token_accepts_underscores`: `is_token("mcp__playwright__click")` and `is_token("ai103_labs")` are true.
   - `token_rejects_paths_spaces_newlines`: false for each of `"/Users/x/skill"`, `"a b"`, `"a\nb"`, `""`, and a
     129-character string.
   - `repo_accepts_host_group_name`: `is_repo("gitlab.com/supermodularai/core/agents-wake")` is true.
@@ -211,7 +230,7 @@ README.md  docs/langfuse-setup.md
   pub trait Env { fn var(&self, key: &str) -> Option<String>; }
   pub struct ProcessEnv;  impl Env for ProcessEnv
   pub fn resolve(env: &dyn Env, exe_dir: &Path, home: &Path) -> Config;
-  pub fn parse_headers(s: &str) -> Vec<(String, String)>;                  // "k=v,k2=v2"; '=' inside values allowed after the first
+  pub fn parse_headers(s: &str) -> Vec<(String, String)>;                  // "k=v,k2=v2"; '=' inside values allowed after the first; values percent-decoded (OTel format)
   pub fn file_path_user(home: &Path) -> PathBuf;                           // ~/.config/wake/config.json (respects XDG_CONFIG_HOME via env in resolve)
   #[derive(Serialize, Deserialize, Default)] pub struct FileConfig {
       pub endpoint: Option<String>, pub headers: Option<BTreeMap<String,String>>,
@@ -237,8 +256,9 @@ README.md  docs/langfuse-setup.md
     `disabled == true`.
   - `otel_generic_vars_ignored`: only `OTEL_EXPORTER_OTLP_ENDPOINT` is set, so `endpoint == None`.
   - `http_only_for_loopback`: `http://127.0.0.1:4318/v1/traces` is kept, and `http://example.com/x` gives `None`.
-  - `parse_headers_cases`: `"Authorization=Basic abc=="` gives `[("Authorization","Basic abc==")]`, and
-    `"a=1,b=2"` gives two pairs.
+  - `parse_headers_cases`: `"Authorization=Basic%20abc=="` and `"Authorization=Basic abc=="` both give
+    `[("Authorization","Basic abc==")]` (values are percent-decoded, as the OTel `k=v` format specifies; a value with
+    no `%` is unchanged), and `"a=1,b=2"` gives two pairs.
   - `invalid_json_file_is_absent`: an exe-dir file containing `{` falls through to the user file.
 - [ ] **Step 2:** Run `cargo test --test config` and expect FAIL.
 - [ ] **Step 3:** Implement `src/config.rs`.
@@ -319,9 +339,13 @@ README.md  docs/langfuse-setup.md
 
   - Integers use `intValue` as decimal strings. A token count is omitted when `None`, never sent as 0.
 
-- [ ] **Step 1:** Confirm the Langfuse OTel attribute names for the user, the session, token usage and the model,
-  in the current Langfuse docs ("OpenTelemetry" integration, property mapping). If they differ from the table, use
-  Langfuse's names, update the table here and in spec §5.6, and note the doc URL in the commit message.
+- [ ] **Step 1:** In the current Langfuse docs ("OpenTelemetry" integration):
+  - Confirm that `/api/public/otel/v1/traces` accepts OTLP/HTTP **JSON** (`Content-Type: application/json`), not
+    only protobuf. If it accepts protobuf only, **stop and tell the user**: the encoding choice changes, and with it
+    the dependency budget.
+  - Confirm the attribute names for the user, the session, token usage and the model (property mapping). If they
+    differ from the table, use Langfuse's names, update the table here and in spec §5.6, and note the doc URL in the
+    commit message.
 - [ ] **Step 2: Write the failing tests:**
   - `ids_deterministic`: the same key gives the same id, different keys give different ids, and `trace_id` returns
     16 bytes.
@@ -398,15 +422,17 @@ README.md  docs/langfuse-setup.md
   pub enum Block { ToolUse { id: String, name: String, skill: Option<String>, subagent_type: Option<String> },
                    ToolResult { tool_use_id: String, is_error: bool } }
   pub struct AgentResult { pub agent_id: String, pub agent_type: Option<String>, pub status: Option<String>,
+                           pub is_async: bool,
                            pub total_duration_ms: Option<u64>, pub total_tool_use_count: Option<u64>, pub usage: Tokens }
+  pub struct TaskNotification { pub tool_use_id: String, pub status: Option<String> }   // status: completed | failed | killed
   pub enum Role { User, Assistant, Other }
   pub struct Entry {
       pub role: Role, pub ts_ns: u64, pub request_id: Option<String>, pub model: Option<String>,
-      pub usage: Option<Tokens>, pub version: Option<String>, pub is_sidechain: bool,
+      pub usage: Option<Tokens>, pub version: Option<String>, pub is_sidechain: bool, pub is_meta: bool,
       pub attribution_skill: Option<String>, pub attribution_agent: Option<String>,
       pub attribution_mcp_server: Option<String>, pub attribution_plugin: Option<String>,
       pub blocks: Vec<Block>, pub command_name: Option<String>, pub interrupted: bool,
-      pub agent_result: Option<AgentResult>,
+      pub agent_result: Option<AgentResult>, pub task_notification: Option<TaskNotification>,
   }
   pub fn read_from(path: &Path, offset: u64) -> std::io::Result<(Vec<Entry>, u64)>;   // returns entries and the offset just after the last complete '\n'
   ```
@@ -420,11 +446,18 @@ README.md  docs/langfuse-setup.md
   - `attributionSkill`, `attributionAgent`, `attributionMcpServer`, `attributionPlugin`.
   - `message.content[]` `tool_use` blocks: `id`, `name`, `input.skill`, `input.subagent_type`.
   - `tool_result` blocks: `tool_use_id`, `is_error`.
-  - `command_name`: the text between `<command-name>` and `</command-name>` in a user string or text content, with a
-    leading `/` stripped.
+  - `isMeta` → `is_meta`.
+  - `command_name`: only on a user entry that is not `isMeta` and whose string content, or first text block, **starts**
+    with `<command-name>` (after leading whitespace). It is the text up to `</command-name>`, with a leading `/`
+    stripped. The literal tag appears inside skill bodies, pasted text and tool descriptions, which must not count.
   - `interrupted`: the user content contains `[Request interrupted by user`.
-  - `toolUseResult`, when it has `agentId`: `agentId`, `agentType`, `status`, `totalDurationMs`,
-    `totalToolUseCount` and `usage` (same mapping as above).
+  - `toolUseResult`, when it has `agentId`: `agentId`, `agentType`, `status`, `isAsync` (also true when `status` is
+    `async_launched`), `totalDurationMs`, `totalToolUseCount` and `usage` (same mapping as above). An async result
+    has only `agentId`, `status`, `isAsync` and fields wake does not read.
+  - `task_notification`: a user entry whose content starts with `<task-notification>` (Claude Code also sets
+    `origin.kind == "task-notification"`). Keep only `<tool-use-id>` and `<status>`; never the summary, result or
+    output-file path. The same envelope is used for background Bash tasks, so it means nothing unless its tool-use
+    id matches a pending async agent (Task 10).
 - **What is kept:** use serde structs with `#[serde(default)]` that name only these fields, so no other content is
   ever held. Lines that fail to parse are skipped and their bytes still counted.
 
@@ -435,10 +468,15 @@ README.md  docs/langfuse-setup.md
   - two assistant entries sharing one `requestId` with identical usage, both `attributionSkill: "brainstorming"`;
   - a `Bash` tool_use and its `tool_result` with `is_error: true`;
   - a user entry with `<command-name>/review</command-name>`;
+  - an `isMeta` user entry, and a plain user prompt, both containing `<command-name>/fake</command-name>` mid-text;
+  - a user entry with `<task-notification><tool-use-id>toolu_x</tool-use-id><status>completed</status><summary>SECRET-SUMMARY</summary></task-notification>`;
   - a user entry with `[Request interrupted by user]`.
 - [ ] **Step 2: Write the failing tests:**
   - `parses_fields`: the entry count is right. The Skill block has `skill == Some("brainstorming")`, the shared
     `requestId` appears on two entries, `command_name == Some("review")` and `interrupted` is true on the last entry.
+  - `command_name_only_at_start`: neither `fake` entry has a `command_name`.
+  - `task_notification_parsed`: `tool_use_id == "toolu_x"`, `status == Some("completed")`, and `SECRET-SUMMARY` is not
+    in `format!("{:?}", entries)`.
   - `partial_last_line_not_consumed`: append `{"type":"assistant"` with no newline. The returned offset equals the
     length before the append, and the entry count is unchanged.
   - `resume_from_offset_reads_only_new`: read to offset X, append 2 lines, and reading from X returns exactly 2
@@ -517,13 +555,19 @@ README.md  docs/langfuse-setup.md
       pub tool_calls: u64, pub tool_errors: u64, pub tools: BTreeMap<String, u64>, pub pending: Vec<String>,
       pub start_tool_use_id: Option<String>, pub outcome: Option<String>, pub from_command: bool, pub attributed: bool }
   #[derive(Serialize, Deserialize, Default, Clone)]
-  pub struct SessionState { pub offset: u64, pub open: Vec<OpenInvocation>, pub recent_requests: Vec<String> }  // recent_requests capped at 256
+  pub struct PendingAgent { pub agent_id: String, pub tool_use_id: String, pub span_key: String,
+      pub parent_key: Option<String>, pub name: String, pub start_ns: u64 }                    // Task 10
+  #[derive(Serialize, Deserialize, Default, Clone)]
+  pub struct SessionState { pub offset: u64, pub open: Vec<OpenInvocation>, pub recent_requests: Vec<String>,  // recent_requests capped at 256
+      pub pending_agents: Vec<PendingAgent>,                                                    // Task 10
+      pub cwd: Option<String>, pub user: Option<String>, pub repo: Option<String>,              // Task 12: cached context
+      pub last_ns: u64 }                                                                        // newest entry ts seen; Task 11 GC flush
   ```
 - Produces (in `derive.rs`):
   ```rust
   pub struct SubagentRef { pub agent_id: String, pub span_key: String, pub parent_key: Option<String> }  // filled in by Task 10
   pub struct Derived { pub closed: Vec<Invocation>, pub subagents: Vec<SubagentRef> }
-  pub fn derive(entries: &[Entry], state: &mut SessionState, lookup: &dyn PrimitiveLookup, now_ns: u64, end_of_session: bool) -> Derived;
+  pub fn derive(session_id: &str, entries: &[Entry], state: &mut SessionState, lookup: &dyn PrimitiveLookup, now_ns: u64, end_of_session: bool) -> Derived;
   pub const IDLE_CLOSE_NS: u64 = 30 * 60 * 1_000_000_000;
   ```
 - **Skill rules** (spec §5.5), applied entry by entry in order:
@@ -532,7 +576,7 @@ README.md  docs/langfuse-setup.md
        `model`, or `nested` when the assistant entry's `attribution_skill` names another open skill. A nested
        invocation's parent key is that outer skill's span key.
      - A user `command_name` that the lookup resolves as a skill starts an invocation with invoker `user`. Its span
-       key is `"cmd:" + request-independent key`, i.e. `session_id + ":" + ts_ns`, and it sets `from_command=true`.
+       key is `"cmd:" + session_id + ":" + ts_ns` (the `session_id` argument), and it sets `from_command=true`.
      - **Merge.** If a `Skill` tool_use names a skill that has an open invocation with `from_command=true` and
        `attributed=false`, it does not start a new one. It only sets `start_tool_use_id`.
   2. **Restart.** Starting a skill closes any open invocation of the same name first.
@@ -544,9 +588,12 @@ README.md  docs/langfuse-setup.md
      `is_error` increments `tool_errors`. A `tool_result` for `start_tool_use_id` with `is_error` sets
      `outcome="error"`.
   5. **Interrupt.** `interrupted` sets `outcome="interrupted"` on every open skill with `last_ns` inside the current
-     turn (any attributed entry since the last user prompt), unless it is already `error`.
+     turn (any attributed entry since the last user prompt), unless it is already `error`. A turn that ends in an API
+     error (`StopFailure`) is not tracked: no hook is installed for it, its slice is read at the next `Stop`, and its
+     skills keep `ok` unless a tool error says otherwise. (Spec §5.5 is amended to match.)
   6. **Close.** Before processing each entry, close every open skill with `entry.ts_ns > last_ns + IDLE_CLOSE_NS`.
      At the end, with `end_of_session`, close all of them. With `now_ns`, apply the idle rule against `now_ns`.
+     `state.last_ns` is set to the newest entry ts seen.
   7. **Closing builds an `Invocation`:**
      - `span_id = ids::span_id(span_key)`;
      - `end_ns = last_ns`, or `start_ns` if never attributed;
@@ -585,7 +632,8 @@ README.md  docs/langfuse-setup.md
 **Files:**
 - Modify: `src/harness/claude_code/derive.rs`
 - Test: `tests/derive_others.rs`, `tests/fixtures/claude_code/others_*.jsonl`,
-  `tests/fixtures/claude_code/sess-1/subagents/agent-abc.jsonl`
+  `tests/fixtures/claude_code/sess-1/subagents/agent-abc.jsonl`,
+  `tests/fixtures/claude_code/sess-async/subagents/agent-def.jsonl` (used by Task 12)
 
 **Interfaces:**
 - Produces:
@@ -593,20 +641,36 @@ README.md  docs/langfuse-setup.md
   // SubagentRef is already declared in Task 9; this task populates it.
   pub fn subagent_transcript(transcript_path: &Path, session_id: &str, agent_id: &str) -> PathBuf;  // <dir of transcript>/<session_id>/subagents/agent-<agent_id>.jsonl
   ```
-- **Subagents.** A user entry with `agent_result` produces a closed `Kind::Subagent` invocation:
+- **Subagents, common fields.** In every case:
+  - the `Agent` tool_use is matched to its result by `tool_use_id`, never by tool name;
   - span key `"agent:" + agent_id`;
-  - name `agent_type`, or `"unknown"`;
-  - start = ts of the matching `Agent` tool_use, end = this entry's ts;
-  - `tokens = usage`, `tool_calls = total_tool_use_count`;
-  - outcome `ok` if status is `completed`, else `error`;
+  - name = the `Agent` tool_use's `input.subagent_type`, else `agent_type` from the result, else `"unknown"`;
+  - start = ts of the `Agent` tool_use;
   - parent = the open skill named by the `Agent` tool_use entry's `attribution_skill`, if there is one;
   - metadata from `lookup.agent(name)`.
+- **Foreground subagent** (`agent_result` with `is_async == false`): a closed `Kind::Subagent` invocation at once.
+  - end = this entry's ts;
+  - `tokens = usage`, `tool_calls = total_tool_use_count`;
+  - outcome `ok` if status is `completed`, else `error`;
+  - pushes a `SubagentRef`.
+- **Background subagent** (`is_async == true`, status `async_launched`): **no event yet, and never `error` for being
+  async.** Push a `PendingAgent` to `state.pending_agents` (it survives across `Stop`s in the state file). It closes
+  when either of these arrives, in this or a later slice:
+  - a `task_notification` whose `tool_use_id` matches. End = that entry's ts. Outcome `ok` for `completed`,
+    `interrupted` for `killed`, `error` for `failed` or anything else;
+  - `end_of_session`: close with end = `state.last_ns` and outcome `interrupted`.
 
-  It also pushes a `SubagentRef`. Task 12 derives the subagent's own transcript with a fresh `SessionState`,
-  `end_of_session=true`, and its root parent key set to the subagent's span key. **Recursion stops at depth 3.**
+  On close it builds the `Kind::Subagent` invocation with tokens and tool counts left `None` (Task 12 fills them from
+  the subagent's transcript), removes the `PendingAgent` and pushes a `SubagentRef`.
+
+  For a `SubagentRef`, Task 12 derives the subagent's own transcript with a fresh `SessionState`,
+  `end_of_session=true`, and its root parent key set to the subagent's span key. **Recursion stops at depth 3.** For a
+  background agent, Task 12 also sums that transcript's usage (deduplicated by `requestId`) and counts its tool_uses,
+  and sets them on the subagent invocation before sending.
 - **MCP.** A tool_use named `mcp__<server>__<tool>` and its result are aggregated per `(server, tool, enclosing open
   skill span key, or "turn")`, with duration = result ts − tool_use ts. Aggregates are emitted at the end of every
-  `derive` call as `Kind::McpTool`, named `<server>__<tool>`:
+  `derive` call, so a skill that spans several turns gets one aggregate per turn per MCP tool, each parented to the
+  skill (spec §5.5 is amended to say so). They are `Kind::McpTool`, named `<server>__<tool>`:
   - `mcp` is set;
   - the parent is the enclosing skill, if there is one;
   - span key `"mcp:" + first tool_use id in the aggregate`.
@@ -622,10 +686,20 @@ README.md  docs/langfuse-setup.md
   - `sess-1/subagents/agent-abc.jsonl`: contains a `Skill` start and an `mcp__notion__search` call.
   - `others_mcp.jsonl`: 3 calls to `mcp__playwright__click`, one with `is_error`, durations 100, 250 and 50 ms.
   - `others_command.jsonl`: `/clear`-style `<command-name>/compact</command-name>`.
+  - `others_async_t1.jsonl` and `others_async_t2.jsonl`: turn 1 has, inside skill A, an `Agent` tool_use with
+    `subagent_type: "Explore"` and `run_in_background: true`, and its `toolUseResult`
+    `{agentId:"def", status:"async_launched", isAsync:true}`. Turn 2 has a `<task-notification>` for that tool-use id
+    with `<status>completed</status>`, and an unrelated one for a background Bash tool-use id.
 - [ ] **Step 2: Write the failing tests:**
   - `subagent_event_and_parent`: kind Subagent, name `Explore`, `tool_calls == Some(7)`, `outcome == Ok`, parent =
     A's span id, and one `SubagentRef{agent_id:"abc"}`.
   - `subagent_failed_status_is_error`: status `"failed"` gives `Outcome::Error`.
+  - `async_subagent_waits_for_notification`: derive turn 1 with `end_of_session=false`. No Subagent event, one
+    `PendingAgent`. Derive turn 2 with the same state. One Subagent named `Explore`, `outcome == Ok`, parent = A's span
+    id, `start_ns` = turn 1's tool_use ts, one `SubagentRef{agent_id:"def"}`, and `pending_agents` empty. The Bash
+    notification produces nothing.
+  - `async_subagent_killed_and_session_end`: a `killed` notification gives `Interrupted`. A pending agent with no
+    notification closes at `end_of_session=true` as `Interrupted`.
   - `mcp_aggregated_one_event`: 1 McpTool event with `calls == 3`, `errors == 1`, `max_duration_ms == 250`,
     `total_duration_ms == 400` and `server == "playwright"`.
   - `command_event`: 1 Command named `compact` with `invoker == User`.
@@ -648,22 +722,30 @@ README.md  docs/langfuse-setup.md
 - Produces:
   ```rust
   pub fn state_dir(env: &dyn Env, home: &Path) -> PathBuf;               // $XDG_STATE_HOME/wake or ~/.local/state/wake
-  pub struct SessionGuard { /* holds the fs4 lock */ }
+  pub struct SessionGuard { /* holds the File locked with std File::try_lock */ }
   pub fn lock_session(dir: &Path, session_id: &str) -> Option<SessionGuard>;   // None if already held (non-blocking)
   pub fn load(dir: &Path, session_id: &str) -> Option<SessionState>;
   pub fn save(dir: &Path, session_id: &str, s: &SessionState) -> std::io::Result<()>;   // atomic tmp + rename
   pub fn init_offset(source: Option<&str>, transcript_len: u64) -> u64;   // "startup" => 0, anything else or None => transcript_len
+  pub fn stale_open(dir: &Path, now: SystemTime) -> Vec<(String, SessionState)>;   // sessions whose state has open invocations or pending agents and was untouched > 30 min; each one lock-able (skip if locked)
   pub fn gc(dir: &Path, now: SystemTime);                                 // delete sessions/*.json and *.lock untouched > 14 days
   ```
 - `session_id` is used in file names only if it passes `is_token`. Otherwise the run does nothing.
+- **Stale flush (Review Focus 8).** A session killed without `SessionEnd` leaves open invocations in its state file.
+  Task 12 calls `stale_open` on every run, closes those invocations as at `end_of_session` (pending agents as
+  `interrupted`), sends them with the session's cached `user` and `repo`, and saves the state with `open` and
+  `pending_agents` empty. It keeps the offset, so a later `--resume` still continues and never re-sends. GC then only
+  ever deletes states with nothing open.
 
 - [ ] **Step 1: Write the failing tests:**
   - `lock_is_exclusive`: a second `lock_session` while the first guard is alive returns `None`. After the drop it
     returns `Some`.
   - `save_load_roundtrip`.
   - `init_offset_rules`: `startup` gives 0. `resume`, `fork`, `clear`, `compact` and `None` give the length.
-  - `gc_removes_old_only`: set the mtime to 15 days ago (via `filetime` as a dev-dependency) and the file is
+  - `gc_removes_old_only`: set the mtime to 15 days ago (with `std::fs::File::set_modified`) and the file is
     removed. A file 1 day old is kept.
+  - `stale_open_finds_idle_sessions_only`: a state with an open invocation, 31 minutes old, is returned. One 5 minutes
+    old is not. One 31 minutes old with nothing open is not. One whose lock is held is not.
   - `bad_session_id_rejected`: `lock_session(dir, "../x")` returns `None` and creates no file.
 - [ ] **Step 2:** Run `cargo test --test state` and expect FAIL.
 - [ ] **Step 3:** Implement it.
@@ -687,22 +769,26 @@ README.md  docs/langfuse-setup.md
   1. Resolve the config. Return if `disabled` or there is no endpoint.
   2. Parse the payload: `session_id`, `transcript_path`, `cwd`, `source`. Return if anything required is missing or
      `session_id` fails `is_token`.
-  3. `gc` the state dir. `lock_session`, returning if it is held.
+  3. Flush `stale_open` sessions (Task 11) for **other** session ids, then `gc` the state dir. `lock_session`,
+     returning if it is held.
   4. Per hook:
      - **`session-start`:** build an Inventory invocation from `Installed::scan(home, cwd)`, with span key
        `"inv:" + session_id + ":" + now`. Create the state, using `init_offset(source, len)`, if it is missing or
        `source == "fork"`.
      - **`stop`:** load the state, or init it with `init_offset(None, len)` if missing, which means skip. Run
-       `read_from(offset)`, then `derive(end_of_session=false)`. Recurse into `SubagentRef`s, up to depth 3.
+       `read_from(offset)`, then `derive(session_id, …, end_of_session=false)`. Recurse into `SubagentRef`s, up to
+       depth 3, at `<transcript dir>/<session_id>/subagents/agent-<id>.jsonl` (layout confirmed on real sessions).
+       A background agent's tokens and tool count come from that recursion (Task 10).
      - **`session-end`:** the same as `stop` with `end_of_session=true`. Keep the state file.
   5. Build the `Context`:
      - harness `"claude-code"`;
      - `harness_version` from the last entry's `version`;
-     - `identity::user_id`;
-     - `repo::repo(cwd)`.
+     - user and repo from the state's cache. Only when the cache is empty, or `cwd` changed, run
+       `identity::user_id` and `repo::repo(cwd)` and store the results (this keeps `git` subprocesses off most `Stop`
+       runs, and out of the perf budget).
 
-     Sanitise everything, `encode`, then `deliver` if there are any invocations. Save the state, with the new offset
-     and the open invocations.
+     Sanitise everything, `encode`, then `deliver` if there are any invocations. Save the state, with the new offset,
+     the open invocations and the pending agents.
 - `main.rs` reads stdin, constructs `Deps` with `ProcessEnv`, `UreqTransport` and the `current_exe` dir, and calls
   `run_hook` inside `std::panic::catch_unwind`. It always exits 0.
 
@@ -720,6 +806,12 @@ README.md  docs/langfuse-setup.md
     nothing.
   - `subagent_recursion`: with the `sess-1` fixtures, the posted spans include the Subagent and, parented under it,
     the subagent's skill and the MCP aggregate.
+  - `async_subagent_across_stops`: turn 1 (`others_async_t1.jsonl`) then `stop` posts no Subagent span. Append turn
+    2, `stop` again: one Subagent span with tokens summed from its subagent transcript fixture.
+  - `stale_session_flushed`: a state file for another session with one open skill, mtime 31 minutes ago. A `stop` on
+    the current session posts that skill's span with the cached user, and the other state's `open` is empty after.
+  - `identity_cached`: two `stop`s on the same session run `git` at most once (count via a fake `git` on `PATH`
+    that appends to a file).
   - `cli_emit_silent_exit_zero` (spawns the real binary with `HOME` set to the temp home): stdout and stderr are
     empty and the exit code is 0.
 - [ ] **Step 2:** In `tests/perf.rs`, `#[ignore]`-gated and run in CI with `--ignored`:
@@ -785,7 +877,9 @@ README.md  docs/langfuse-setup.md
   group is `{"hooks":[{"type":"command","async":true,"command":…}]}`, appended under `hooks.SessionStart`,
   `hooks.Stop` and `hooks.SessionEnd`.
 - **Ownership:** a group is wake's when it has exactly one hook whose `command` equals one of those strings. With any
-  older exe path, the match is `ends_with(" emit <event>")` and the program path's file name is `wake`.
+  older exe path, the match is `ends_with(" emit <event>")` and the program path's file name is `wake` (strip
+  surrounding quotes first). **Never** a command whose program path contains `/.claude/hooks/` or `${PLUGIN_ROOT}`:
+  those are APM-installed, and APM owns them (Review Focus 9).
 - **`install`:**
   - refuses non-`claude-code` harnesses;
   - refuses with no change for a symlinked, unparsable or non-object `settings.json`. A missing file is created as
@@ -793,8 +887,8 @@ README.md  docs/langfuse-setup.md
   - writes `config.json` (0600, directories 0700) from the args or prompts, and keeps existing keys that were not
     given;
   - removes any existing wake groups, then appends the new ones;
-  - writes `settings.json` atomically, preserving key order (`serde_json` `preserve_order` feature) and 2-space
-    indentation.
+  - writes `settings.json` atomically, preserving key order (`serde_json` `preserve_order` feature), 2-space
+    indentation, and whether the file ended with a trailing newline.
 - **`uninstall`:** removes only wake groups. It drops event keys and the `hooks` key if they become empty and
   weren't empty before. With `purge`, it also removes `~/.config/wake` and the state dir.
 
@@ -808,9 +902,12 @@ README.md  docs/langfuse-setup.md
   - `refuses_comments_and_symlink`: settings with `// x` give `SettingsUnreadable`, and a symlinked settings file
     gives `SettingsIsSymlink`. The file bytes are unchanged in both cases.
   - `config_written_0600_without_echoing_secret`: the summary string does not contain the secret header value.
-  - `uninstall_restores_bytes`: install then uninstall on a fixture settings file gives bytes identical to the
-    original. This mirrors the spike check.
+  - `uninstall_restores_bytes`: install then uninstall gives bytes identical to the original, for two fixtures
+    formatted the way Claude Code writes the file (`JSON.stringify(obj, null, 2)`, non-ASCII left unescaped): one
+    with a trailing newline and one without. This mirrors the spike check.
   - `uninstall_keeps_user_edited_group`: a wake group where the user added a second hook is kept.
+  - `apm_hooks_untouched`: a settings file with `"$HOME/.claude/hooks/smos-telemetry/bin/wake" emit stop`. Install
+    then uninstall leaves that group in place, and install still adds its own 3 groups.
 - [ ] **Step 2:** Run `cargo test --test install` and expect FAIL.
 - [ ] **Step 3:** Implement it. Add `serde_json = { version = "1", features = ["preserve_order"] }`. That is a
   feature, not a new crate.
@@ -887,6 +984,11 @@ README.md  docs/langfuse-setup.md
 - [ ] **Step 4:** Point it at a test Langfuse project with `wake install --endpoint https://<langfuse>/api/public/otel/v1/traces --header "Authorization=Basic …"`.
   Repeat one session, and confirm in the Langfuse UI that the trace appears, with user and session populated and
   cost computed from the tokens. Record any attribute that Langfuse did not map, and fix it in `otlp.rs` with a test.
+  Then confirm the duplicate behaviour spec §5.8 relies on: POST one captured body twice (the second time with one
+  attribute value changed), and check that Langfuse shows **one** observation for that span id, carrying the second
+  value. If it shows two, report it: spec §5.8's duplicate handling then needs a redesign.
+- [ ] **Step 4b:** In a session, launch a background subagent (`run_in_background`) and let it finish in a later
+  turn. Confirm one `wake.subagent` span with `wake.outcome == "ok"` and tokens, sent after the notification turn.
 - [ ] **Step 5:** Run `wake uninstall --purge`, and check that `~/.claude/settings.json` is byte-identical to the
   backup.
 - [ ] **Step 6:** Report the results to the user, including Langfuse screenshots or notes. Do not tag a release:

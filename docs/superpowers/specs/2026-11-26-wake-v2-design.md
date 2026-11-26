@@ -106,9 +106,17 @@ These were verified on 2026-11-26 against the Claude Code docs and real local tr
   - **Slash-invoked skills rarely produce a `Skill` tool_use.** Only 2 of the 41 observed did. Their content is
     injected as user entries (`isMeta`). An invocation therefore starts at either a `Skill` tool_use or a
     `<command-name>` entry.
-  - **The `Agent` tool result** (`toolUseResult` on the user entry) carries `agentId`, `agentType`, `status`,
-    `usage`, `totalTokens`, `totalToolUseCount`, `toolStats` and `totalDurationMs`. The subagent's own transcript
-    is at `<session dir>/subagents/agent-<agentId>.jsonl`.
+  - **The `Agent` tool result** (`toolUseResult` on the user entry) of a foreground subagent carries `agentId`,
+    `agentType`, `status`, `usage`, `totalTokens`, `totalToolUseCount`, `toolStats` and `totalDurationMs`. The
+    subagent's own transcript is at `<session dir>/subagents/agent-<agentId>.jsonl`.
+  - **Background subagents are the common case.** In a local sample, 45 of 55 `Agent` results had
+    `status: "async_launched"` (`run_in_background`). That result carries only `agentId`, `isAsync`, `status` and
+    fields wake does not read: no usage, no type, no duration. The subagent is still running, and its transcript is
+    still being written, when the parent turn's `Stop` fires. Its end arrives later as a user entry whose content
+    starts with `<task-notification>` (`origin.kind == "task-notification"`), carrying `<tool-use-id>` (the `Agent`
+    tool_use) and `<status>` (`completed`, `failed` or `killed`). Background Bash tasks use the same envelope.
+  - **`<command-name>` also appears inside other text** (skill bodies, pasted text, tool descriptions). Only a
+    non-`isMeta` user entry whose content starts with the tag is a slash command.
 - **Identity:** `~/.claude.json` has `oauthAccount.emailAddress` for subscription logins.
 - **Distribution:** the Supermodular marketplace is an APM catalog
   (`gitlab.com/supermodularai/core/transformation-stack/ai-primitives/marketplace`). Packages are installed from git
@@ -295,11 +303,15 @@ current turn, not with the size of the session.
 | Hook | Work |
 | --- | --- |
 | `SessionStart` | Emit one `wake.inventory` event (§5.6). |
-| `Stop` | Read the main transcript from the stored offset to the end. For each completed `Agent` tool_result in the slice, also parse that subagent's transcript file, which is complete by then. Derive and send events (§5.5). Store the new offset and the open-invocation state. |
-| `SessionEnd` | Process any remaining slice, as `Stop` does, then close every open invocation. Keep the state file (see below). |
+| `Stop` | Read the main transcript from the stored offset to the end. For each subagent that finished in the slice (a foreground `Agent` tool_result, or the `<task-notification>` of a background one), also parse that subagent's transcript file, which is complete by then. Derive and send events (§5.5). Store the new offset, the open invocations and the still-running background subagents. |
+| `SessionEnd` | Process any remaining slice, as `Stop` does, then close every open invocation and every still-running background subagent. Keep the state file (see below). |
 
-There is no `SubagentStop` hook. The subagent's summary and transcript are both available when the parent's `Stop`
-sees the `Agent` tool_result, and parent linking is trivial there.
+There is no `SubagentStop` hook. A foreground subagent's summary and transcript are both available when the
+parent's `Stop` sees the `Agent` tool_result. A background subagent is held open in the session state until its
+`<task-notification>` appears in a later slice. Parent linking is trivial in both cases, because the `Agent`
+tool_use is in the parent transcript.
+
+There is no `StopFailure` hook either. A turn that ends in an API error is read at the next `Stop`.
 
 All hooks are `"async": true`. This adds one process per turn, not one per tool call. Hooks say *when* to read. The
 current transcript slice says *what* happened. This replaces v1's full rescans with an incremental read of one turn.
@@ -312,10 +324,14 @@ no plugin data dir; §3 spike):
 
 - `sessions/<session_id>.json` holds:
   - the byte offset;
-  - the open invocations (§5.5), as span id, kind, name, start time and running aggregates.
+  - the open invocations (§5.5), as span id, kind, name, start time and running aggregates;
+  - the background subagents still running;
+  - the resolved user and repo, cached so `git` runs once per session rather than on every `Stop`.
 
-  The file survives `SessionEnd`, so `--resume` continues from the same offset instead of rescanning. Files untouched
-  for 14 days are deleted on the next run. A fork (`SessionStart` `source=fork`) starts with an offset at the end of
+  The file survives `SessionEnd`, so `--resume` continues from the same offset instead of rescanning. A session that
+  never gets `SessionEnd` (killed terminal, crash) would otherwise lose its open invocations, so any run first closes
+  and sends the open invocations of other sessions idle for more than 30 minutes, keeping their offsets. Files
+  untouched for 14 days are deleted on the next run. A fork (`SessionStart` `source=fork`) starts with an offset at the end of
   the forked transcript, so the copied history is never re-sent.
 - `outbox.ndjson`: events whose send failed (§5.8).
 
@@ -344,13 +360,21 @@ invocation starts and ends.
     - `window.tools`, as tool names with counts, e.g. `Bash:4,Read:2`. Names only.
   - **Nesting:** if a skill starts while another skill's invocation is open and the new start entry is attributed to
     the outer skill, the new invocation's parent is the outer one, and its invoker is `nested`.
-- **Subagent invocation.** Built at `Stop` from the `Agent` tool_result:
-  - `agentType`, `status`, `usage`, `totalToolUseCount`, `toolStats` and `totalDurationMs` give the event.
+- **Subagent invocation.**
+  - Its name is the `Agent` tool_use's `input.subagent_type`. It starts at that tool_use.
+  - **Foreground:** built at `Stop` from the `Agent` tool_result. `status`, `usage`, `totalToolUseCount`, `toolStats`
+    and `totalDurationMs` give the event.
+  - **Background** (`async_launched`): kept open in the session state, never reported as an error for being async.
+    It closes at the `<task-notification>` with the same tool-use id (`completed` → ok, `killed` → interrupted,
+    `failed` → error), or at `SessionEnd` as interrupted. Its tokens and tool count are summed from its own
+    transcript, deduplicated by `requestId`.
   - The parent is the skill invocation the `Agent` tool_use was attributed to (`attributionSkill`), if there is one.
   - The subagent's transcript is then parsed with the same rules. Skills, MCP tools and nested subagents inside it
     produce their own events, parented to the subagent. Their tokens are counted there only, never twice.
-- **MCP tools.** Aggregated, not one event per call. One `mcp_tool` event per (MCP server, tool, enclosing
-  invocation or turn) carries:
+- **MCP tools.** Aggregated, not one event per call. One `mcp_tool` event per turn per (MCP server, tool, enclosing
+  invocation or none), parented to the enclosing invocation, carries the fields below. A skill that spans several
+  turns therefore gets one aggregate per turn per MCP tool; the backend sums them under the parent. This keeps MCP
+  aggregates out of the state file.
   - `calls`, `errors`;
   - total and max `duration_ms`, from the tool_use and tool_result timestamps.
 
@@ -364,7 +388,8 @@ invocation starts and ends.
 - **Outcome** for skills and subagents (my call; tool error counts are always sent separately):
   - `error`: the skill failed to load (the `Skill` tool_result has `is_error`), or the subagent's `status` is not
     completed;
-  - `interrupted`: the turn ended by user interrupt, or by `StopFailure`, while the invocation was open;
+  - `interrupted`: the turn ended by user interrupt while the invocation was open, or a background subagent was
+    killed or still running at `SessionEnd`. (An API error that ends a turn is not tracked; see §5.4.)
   - `ok`: anything else.
 
   "Did the skill achieve its goal" is not knowable from telemetry. That belongs to evals.
@@ -403,13 +428,15 @@ Langfuse mapping (the builder confirms these against the current Langfuse OTel d
 | `wake.repo` | `git remote get-url origin`, normalised to `host/group/name`. Never a local path. |
 
 **Inventory event.** `SessionStart` sends one `wake.inventory` span, every session, with no local dedup state. The
-backend deduplicates per user per day. It carries `wake.inventory` as an array of `kind:name@version (plugin)`
-entries, read from the harness's skill, agent and plugin folders, plus user and harness attributes. Installs is the
+backend deduplicates per user per day. It carries `wake.inventory` as an array of `kind:name@version` entries
+(`skill:superpowers:brainstorming@7.0.2`, with `-` for an unknown version; the plugin is already the name's prefix,
+and each entry must pass the allowlist), read from the harness's skill, agent and plugin folders, plus user and harness attributes. Installs is the
 count of distinct users who have the primitive in their inventory over the last 30 days. "Installed but never used"
 is a backend query, installs minus reach, with no code in the binary.
 
-**Allowlist.** The event is a fixed Rust struct. Every string is checked against a bounded token pattern (no spaces,
-no `/` except in `wake.repo`, length-capped). A value that fails the check is dropped, never truncated or guessed.
+**Allowlist.** The event is a fixed Rust struct. Every string is checked against a bounded token pattern (letters,
+digits and `._:@+_-`; no spaces, no `/` except in `wake.repo`, length-capped). `_` is required: MCP names are
+`mcp__<server>__<tool>`. A value that fails the check is dropped, never truncated or guessed.
 
 ### 5.7 Identity
 
@@ -511,6 +538,7 @@ absent where the harness does not record tokens per message.
   - an interrupted turn;
   - repeated `requestId` usage;
   - a subagent inside a skill;
+  - a background subagent that finishes in a later turn;
   - MCP errors.
 - Allowlist tests: hostile values (paths, newlines, secrets-shaped strings) never reach a span.
 - End-to-end: `wake check` against a local OTLP receiver and against a test Langfuse project; one real Claude Code session with the package installed, and
