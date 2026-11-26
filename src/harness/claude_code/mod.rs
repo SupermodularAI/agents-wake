@@ -100,16 +100,18 @@ pub fn run_hook(hook: &str, stdin: &[u8], deps: &Deps) {
         now_secs: since_epoch.as_secs(),
     };
 
-    run.flush_stale();
+    // Every payload is queued and its state saved before anything goes over the network (R20),
+    // so a kill during the POST neither loses nor re-derives events.
+    run.close_stale();
     state::gc(&run.dir, deps.now);
-    let Some(_guard) = state::lock_session(&run.dir, &run.session_id) else {
-        return;
-    };
-    match hook {
-        Hook::SessionStart => run.session_start(),
-        Hook::Stop => run.read_slice(false),
-        Hook::SessionEnd => run.read_slice(true),
+    if let Some(_guard) = state::lock_session(&run.dir, &run.session_id) {
+        match hook {
+            Hook::SessionStart => run.session_start(),
+            Hook::Stop => run.read_slice(false),
+            Hook::SessionEnd => run.read_slice(true),
+        }
     }
+    run.flush_outbox();
 }
 
 impl Run<'_> {
@@ -117,16 +119,16 @@ impl Run<'_> {
         fs::metadata(&self.transcript).map(|m| m.len()).unwrap_or(0)
     }
 
-    /// Close and send the open work of other sessions idle for over 30 minutes (R18), keeping
+    /// Close and queue the open work of other sessions idle for over 30 minutes (R18), keeping
     /// their offsets. Their transcript path is unknown, so their subagents are not followed.
-    fn flush_stale(&self) {
+    fn close_stale(&self) {
         for (id, mut st, _guard) in state::stale_open(&self.dir, self.deps.now) {
             if id == self.session_id {
                 continue;
             }
             let d = derive(&id, &[], &mut st, &self.installed, self.now_ns, true);
             let ctx = context(&id, None, &st);
-            self.send(ctx, d.closed);
+            self.queue(ctx, d.closed);
             st.open.clear();
             st.pending_agents.clear();
             let _ = state::save(&self.dir, &id, &st);
@@ -148,7 +150,7 @@ impl Run<'_> {
             self.now_ns,
         );
         self.resolve_identity(&mut st);
-        self.send(context(&self.session_id, None, &st), vec![inv]);
+        self.queue(context(&self.session_id, None, &st), vec![inv]);
         let _ = state::save(&self.dir, &self.session_id, &st);
     }
 
@@ -185,7 +187,7 @@ impl Run<'_> {
         );
         if !closed.is_empty() {
             self.resolve_identity(&mut st);
-            self.send(context(&self.session_id, version, &st), closed);
+            self.queue(context(&self.session_id, version, &st), closed);
         }
         let _ = state::save(&self.dir, &self.session_id, &st);
     }
@@ -204,29 +206,40 @@ impl Run<'_> {
         st.cwd = Some(self.cwd.clone());
     }
 
-    /// Sanitise, encode and deliver, holding the shared outbox lock (R11).
-    fn send(&self, ctx: Context, invs: Vec<Invocation>) {
+    fn outbox(&self) -> Outbox {
+        Outbox {
+            path: self.dir.join("outbox.ndjson"),
+        }
+    }
+
+    /// Sanitise, encode and append to the shared outbox, under the outbox lock (R11).
+    fn queue(&self, ctx: Context, invs: Vec<Invocation>) {
         let invs: Vec<Invocation> = invs.into_iter().filter_map(Invocation::sanitized).collect();
         if invs.is_empty() {
             return;
         }
         let payload = otlp::encode(&ctx.sanitized(), &invs);
         let _lock = lock_outbox(&self.dir);
-        let outbox = Outbox {
-            path: self.dir.join("outbox.ndjson"),
-        };
-        send::deliver(
+        send::enqueue(&self.outbox(), &payload, self.now_secs);
+    }
+
+    /// One flush per run, under the outbox lock. An empty outbox makes no network call.
+    fn flush_outbox(&self) {
+        if !self.outbox().path.exists() {
+            return;
+        }
+        let _lock = lock_outbox(&self.dir);
+        send::flush(
             self.deps.transport,
             &self.cfg,
-            &outbox,
-            &payload,
+            &self.outbox(),
             self.now_secs,
         );
     }
 }
 
 /// Exclusive blocking lock on `<state dir>/outbox.lock`; released when the file drops.
-/// `None` on any error, in which case delivery goes ahead unlocked.
+/// `None` on any error, in which case the outbox is used unlocked.
 fn lock_outbox(dir: &Path) -> Option<File> {
     use std::os::unix::fs::OpenOptionsExt;
     fs::create_dir_all(dir).ok()?;
@@ -336,14 +349,17 @@ fn follow_subagents(
         let Ok((entries, _)) = read_from(&path, 0) else {
             continue;
         };
-        let (tokens, tool_calls) = transcript_usage(&entries);
-        let id = span_id(&r.span_key);
-        if let Some(inv) = out
-            .iter_mut()
-            .find(|i| i.kind == Kind::Subagent && i.span_id == id)
-        {
-            inv.tokens = tokens;
-            inv.tool_calls = Some(tool_calls);
+        // An empty transcript says nothing: keep what derive produced.
+        if !entries.is_empty() {
+            let (tokens, tool_calls) = transcript_usage(&entries);
+            let id = span_id(&r.span_key);
+            if let Some(inv) = out
+                .iter_mut()
+                .find(|i| i.kind == Kind::Subagent && i.span_id == id)
+            {
+                inv.tokens = tokens;
+                inv.tool_calls = Some(tool_calls);
+            }
         }
         let mut st = SessionState {
             root_parent_key: Some(r.span_key),

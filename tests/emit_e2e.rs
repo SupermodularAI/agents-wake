@@ -25,6 +25,8 @@ impl Env for MapEnv {
 #[derive(Default)]
 struct FakeTransport {
     calls: RefCell<Vec<Value>>,
+    /// Every post fails with a network error (still recorded).
+    fail: std::cell::Cell<bool>,
 }
 
 impl FakeTransport {
@@ -52,7 +54,11 @@ impl Transport for FakeTransport {
         self.calls
             .borrow_mut()
             .push(serde_json::from_slice(body).unwrap());
-        Ok(())
+        if self.fail.get() {
+            Err(SendError::Network)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -442,6 +448,104 @@ fn stale_session_flushed() {
     assert!(after.open.is_empty());
     assert!(after.pending_agents.is_empty());
     assert_eq!(after.offset, 1234);
+}
+
+fn save_stale(dir: &Path, id: &str, skill: &str) {
+    let st = SessionState {
+        open: vec![OpenInvocation {
+            span_key: format!("toolu_{id}"),
+            kind: "skill".to_string(),
+            name: skill.to_string(),
+            invoker: "model".to_string(),
+            start_ns: 1_000_000_000,
+            last_ns: 2_000_000_000,
+            ..OpenInvocation::default()
+        }],
+        ..SessionState::default()
+    };
+    state::save(dir, id, &st).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(dir.join(format!("sessions/{id}.json")))
+        .unwrap()
+        .set_modified(SystemTime::now() - Duration::from_secs(31 * 60))
+        .unwrap();
+}
+
+#[test]
+fn failed_send_keeps_state_advanced_and_queues_payload() {
+    let h = H::new();
+    let t = FakeTransport::default();
+    let tr = h.transcript("others_command", "s-cmd");
+    h.run(&t, "session-start", "s-cmd", &tr, Some("fork"));
+    let before = t.count();
+    // Start at 0 so the stop has a command to send.
+    let mut st = state::load(&h.state_dir(), "s-cmd").unwrap();
+    st.offset = 0;
+    state::save(&h.state_dir(), "s-cmd", &st).unwrap();
+
+    t.fail.set(true);
+    h.run(&t, "stop", "s-cmd", &tr, None);
+    assert_eq!(t.count(), before + 1, "one attempt");
+    let st = state::load(&h.state_dir(), "s-cmd").unwrap();
+    assert_eq!(st.offset, fs::metadata(&tr).unwrap().len());
+    let outbox = fs::read_to_string(h.state_dir().join("outbox.ndjson")).unwrap();
+    assert_eq!(outbox.lines().count(), 1);
+    assert!(outbox.contains("wake.command compact"));
+
+    t.fail.set(false);
+    let before = t.count();
+    h.run(&t, "stop", "s-cmd", &tr, None);
+    let resent = t.spans_since(before);
+    assert_eq!(t.count(), before + 1);
+    assert_eq!(resent.len(), 1);
+    assert_eq!(resent[0]["name"], "wake.command compact");
+    assert!(!h.state_dir().join("outbox.ndjson").exists());
+}
+
+#[test]
+fn stale_sessions_queue_then_one_post_attempt() {
+    let h = H::new();
+    let t = FakeTransport::default();
+    t.fail.set(true);
+    let dir = h.state_dir();
+    for i in 0..3 {
+        save_stale(&dir, &format!("stale-{i}"), &format!("skill-{i}"));
+    }
+    let tr = h.transcript("others_command", "s-cmd");
+    h.run(&t, "stop", "s-cmd", &tr, None);
+    assert_eq!(t.count(), 1);
+    let outbox = fs::read_to_string(dir.join("outbox.ndjson")).unwrap();
+    assert_eq!(outbox.lines().count(), 3);
+    for i in 0..3 {
+        assert!(state::load(&dir, &format!("stale-{i}"))
+            .unwrap()
+            .open
+            .is_empty());
+    }
+}
+
+#[test]
+fn empty_subagent_transcript_keeps_derived_usage() {
+    let h = H::new();
+    let t = FakeTransport::default();
+    let tr = h.transcript("others_subagent", "sess-1");
+    let sub_dir = h.projects.join("sess-1/subagents");
+    fs::create_dir_all(&sub_dir).unwrap();
+    fs::write(sub_dir.join("agent-abc.jsonl"), "").unwrap();
+    h.run(&t, "session-start", "sess-1", &tr, Some("startup"));
+    h.run(&t, "stop", "sess-1", &tr, None);
+    let sub = of_kind(&t.spans(), "subagent");
+    assert_eq!(sub.len(), 1);
+    // From toolUseResult, not overwritten by the empty transcript.
+    assert_eq!(
+        attr(&sub[0], "gen_ai.usage.input_tokens").as_deref(),
+        Some("300")
+    );
+    assert_eq!(
+        attr(&sub[0], "wake.window.tool_calls").as_deref(),
+        Some("7")
+    );
 }
 
 // ---- tests that spawn the real binary ----

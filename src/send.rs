@@ -127,17 +127,26 @@ impl Outbox {
     }
 }
 
-/// Flush the outbox oldest-first, then send `payload`; failures are queued.
-pub fn deliver(t: &dyn Transport, cfg: &Config, outbox: &Outbox, payload: &Value, now_secs: u64) {
+/// Append `payload` to the outbox (pruned and rewritten atomically). Errors are ignored.
+pub fn enqueue(outbox: &Outbox, payload: &Value, now_secs: u64) {
+    let mut entries = outbox.read();
+    entries.push(Entry {
+        t: now_secs,
+        body: payload.clone(),
+    });
+    outbox.write(entries, now_secs);
+}
+
+/// Send queued entries oldest-first. Stops at the first transient failure, drops permanent 4xx
+/// rejections, then prunes and rewrites (or removes) the outbox. An empty outbox makes no call.
+pub fn flush(t: &dyn Transport, cfg: &Config, outbox: &Outbox, now_secs: u64) {
     let Some(url) = cfg.endpoint.as_deref() else {
         return;
     };
-    let Ok(body) = serde_json::to_vec(payload) else {
-        return;
-    };
     let queued = outbox.read();
-    let had_queue = !queued.is_empty();
-
+    if queued.is_empty() {
+        return;
+    }
     let mut remaining = Vec::new();
     let mut blocked = false;
     for entry in queued {
@@ -157,22 +166,14 @@ pub fn deliver(t: &dyn Transport, cfg: &Config, outbox: &Outbox, payload: &Value
             }
         }
     }
+    outbox.write(remaining, now_secs);
+}
 
-    let queue_new = if blocked {
-        true
-    } else {
-        match t.post(url, &cfg.headers, &body) {
-            Ok(()) => false,
-            Err(e) => !e.is_permanent(),
-        }
-    };
-    if queue_new {
-        remaining.push(Entry {
-            t: now_secs,
-            body: payload.clone(),
-        });
+/// Queue `payload` behind anything already queued, then flush. Failures stay queued.
+pub fn deliver(t: &dyn Transport, cfg: &Config, outbox: &Outbox, payload: &Value, now_secs: u64) {
+    if cfg.endpoint.is_none() {
+        return;
     }
-    if had_queue || queue_new {
-        outbox.write(remaining, now_secs);
-    }
+    enqueue(outbox, payload, now_secs);
+    flush(t, cfg, outbox, now_secs);
 }
