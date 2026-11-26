@@ -8,7 +8,7 @@ fn main() -> ExitCode {
     match args.get(1).map(String::as_str) {
         Some("emit") => {
             // emit must never fail, print, or panic outward.
-            let _ = std::panic::catch_unwind(|| {
+            wake::run_silently(|| {
                 let mut stdin = Vec::new();
                 let _ = std::io::stdin().read_to_end(&mut stdin);
                 let hook = args.get(2).map(String::as_str).unwrap_or("");
