@@ -40,7 +40,8 @@ else
 fi
 
 tmp=$(mktemp -d) || die "cannot create a temporary directory"
-trap 'rm -rf "$tmp"' EXIT INT TERM
+trap 'rm -rf "$tmp"' EXIT
+trap 'exit 1' INT TERM
 
 curl -fsSL -o "$tmp/$asset" "$base/$asset" || die "download of $asset failed"
 curl -fsSL -o "$tmp/checksums.txt" "$base/checksums.txt" || die "download of checksums.txt failed"

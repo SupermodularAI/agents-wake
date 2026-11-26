@@ -34,8 +34,8 @@ jobs:
         if: matrix.zig
         run: |
           set -euo pipefail
-          python3 -m pip install ziglang
-          cargo install --locked cargo-zigbuild
+          python3 -m pip install ziglang==0.17.1
+          cargo install --locked --version 0.24.1 cargo-zigbuild
 
       - name: build (zigbuild)
         if: matrix.zig

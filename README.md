@@ -12,7 +12,7 @@ It runs inside the hooks. There is no daemon, and it never prints or fails: `wak
 
 ## What it sends
 
-Only the fields below, and only values that pass a strict token check (letters, digits and `._:@+-`).
+Only the fields below, and only values that pass a strict token check (letters, digits and `._:@+_-`).
 A value that fails the check is dropped, not truncated.
 
 | Attribute | Meaning |
