@@ -330,7 +330,10 @@ no plugin data dir; §3 spike):
 
   The file survives `SessionEnd`, so `--resume` continues from the same offset instead of rescanning. A session that
   never gets `SessionEnd` (killed terminal, crash) would otherwise lose its open invocations, so any run first closes
-  and sends the open invocations of other sessions idle for more than 30 minutes, keeping their offsets. Files
+  and sends the open invocations of other sessions idle for more than 30 minutes, keeping their offsets. Idle means
+  the state file and the session's transcript (its path is saved in the state) are both untouched for 30 minutes, so
+  a long single turn or a long background subagent is not closed early; background subagents closed this way are
+  followed into their own transcripts like any other. Files
   untouched for 14 days are deleted on the next run. A fork (`SessionStart` `source=fork`) starts with an offset at the end of
   the forked transcript, so the copied history is never re-sent.
 - `outbox.ndjson`: events whose send failed (§5.8).

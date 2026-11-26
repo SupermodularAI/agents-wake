@@ -63,6 +63,10 @@ pub struct SessionState {
     /// Parent for invocations with no enclosing skill (R17): a subagent transcript's own subagent span key.
     #[serde(default)]
     pub root_parent_key: Option<String>,
+    /// The session's main transcript, saved on every hook run (R27): staleness also looks at its
+    /// mtime, and the stale flush follows subagent transcripts next to it.
+    #[serde(default)]
+    pub transcript_path: Option<String>,
 }
 
 const STALE_AFTER: Duration = Duration::from_secs(30 * 60);
@@ -177,7 +181,16 @@ fn has_open(s: &SessionState) -> bool {
     !s.open.is_empty() || !s.pending_agents.is_empty()
 }
 
-/// Idle sessions (open invocations or pending agents, state untouched for over 30 minutes).
+/// Untouched for over 30 minutes, or missing. A transcript path that does not exist says nothing.
+fn idle_transcript(s: &SessionState, now: SystemTime) -> bool {
+    s.transcript_path
+        .as_deref()
+        .and_then(|p| age(Path::new(p), now))
+        .is_none_or(|a| a > STALE_AFTER)
+}
+
+/// Idle sessions (R27): open invocations or pending agents, with the state file and the
+/// transcript (when its path is known and it exists) both untouched for over 30 minutes.
 /// Each comes with its lock held; sessions whose lock is held elsewhere are skipped.
 pub fn stale_open(dir: &Path, now: SystemTime) -> Vec<(String, SessionState, SessionGuard)> {
     let mut out = Vec::new();
@@ -201,7 +214,10 @@ pub fn stale_open(dir: &Path, now: SystemTime) -> Vec<(String, SessionState, Ses
         };
         // re-read under the lock: the state may have changed since the listing
         let Some(state) = load(dir, id) else { continue };
-        if has_open(&state) && age(&path, now).is_some_and(|a| a > STALE_AFTER) {
+        if has_open(&state)
+            && age(&path, now).is_some_and(|a| a > STALE_AFTER)
+            && idle_transcript(&state, now)
+        {
             out.push((id.to_string(), state, guard));
         }
     }

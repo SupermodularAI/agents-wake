@@ -119,20 +119,38 @@ impl Run<'_> {
         fs::metadata(&self.transcript).map(|m| m.len()).unwrap_or(0)
     }
 
-    /// Close and queue the open work of other sessions idle for over 30 minutes (R18), keeping
-    /// their offsets. Their transcript path is unknown, so their subagents are not followed.
+    /// Close and queue the open work of other sessions idle for over 30 minutes (R18, R27),
+    /// keeping their offsets. Subagents they close are followed through the saved transcript path.
     fn close_stale(&self) {
         for (id, mut st, _guard) in state::stale_open(&self.dir, self.deps.now) {
             if id == self.session_id {
                 continue;
             }
             let d = derive(&id, &[], &mut st, &self.installed, self.now_ns, true);
+            let mut closed = d.closed;
+            if let Some(tp) = st.transcript_path.clone() {
+                follow_subagents(
+                    Path::new(&tp),
+                    &id,
+                    d.subagents,
+                    1,
+                    &self.installed,
+                    self.now_ns,
+                    &mut closed,
+                );
+            }
             let ctx = context(&id, None, &st);
-            self.queue(ctx, d.closed);
+            self.queue(ctx, closed);
             st.open.clear();
             st.pending_agents.clear();
             let _ = state::save(&self.dir, &id, &st);
         }
+    }
+
+    /// Saves the state with the transcript path of this run (R27).
+    fn save(&self, st: &mut SessionState) {
+        st.transcript_path = self.transcript.to_str().map(str::to_string);
+        let _ = state::save(&self.dir, &self.session_id, st);
     }
 
     fn session_start(&self) {
@@ -151,7 +169,7 @@ impl Run<'_> {
         );
         self.resolve_identity(&mut st);
         self.queue(context(&self.session_id, None, &st), vec![inv]);
-        let _ = state::save(&self.dir, &self.session_id, &st);
+        self.save(&mut st);
     }
 
     /// `stop` and `session-end`: derive the new slice and the subagents it finished.
@@ -189,7 +207,7 @@ impl Run<'_> {
             self.resolve_identity(&mut st);
             self.queue(context(&self.session_id, version, &st), closed);
         }
-        let _ = state::save(&self.dir, &self.session_id, &st);
+        self.save(&mut st);
     }
 
     /// Fill the state's user and repo cache, running `git` only when it is stale.

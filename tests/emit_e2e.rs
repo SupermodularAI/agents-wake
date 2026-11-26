@@ -10,7 +10,7 @@ use wake::config::Env;
 use wake::harness::claude_code::{run_hook, Deps};
 use wake::ids::span_id;
 use wake::send::{SendError, Transport};
-use wake::state::{self, OpenInvocation, SessionState};
+use wake::state::{self, OpenInvocation, PendingAgent, SessionState};
 
 const ENDPOINT: &str = "http://127.0.0.1:1/";
 
@@ -486,6 +486,127 @@ fn save_stale(dir: &Path, id: &str, skill: &str) {
         .unwrap()
         .set_modified(SystemTime::now() - Duration::from_secs(31 * 60))
         .unwrap();
+}
+
+fn set_mtime(path: &Path, ago: Duration) {
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(SystemTime::now() - ago)
+        .unwrap();
+}
+
+/// A session with an open skill whose state is 31 minutes old and whose transcript was last
+/// written `transcript_age` ago.
+fn save_with_transcript(h: &H, id: &str, transcript_age: Duration) {
+    let tr = h.transcript("others_command", id);
+    let st = SessionState {
+        offset: fs::metadata(&tr).unwrap().len(),
+        open: vec![OpenInvocation {
+            span_key: format!("toolu_{id}"),
+            kind: "skill".to_string(),
+            name: format!("long-{id}"),
+            invoker: "model".to_string(),
+            start_ns: 1_000_000_000,
+            last_ns: 2_000_000_000,
+            attributed: true,
+            ..OpenInvocation::default()
+        }],
+        transcript_path: Some(tr.to_str().unwrap().to_string()),
+        ..SessionState::default()
+    };
+    state::save(&h.state_dir(), id, &st).unwrap();
+    set_mtime(
+        &h.state_dir().join(format!("sessions/{id}.json")),
+        Duration::from_secs(31 * 60),
+    );
+    set_mtime(&tr, transcript_age);
+}
+
+#[test]
+fn stale_needs_an_idle_transcript_too() {
+    // R27: a long single turn keeps writing its transcript while its state file ages.
+    let h = H::new();
+    let t = FakeTransport::default();
+    save_with_transcript(&h, "live-turn", Duration::from_secs(60));
+    save_with_transcript(&h, "idle-sess", Duration::from_secs(31 * 60));
+    let tr = h.transcript("others_command", "s-cmd");
+    h.run(&t, "stop", "s-cmd", &tr, None);
+    let spans = t.spans();
+    assert!(
+        !spans
+            .iter()
+            .any(|s| s["name"] == "wake.skill long-live-turn"),
+        "{spans:#?}"
+    );
+    assert_eq!(
+        state::load(&h.state_dir(), "live-turn").unwrap().open.len(),
+        1
+    );
+    assert!(spans
+        .iter()
+        .any(|s| s["name"] == "wake.skill long-idle-sess"));
+    assert!(state::load(&h.state_dir(), "idle-sess")
+        .unwrap()
+        .open
+        .is_empty());
+}
+
+#[test]
+fn run_hook_records_transcript_path() {
+    let h = H::new();
+    let t = FakeTransport::default();
+    let tr = h.transcript("others_command", "s-cmd");
+    h.run(&t, "session-start", "s-cmd", &tr, Some("startup"));
+    let st = state::load(&h.state_dir(), "s-cmd").unwrap();
+    assert_eq!(st.transcript_path.as_deref(), tr.to_str());
+    h.run(&t, "stop", "s-cmd", &tr, None);
+    let st = state::load(&h.state_dir(), "s-cmd").unwrap();
+    assert_eq!(st.transcript_path.as_deref(), tr.to_str());
+}
+
+#[test]
+fn stale_pending_agent_follows_its_transcript() {
+    let h = H::new();
+    let t = FakeTransport::default();
+    // The main transcript of the stale session is gone; its subagent transcript is still there.
+    let main = h.projects.join("sess-async.jsonl");
+    h.subagent("sess-async", "def");
+    let st = SessionState {
+        pending_agents: vec![PendingAgent {
+            agent_id: "def".to_string(),
+            tool_use_id: "toolu_async_agent".to_string(),
+            span_key: "agent:def:toolu_async_agent".to_string(),
+            parent_key: None,
+            name: "Explore".to_string(),
+            start_ns: 1_000_000_000,
+        }],
+        transcript_path: Some(main.to_str().unwrap().to_string()),
+        ..SessionState::default()
+    };
+    state::save(&h.state_dir(), "sess-async", &st).unwrap();
+    set_mtime(
+        &h.state_dir().join("sessions/sess-async.json"),
+        Duration::from_secs(31 * 60),
+    );
+    let tr = h.transcript("others_command", "s-cmd");
+    h.run(&t, "stop", "s-cmd", &tr, None);
+    let sub = of_kind(&t.spans(), "subagent");
+    assert_eq!(sub.len(), 1, "{:#?}", t.spans());
+    assert_eq!(
+        attr(&sub[0], "gen_ai.usage.input_tokens").as_deref(),
+        Some("120")
+    );
+    assert_eq!(
+        attr(&sub[0], "wake.window.tool_calls").as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        attr(&sub[0], "gen_ai.request.model").as_deref(),
+        Some("claude-haiku-5-5")
+    );
+    assert_eq!(attr(&sub[0], "session.id").as_deref(), Some("sess-async"));
 }
 
 #[test]
