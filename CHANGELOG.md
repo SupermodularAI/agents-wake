@@ -9,6 +9,23 @@ called out under Changed.
 
 ## [Unreleased]
 
+### Changed
+
+- v2 is a rewrite in Rust, replacing the Go scanner and report. Wake is now a small binary that Claude Code
+  hooks call (`wake emit`, always exit 0, no output) and that sends skill, subagent, MCP tool and command
+  usage as OTLP spans, with tokens and model as `gen_ai.*` so Langfuse prices them. Nothing is read from
+  other harnesses yet, and `scan`, `doctor`, `report` and the project consent table are gone. Breaking.
+- Configuration is `WAKE_OTLP_ENDPOINT`, `WAKE_OTLP_HEADERS`, `WAKE_IDENTITY` and `WAKE_DISABLED`, a
+  `telemetry.json` next to the binary, or `~/.config/wake/config.json`. `OTEL_EXPORTER_OTLP_*` are ignored.
+
+### Added
+
+- `wake install` / `wake uninstall [--purge]` manage the Claude Code hooks and the user config; `wake check`
+  prints the resolved config and sends a test event.
+- GitHub Releases for macOS and Linux on arm64 and x86_64 (static musl on Linux), with `checksums.txt`,
+  and an `install.sh` that verifies them.
+- `package/`, an APM package template for organisations, and `docs/langfuse-setup.md`.
+
 ## [0.4.0] - 2026-09-15
 
 ### Added

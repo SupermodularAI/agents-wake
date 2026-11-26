@@ -1,0 +1,4 @@
+# Template: rename `name` and set your own version and description.
+name: wake-telemetry
+version: 0.1.0
+description: Sends skill telemetry from Claude Code to your Langfuse project (wake).

@@ -32,6 +32,15 @@ jobs:
       - name: test
         run: cargo test
 
+      - name: launcher and install script
+        run: |
+          sh tests/launcher.sh
+          shellcheck install.sh package/bin/wake tests/launcher.sh
+
+      - name: perf budget (release mode)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --release --test perf -- --ignored
+
       - name: release binary is at most 2 MB
         run: |
           set -euo pipefail

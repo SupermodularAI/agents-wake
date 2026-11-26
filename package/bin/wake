@@ -1,0 +1,25 @@
+#!/bin/sh
+# Launcher: runs the wake binary that matches this machine, sitting next to it.
+# Anything unexpected exits 0 after draining stdin, so a hook never fails or
+# sees a broken pipe.
+
+case "$(uname -s)" in
+  Darwin) os=darwin ;;
+  Linux) os=linux ;;
+  *) os= ;;
+esac
+case "$(uname -m)" in
+  arm64 | aarch64) arch=arm64 ;;
+  x86_64 | amd64) arch=x64 ;;
+  *) arch= ;;
+esac
+
+if [ -n "$os" ] && [ -n "$arch" ]; then
+  bin="$(dirname "$0")/wake-$os-$arch"
+  if [ -x "$bin" ]; then
+    exec "$bin" "$@"
+  fi
+fi
+
+cat > /dev/null
+exit 0

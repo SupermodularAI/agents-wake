@@ -16,6 +16,8 @@ cargo build --release
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
+sh tests/launcher.sh
+shellcheck install.sh package/bin/wake tests/launcher.sh
 ```
 
 This is the same gate CI runs.
@@ -35,17 +37,31 @@ This is the same gate CI runs.
 
 ## Code layout
 
-- `cmd/wake/main.go` only calls into `internal/cli` — no logic there.
-- `internal/cli` only parses flags and prints; everything else lives below it.
-- Each subcommand lives in its own file under `internal/cli`.
-- `internal/` is used by default. There is no `pkg/` — code intended for reuse
-  outside this module is a design discussion, not a default choice.
-- Colocate tests next to the code they cover (`foo.go` / `foo_test.go`).
+- `src/main.rs`: argument dispatch for `emit`, `check`, `install` and `uninstall`; no logic.
+- `src/lib.rs`: module declarations. Everything testable lives in the library.
+- `src/event.rs`: the fixed event struct (`Invocation`, `Context`) and the string allowlist validators.
+- `src/config.rs`: config resolution (env, then `telemetry.json` next to the binary, then `~/.config/wake/config.json`).
+- `src/identity.rs`: user email lookup and the HMAC pseudonym.
+- `src/repo.rs`: `origin` remote to `host/group/name`.
+- `src/ids.rs`: deterministic trace and span ids.
+- `src/otlp.rs`: invocations to an OTLP JSON trace request.
+- `src/send.rs`: HTTP transport, the outbox and delivery.
+- `src/state.rs`: per-session state, locking, garbage collection and state paths.
+- `src/harness/mod.rs`: the hook enum and the contract a harness implements.
+- `src/harness/claude_code/`: the Claude Code adapter (`transcript.rs` incremental JSONL reader,
+  `inventory.rs` installed primitives, `derive.rs` transcript to invocations, `mod.rs` hook orchestration).
+- `src/install.rs`: `wake install` / `uninstall` (the `settings.json` merge).
+- `src/check.rs`: `wake check`.
+- `tests/*.rs`: integration tests, with synthetic hand-written transcripts in `tests/fixtures/`. Never commit
+  a real transcript. `tests/perf.rs` is ignored by default (`cargo test --release --test perf -- --ignored`).
+- `tests/launcher.sh`: tests the APM launcher; run it with `sh tests/launcher.sh`.
+- `package/`: the APM package template for organisations. No secrets, no binaries.
+- `install.sh`: the release installer. CI runs `shellcheck` on it and on the launcher.
 
 ## Reporting issues
 
-Open a GitHub issue with steps to reproduce. Wake never writes raw transcript
-content to logs or error messages, so redacted output from `wake doctor` is
+Open a GitHub issue with steps to reproduce. Wake never writes transcript
+content to logs or error messages, so the output of `wake check` is
 safe to include.
 
 ## License
