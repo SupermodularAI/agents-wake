@@ -90,6 +90,17 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// Serialises in-process hooks and child processes across this file's test threads.
+///
+/// A hook holds its session lock (`flock`) while it runs and spawns `git`. If another test thread
+/// forks at that moment, the child holds a copy of the lock descriptor until it execs, so under
+/// load the next hook of the first test finds its own session locked and silently does nothing.
+/// Real hooks are separate processes, so this only affects tests.
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static HOOKS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    HOOKS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn fixture(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/claude_code")
@@ -188,6 +199,7 @@ impl H {
             transport: t,
             now: SystemTime::now(),
         };
+        let _serial = serial();
         run_hook(hook, &self.payload(session, transcript, source), &deps);
     }
 }
@@ -690,6 +702,7 @@ fn empty_subagent_transcript_keeps_derived_usage() {
 // ---- tests that spawn the real binary ----
 
 fn spawn_emit(home: &Path, path_env: &str, hook: &str, payload: &[u8]) -> std::process::Output {
+    let _serial = serial();
     let mut child = Command::new(env!("CARGO_BIN_EXE_wake"))
         .args(["emit", hook])
         .env_clear()
