@@ -423,6 +423,7 @@ Langfuse mapping (the builder confirms these against the current Langfuse OTel d
 | `wake.outcome` | ok, error, interrupted |
 | `wake.window.duration_ms`, `.tool_calls`, `.tool_errors`, `.tools` | §5.5 |
 | `wake.tokens.input`, `.output`, `.cache_read`, `.cache_creation`, `wake.model` | transcript usage. Absent, never zero, when unknown. |
+| `langfuse.observation.type` | `generation` on spans that carry a model or tokens, so Langfuse prices them (an explicit type always wins over inference) |
 | `wake.session.id` | hook payload |
 | `wake.user.email` or `wake.user.hash` | §5.7 |
 | `wake.repo` | `git remote get-url origin`, normalised to `host/group/name`. Never a local path. |

@@ -335,6 +335,7 @@ README.md  docs/langfuse-setup.md
   | `wake.window.tools` | `"Bash:6,Read:5"`: count descending, then name ascending |
   | `wake.mcp.server`, `wake.mcp.calls`, `wake.mcp.errors`, `wake.mcp.total_duration_ms`, `wake.mcp.max_duration_ms` | `mcp` |
   | `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read_input_tokens`, `gen_ai.usage.cache_creation_input_tokens` | model, tokens |
+  | `langfuse.observation.type` = `generation` | spans that carry a model or any token count, so Langfuse treats them as generations and prices them |
   | `wake.inventory` | `arrayValue` of `stringValue`s, Inventory kind only |
 
   - Integers use `intValue` as decimal strings. A token count is omitted when `None`, never sent as 0.
