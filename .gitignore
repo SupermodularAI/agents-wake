@@ -17,3 +17,4 @@ CLAUDE.md
 .DS_Store
 .env
 .env.*
+!tests/fixtures/**/.claude/
