@@ -59,7 +59,7 @@ fn repo_rejects() {
 
 #[test]
 fn email_rules() {
-    assert!(is_email("jose.morais@supermodular.ai"));
+    assert!(is_email("dev@example.com"));
     assert!(!is_email("no-at"));
     assert!(!is_email("a@b@c"));
     assert!(!is_email("@b.c"));

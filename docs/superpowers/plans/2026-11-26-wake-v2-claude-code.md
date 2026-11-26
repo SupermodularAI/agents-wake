@@ -199,7 +199,7 @@ README.md  docs/langfuse-setup.md
   - `repo_accepts_host_group_name`: `is_repo("gitlab.com/supermodularai/core/agents-wake")` is true.
   - `repo_rejects`: false for `"agents-wake"` (one segment), `"/Users/x/repo"` (empty first segment),
     `"gitlab.com/../x"`.
-  - `email_rules`: `is_email("jose.morais@supermodular.ai")` is true. `"no-at"` and `"a@b@c"` are false.
+  - `email_rules`: `is_email("dev@example.com")` is true. `"no-at"` and `"a@b@c"` are false.
   - `sanitized_drops_invalid_name`: an invocation named `"rm -rf /"` returns `None`.
   - `sanitized_drops_bad_optionals`: `version = Some("1.0 beta")` becomes `None`, and
     `tools = [("Bash",3),("../x",1)]` becomes `[("Bash",3)]`.
