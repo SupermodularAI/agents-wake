@@ -40,6 +40,8 @@ pub enum InstallError {
     SettingsNotObject,
     SettingsIsSymlink,
     UnsupportedHarness,
+    /// The binary's path has a character a shell still expands inside double quotes (`"` `$` `` ` `` `\`).
+    UnsafeExePath,
     Io(io::Error),
 }
 
@@ -56,6 +58,9 @@ impl std::fmt::Display for InstallError {
                 f.write_str("~/.claude/settings.json is a symlink; edit its target by hand; nothing changed")
             }
             Self::UnsupportedHarness => f.write_str("unsupported harness (only claude-code)"),
+            Self::UnsafeExePath => f.write_str(
+                "the wake binary's path contains \", $, ` or \\, which the hook command cannot quote safely; move the binary to a plain path and re-run; nothing changed",
+            ),
             Self::Io(e) => write!(f, "{e}"),
         }
     }
@@ -465,6 +470,9 @@ pub fn install(
 ) -> Result<String, InstallError> {
     if args.harness != HARNESS {
         return Err(InstallError::UnsupportedHarness);
+    }
+    if exe.to_string_lossy().contains(['"', '$', '`', '\\']) {
+        return Err(InstallError::UnsafeExePath);
     }
     let mut settings = load_settings(home)?;
     let cfg_path = config::user_config_path(env, home);

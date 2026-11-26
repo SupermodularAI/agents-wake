@@ -292,6 +292,20 @@ fn refuses_other_harness() {
 }
 
 #[test]
+fn refuses_exe_path_with_shell_metacharacters() {
+    // The hook command is run by a shell with the path in double quotes, where these still act.
+    for bad in ["a\"b", "a$b", "a`b", "a\\b"] {
+        let h = home();
+        let exe = h.home.join(bad).join("wake");
+        let err = install(&no_env(), &h.home, &exe, &args(), &mut Silent).unwrap_err();
+        assert!(matches!(err, InstallError::UnsafeExePath), "{bad}: {err:?}");
+        assert!(err.to_string().contains("wake"), "{err}");
+        assert!(!settings_path(&h.home).exists(), "{bad}");
+        assert!(!h.home.join(".config").exists(), "{bad}");
+    }
+}
+
+#[test]
 fn config_written_0600_without_echoing_secret() {
     let h = home();
     let mut a = args();
