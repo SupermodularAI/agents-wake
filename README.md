@@ -48,11 +48,12 @@ wake install
 release, verifies its SHA-256 against `checksums.txt`, and puts it in `~/.local/bin`. Set
 `WAKE_INSTALL_DIR` to put it elsewhere. It never uses sudo.
 
-`wake install` asks for the endpoint, headers and identity mode (or takes `--endpoint URL`,
-`--header K=V` and `--identity email|anonymous`), writes `~/.config/wake/config.json` (or
-`$XDG_CONFIG_HOME/wake/config.json` when that is set) with mode 0600,
-and adds its three hooks (`SessionStart`, `Stop`, `SessionEnd`) to `~/.claude/settings.json`. It
-refuses to touch a `settings.json` that is not plain JSON. Re-run it to change the config.
+`wake install` writes the complete config to `~/.config/wake/config.json` (or
+`$XDG_CONFIG_HOME/wake/config.json` when that is set) with mode 0600, and adds its three hooks
+(`SessionStart`, `Stop`, `SessionEnd`) to `~/.claude/settings.json`. At a terminal it asks for the endpoint,
+public key and secret key; otherwise pass `--endpoint URL`, `--public-key K` and `--secret-key K`, or fill them in
+by hand afterwards (see Configuration). It never overwrites a value you already set, and it refuses to touch a
+`settings.json` that is not plain JSON. Re-run it any time.
 
 ### Organisation path (APM)
 
@@ -71,7 +72,7 @@ Developers on this path configure their machine with the environment variables b
 wake check
 ```
 
-Prints where the endpoint, headers and identity came from (never the header values or the path), then
+Prints where the endpoint, auth and identity came from (never keys, header values or the path), then
 sends one test event. It exits 0 if the event was delivered. A Langfuse setup walk-through is in
 [docs/langfuse-setup.md](docs/langfuse-setup.md).
 
@@ -80,19 +81,37 @@ sends one test event. It exits 0 if the event was delivered. A Langfuse setup wa
 | Variable | Effect |
 | --- | --- |
 | `WAKE_OTLP_ENDPOINT` | OTLP/HTTP traces URL. Must be `https://`, or `http://` for localhost |
-| `WAKE_OTLP_HEADERS` | Headers as `k=v,k2=v2` (values may be percent-encoded) |
+| `WAKE_PUBLIC_KEY`, `WAKE_SECRET_KEY` | Key pair; wake sends `Authorization: Basic base64(public_key:secret_key)` |
+| `WAKE_OTLP_HEADERS` | Other headers as `k=v,k2=v2` (values may be percent-encoded) |
 | `WAKE_IDENTITY` | `email` (default) or `anonymous` |
 | `WAKE_DISABLED` | `1` or `true`: send nothing |
 
-Resolution order: these variables, then `telemetry.json` next to the binary, then
+`wake install` writes this file, and you only fill in the endpoint and the two keys:
+
+```json
+{
+  "endpoint": "https://<langfuse host>/api/public/otel/v1/traces",
+  "public_key": "pk-lf-...",
+  "secret_key": "sk-lf-...",
+  "headers": {},
+  "identity": "email",
+  "identity_salt": "",
+  "allow_override": true
+}
+```
+
+Wake builds the Basic auth header from the two keys. `headers` is for other backends, and an `Authorization`
+header set there wins over the keys. Empty strings count as unset.
+
+Resolution order, per setting: these variables, then `telemetry.json` next to the binary, then
 `~/.config/wake/config.json` (`$XDG_CONFIG_HOME/wake/config.json` when `XDG_CONFIG_HOME` is set). A
-config file with `"allow_override": false` ignores the first three variables. `WAKE_DISABLED` is always
+config file with `"allow_override": false` ignores every variable except `WAKE_DISABLED`, which is always
 honoured.
 
 Anonymous mode needs an `identity_salt`, an organisation secret set in the config file (there is no
 variable for it): `{"identity": "anonymous", "identity_salt": "<org secret>"}`. `wake.user.hash` is
 HMAC-SHA256 of your email with that salt. Without a salt, anonymous mode sends no user at all rather than
-an unsalted hash. `wake install` keeps an `identity_salt` you add to its config file by hand.
+an unsalted hash. `wake install` keeps an `identity_salt` you put in its config file.
 
 If a send fails, the event is queued in `$XDG_STATE_HOME/wake` (default `~/.local/state/wake`) and retried by
 the next `wake emit`. The queue holds at most 1,000 events or 7 days.

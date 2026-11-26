@@ -42,12 +42,15 @@ impl Source {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub endpoint: Option<String>,
+    /// Includes the derived `Authorization: Basic` header when both keys resolved and none was set explicitly.
     pub headers: Vec<(String, String)>,
     pub identity: IdentityMode,
     pub identity_salt: Option<String>,
     pub allow_override: bool,
+    /// True when the `Authorization` header in `headers` was derived from `public_key` and `secret_key`.
+    pub basic_from_keys: bool,
     pub disabled: bool,
-    /// Keys: "endpoint", "headers", "identity".
+    /// Keys: "endpoint", "headers", "identity", "public_key", "secret_key".
     pub sources: BTreeMap<&'static str, Source>,
 }
 
@@ -67,6 +70,8 @@ impl Env for ProcessEnv {
 #[derive(Serialize, Deserialize, Default)]
 pub struct FileConfig {
     pub endpoint: Option<String>,
+    pub public_key: Option<String>,
+    pub secret_key: Option<String>,
     pub headers: Option<BTreeMap<String, String>>,
     pub identity: Option<String>,
     pub identity_salt: Option<String>,
@@ -88,6 +93,25 @@ pub fn user_config_path(env: &dyn Env, home: &Path) -> PathBuf {
 fn load(path: &Path) -> Option<FileConfig> {
     let bytes = std::fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
+}
+
+/// Standard base64 (RFC 4648, with padding).
+pub fn base64_encode(input: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let n = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(T[((n >> (18 - 6 * i)) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 fn percent_decode(s: &str) -> String {
@@ -175,7 +199,9 @@ pub fn resolve(env: &dyn Env, exe_dir: &Path, home: &Path) -> Config {
         .iter()
         .find_map(|(_, f)| f.allow_override)
         .unwrap_or(true);
-    let identity_salt = files.iter().find_map(|(_, f)| f.identity_salt.clone());
+    let identity_salt = files
+        .iter()
+        .find_map(|(_, f)| f.identity_salt.clone().filter(|v| !v.is_empty()));
     let disabled = matches!(
         env.var("WAKE_DISABLED").as_deref(),
         Some("1") | Some("true")
@@ -196,7 +222,7 @@ pub fn resolve(env: &dyn Env, exe_dir: &Path, home: &Path) -> Config {
         endpoint_cands.push((Source::Env, v));
     }
     for (s, f) in &files {
-        if let Some(v) = &f.endpoint {
+        if let Some(v) = f.endpoint.as_ref().filter(|v| !v.is_empty()) {
             endpoint_cands.push((*s, v.clone()));
         }
     }
@@ -215,15 +241,44 @@ pub fn resolve(env: &dyn Env, exe_dir: &Path, home: &Path) -> Config {
         }
     }
     for (s, f) in &files {
-        if let Some(m) = &f.headers {
+        if let Some(m) = f.headers.as_ref().filter(|m| !m.is_empty()) {
             header_cands.push((*s, m.iter().map(|(k, v)| (k.clone(), v.clone())).collect()));
         }
     }
-    let (headers_src, headers) = header_cands
+    let (headers_src, mut headers) = header_cands
         .into_iter()
         .next()
         .unwrap_or((Source::Default, Vec::new()));
     sources.insert("headers", headers_src);
+
+    // Each key resolves on its own: env > telemetry.json > config.json. Empty strings are absent.
+    let key = |env_name: &str, pick: fn(&FileConfig) -> Option<&String>| {
+        envv(env_name).map(|v| (Source::Env, v)).or_else(|| {
+            files
+                .iter()
+                .find_map(|(s, f)| pick(f).filter(|v| !v.is_empty()).map(|v| (*s, v.clone())))
+        })
+    };
+    let public_key = key("WAKE_PUBLIC_KEY", |f| f.public_key.as_ref());
+    let secret_key = key("WAKE_SECRET_KEY", |f| f.secret_key.as_ref());
+    if let Some((s, _)) = &public_key {
+        sources.insert("public_key", *s);
+    }
+    if let Some((s, _)) = &secret_key {
+        sources.insert("secret_key", *s);
+    }
+    // Generic HTTP Basic auth; an explicit Authorization header wins.
+    let mut basic_from_keys = false;
+    if let (Some((_, pk)), Some((_, sk))) = (&public_key, &secret_key) {
+        if !headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+        {
+            let token = base64_encode(format!("{pk}:{sk}").as_bytes());
+            headers.push(("Authorization".to_string(), format!("Basic {token}")));
+            basic_from_keys = true;
+        }
+    }
 
     let mut id_cands: Vec<(Source, IdentityMode)> = Vec::new();
     if let Some(m) = envv("WAKE_IDENTITY").and_then(|v| IdentityMode::parse(&v)) {
@@ -246,6 +301,7 @@ pub fn resolve(env: &dyn Env, exe_dir: &Path, home: &Path) -> Config {
         identity,
         identity_salt,
         allow_override,
+        basic_from_keys,
         disabled,
         sources,
     }

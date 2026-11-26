@@ -184,3 +184,90 @@ fn identity_headers_salt_from_files_and_env() {
     let c = resolve(&env(&[("WAKE_IDENTITY", "bogus")]), e.path(), h.path());
     assert_eq!(c.identity, IdentityMode::Anonymous);
 }
+
+fn auth(c: &Config) -> Option<String> {
+    c.headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+        .map(|(_, v)| v.clone())
+}
+
+#[test]
+fn base64_known_answers() {
+    for (i, o) in [
+        ("", ""),
+        ("f", "Zg=="),
+        ("fo", "Zm8="),
+        ("foo", "Zm9v"),
+        ("pk-lf-1:sk-lf-2", "cGstbGYtMTpzay1sZi0y"),
+    ] {
+        assert_eq!(base64_encode(i.as_bytes()), o);
+    }
+}
+
+#[test]
+fn keys_from_file_derive_basic_auth() {
+    let (h, e) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    write_user(h.path(), r#"{"public_key":"pk","secret_key":"sk"}"#);
+    let c = resolve(&env(&[]), e.path(), h.path());
+    assert_eq!(auth(&c).as_deref(), Some("Basic cGs6c2s="));
+    assert!(c.basic_from_keys);
+    assert_eq!(c.sources["public_key"], Source::UserConfig);
+    assert_eq!(c.sources["secret_key"].as_str(), "config.json");
+}
+
+#[test]
+fn env_keys_override_file_keys_unless_locked() {
+    let (h, e) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    write_user(h.path(), r#"{"public_key":"pk","secret_key":"sk"}"#);
+    let envs = env(&[("WAKE_PUBLIC_KEY", "a"), ("WAKE_SECRET_KEY", "b")]);
+    let c = resolve(&envs, e.path(), h.path());
+    assert_eq!(auth(&c).as_deref(), Some("Basic YTpi"));
+    assert_eq!(c.sources["public_key"], Source::Env);
+    write_user(
+        h.path(),
+        r#"{"public_key":"pk","secret_key":"sk","allow_override":false}"#,
+    );
+    let c = resolve(&envs, e.path(), h.path());
+    assert_eq!(auth(&c).as_deref(), Some("Basic cGs6c2s="));
+    assert_eq!(c.sources["public_key"], Source::UserConfig);
+}
+
+#[test]
+fn explicit_authorization_header_wins() {
+    let (h, e) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    write_user(
+        h.path(),
+        r#"{"public_key":"pk","secret_key":"sk","headers":{"authorization":"Bearer x"}}"#,
+    );
+    let c = resolve(&env(&[]), e.path(), h.path());
+    assert_eq!(auth(&c).as_deref(), Some("Bearer x"));
+    assert_eq!(c.headers.len(), 1);
+    assert!(!c.basic_from_keys);
+}
+
+#[test]
+fn empty_keys_are_absent_and_fall_through() {
+    let (h, e) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    write_exe(
+        e.path(),
+        r#"{"public_key":"","secret_key":"","endpoint":""}"#,
+    );
+    write_user(
+        h.path(),
+        r#"{"public_key":"pk","secret_key":"sk","endpoint":"https://u.example/x"}"#,
+    );
+    let c = resolve(&env(&[("WAKE_PUBLIC_KEY", "")]), e.path(), h.path());
+    assert_eq!(auth(&c).as_deref(), Some("Basic cGs6c2s="));
+    assert_eq!(c.sources["public_key"], Source::UserConfig);
+    assert_eq!(c.sources["endpoint"], Source::UserConfig);
+}
+
+#[test]
+fn one_key_gives_no_header() {
+    let (h, e) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    write_user(h.path(), r#"{"public_key":"pk","secret_key":""}"#);
+    let c = resolve(&env(&[]), e.path(), h.path());
+    assert!(c.headers.is_empty());
+    assert!(!c.basic_from_keys);
+}

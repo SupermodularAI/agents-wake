@@ -46,6 +46,7 @@ fn cfg(endpoint: Option<&str>) -> Config {
         identity: IdentityMode::Anonymous,
         identity_salt: None,
         allow_override: true,
+        basic_from_keys: false,
         disabled: false,
         sources: BTreeMap::new(),
     }

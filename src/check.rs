@@ -1,6 +1,6 @@
 //! `wake check`: print the resolved config and send one test event.
 //!
-//! Never prints header values, the endpoint path or query, or the identity itself.
+//! Never prints header values, key values, the endpoint path or query, or the identity itself.
 
 use crate::config::{self, IdentityMode};
 use crate::event::{Context, Invocation, Kind, Tokens, UserId};
@@ -26,12 +26,24 @@ pub fn run(deps: &Deps, out: &mut dyn Write) -> i32 {
             let _ = writeln!(out, "endpoint: none (from {})", src("endpoint"));
         }
     }
-    let _ = writeln!(
-        out,
-        "headers: {} set (from {})",
-        cfg.headers.len(),
-        src("headers")
-    );
+    let explicit = cfg.headers.len() - usize::from(cfg.basic_from_keys);
+    let _ = writeln!(out, "headers: {explicit} set (from {})", src("headers"));
+    if cfg.basic_from_keys {
+        let _ = writeln!(
+            out,
+            "auth: basic from keys (public_key from {}, secret_key from {})",
+            src("public_key"),
+            src("secret_key")
+        );
+    } else if cfg
+        .headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+    {
+        let _ = writeln!(out, "auth: header");
+    } else {
+        let _ = writeln!(out, "auth: none");
+    }
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| deps.home.clone());
     let user = identity::user_id(&cfg, identity::email(&deps.home, &cwd));

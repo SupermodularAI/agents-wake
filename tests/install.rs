@@ -75,6 +75,8 @@ fn read_settings(home: &Path) -> Value {
 fn args() -> InstallArgs {
     InstallArgs {
         endpoint: Some("https://lf.example.com/api/public/otel/v1/traces".into()),
+        public_key: None,
+        secret_key: None,
         headers: vec![],
         identity: None,
         harness: "claude-code".into(),
@@ -380,23 +382,29 @@ fn prompts_for_missing_values_with_secret_hidden() {
     let mut p = Scripted {
         answers: vec![
             "https://prompted.example.com".into(),
-            "Authorization=Basic cHJvbXB0ZWQ=".into(),
-            "".into(),
+            "pk-prompted".into(),
+            "sk-PROMPTED".into(),
         ],
         asked: vec![],
     };
     let summary = install(&no_env(), &h.home, &h.exe, &a, &mut p).unwrap();
-    assert!(!summary.contains("cHJvbXB0ZWQ="), "{summary}");
-    // Endpoint is not secret; the header is.
+    assert!(!summary.contains("sk-PROMPTED"), "{summary}");
+    assert!(
+        summary.contains("keys: public set, secret set"),
+        "{summary}"
+    );
+    // Only the secret key is read without echo.
     assert_eq!(p.asked.len(), 3, "{:?}", p.asked);
     assert!(!p.asked[0].1);
-    assert!(p.asked[1].1);
+    assert!(!p.asked[1].1);
+    assert!(p.asked[2].1);
     let cfg: Value =
         serde_json::from_slice(&std::fs::read(h.home.join(".config/wake/config.json")).unwrap())
             .unwrap();
     assert_eq!(cfg["endpoint"], "https://prompted.example.com");
-    assert_eq!(cfg["headers"]["Authorization"], "Basic cHJvbXB0ZWQ=");
-    assert!(cfg.get("identity").is_none());
+    assert_eq!(cfg["public_key"], "pk-prompted");
+    assert_eq!(cfg["secret_key"], "sk-PROMPTED");
+    assert_eq!(cfg["identity"], "email");
 }
 
 #[test]
@@ -613,4 +621,90 @@ fn uninstall_restores_bytes_ascii_escaped() {
         std::fs::read_to_string(settings_path(&h.home)).unwrap(),
         text
     );
+}
+
+const TEMPLATE_ORDER: [&str; 7] = [
+    "endpoint",
+    "public_key",
+    "secret_key",
+    "headers",
+    "identity",
+    "identity_salt",
+    "allow_override",
+];
+
+#[test]
+fn fresh_install_writes_the_full_template_in_order() {
+    let h = home();
+    let mut a = args();
+    a.endpoint = None;
+    let summary = install(&no_env(), &h.home, &h.exe, &a, &mut Silent).unwrap();
+    let cfg_path = h.home.join(".config/wake/config.json");
+    let mode = std::fs::metadata(&cfg_path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+    let text = std::fs::read_to_string(&cfg_path).unwrap();
+    assert_eq!(
+        text,
+        "{\n  \"endpoint\": \"\",\n  \"public_key\": \"\",\n  \"secret_key\": \"\",\n  \"headers\": {},\n  \"identity\": \"email\",\n  \"identity_salt\": \"\",\n  \"allow_override\": true\n}\n"
+    );
+    let cfg: Value = serde_json::from_str(&text).unwrap();
+    let keys: Vec<&String> = cfg.as_object().unwrap().keys().collect();
+    assert_eq!(keys, TEMPLATE_ORDER);
+    assert!(
+        summary.contains("keys: public missing, secret missing"),
+        "{summary}"
+    );
+    let p = cfg_path.display().to_string();
+    assert!(
+        summary
+            .trim_end()
+            .ends_with(&format!("Edit {p} to change endpoint, keys or identity.")),
+        "{summary}"
+    );
+}
+
+#[test]
+fn key_flags_are_written_and_never_printed() {
+    let h = home();
+    let mut a = args();
+    a.public_key = Some("pk-lf-1".into());
+    a.secret_key = Some("sk-lf-TOPSECRET".into());
+    let summary = install(&no_env(), &h.home, &h.exe, &a, &mut Silent).unwrap();
+    assert!(!summary.contains("TOPSECRET"), "{summary}");
+    assert!(
+        summary.contains("keys: public set, secret set"),
+        "{summary}"
+    );
+    let cfg: Value =
+        serde_json::from_slice(&std::fs::read(h.home.join(".config/wake/config.json")).unwrap())
+            .unwrap();
+    assert_eq!(cfg["public_key"], "pk-lf-1");
+    assert_eq!(cfg["secret_key"], "sk-lf-TOPSECRET");
+}
+
+#[test]
+fn reinstall_keeps_non_empty_values_and_unknown_keys() {
+    let h = home();
+    let cfg_path = h.home.join(".config/wake/config.json");
+    std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &cfg_path,
+        r#"{"extra":{"a":1},"secret_key":"sk-old","endpoint":"https://old.example.com","public_key":"","identity":"anonymous","identity_salt":"s"}"#,
+    )
+    .unwrap();
+    let mut a = args();
+    a.endpoint = None;
+    a.public_key = Some("pk-new".into());
+    install(&no_env(), &h.home, &h.exe, &a, &mut Silent).unwrap();
+    let cfg: Value = serde_json::from_slice(&std::fs::read(&cfg_path).unwrap()).unwrap();
+    assert_eq!(cfg["endpoint"], "https://old.example.com");
+    assert_eq!(cfg["public_key"], "pk-new");
+    assert_eq!(cfg["secret_key"], "sk-old");
+    assert_eq!(cfg["identity"], "anonymous");
+    assert_eq!(cfg["identity_salt"], "s");
+    assert_eq!(cfg["allow_override"], true);
+    assert_eq!(cfg["extra"]["a"], 1);
+    let keys: Vec<&String> = cfg.as_object().unwrap().keys().collect();
+    assert_eq!(keys[..7], TEMPLATE_ORDER);
+    assert_eq!(keys[7], "extra");
 }

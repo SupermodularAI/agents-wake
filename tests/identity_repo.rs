@@ -11,6 +11,7 @@ fn cfg(mode: IdentityMode, salt: Option<&str>) -> Config {
         identity: mode,
         identity_salt: salt.map(String::from),
         allow_override: true,
+        basic_from_keys: false,
         disabled: false,
         sources: Default::default(),
     }

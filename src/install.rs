@@ -22,6 +22,8 @@ const EVENTS: [(&str, &str); 3] = [
 
 pub struct InstallArgs {
     pub endpoint: Option<String>,
+    pub public_key: Option<String>,
+    pub secret_key: Option<String>,
     pub headers: Vec<(String, String)>,
     pub identity: Option<String>,
     pub harness: String,
@@ -363,54 +365,96 @@ fn non_empty(s: Option<String>) -> Option<String> {
     s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
-/// Fills the config from the args, prompting for values that are neither given nor already configured.
-fn apply_args(cfg: &mut Map<String, Value>, args: &InstallArgs, prompt: &mut dyn Prompter) {
-    let endpoint = non_empty(args.endpoint.clone()).or_else(|| {
-        if cfg.contains_key("endpoint") {
-            None
-        } else {
-            non_empty(prompt.ask("OTLP endpoint URL (empty to skip)", false))
-        }
-    });
-    if let Some(e) = endpoint {
-        cfg.insert("endpoint".into(), Value::String(e));
+/// The full config, in this order. Existing non-empty values are kept; unknown keys follow.
+fn is_empty_value(v: &Value) -> bool {
+    match v {
+        Value::Null => true,
+        Value::String(s) => s.trim().is_empty(),
+        Value::Object(m) => m.is_empty(),
+        _ => false,
     }
+}
 
-    let mut headers = args.headers.clone();
-    if headers.is_empty() && !cfg.contains_key("headers") {
-        let answer = non_empty(prompt.ask(
-            "Header for the endpoint, as Name=Value, e.g. Authorization=Basic … (empty to skip)",
-            true,
-        ));
-        if let Some((k, v)) = answer.as_deref().and_then(|a| a.split_once('=')) {
-            if !k.trim().is_empty() {
-                headers.push((k.trim().to_string(), v.trim().to_string()));
-            }
-        }
-    }
-    if !headers.is_empty() {
-        let map = cfg
-            .entry("headers")
-            .or_insert_with(|| Value::Object(Map::new()));
-        if !map.is_object() {
-            *map = Value::Object(Map::new());
-        }
-        let map = map.as_object_mut().expect("just made an object");
-        for (k, v) in headers {
-            map.insert(k, Value::String(v));
-        }
-    }
+fn str_of<'a>(cfg: &'a Map<String, Value>, key: &str) -> &'a str {
+    cfg.get(key).and_then(Value::as_str).unwrap_or("")
+}
 
-    let identity = non_empty(args.identity.clone()).or_else(|| {
-        if cfg.contains_key("identity") {
-            None
-        } else {
-            non_empty(prompt.ask("Identity mode, email or anonymous (empty for email)", false))
-        }
-    });
-    if let Some(i) = identity.filter(|i| i == "email" || i == "anonymous") {
-        cfg.insert("identity".into(), Value::String(i));
+/// Fills the config from the args, prompting for the endpoint and keys that are neither given nor configured,
+/// then lays it out as the full template.
+fn apply_args(
+    cfg: Map<String, Value>,
+    args: &InstallArgs,
+    prompt: &mut dyn Prompter,
+) -> Map<String, Value> {
+    let mut old = cfg;
+    old.retain(|_, v| !is_empty_value(v));
+
+    let mut pick =
+        |old: &Map<String, Value>, key: &str, arg: &Option<String>, q: &str, secret: bool| {
+            non_empty(arg.clone()).or_else(|| {
+                (!old.contains_key(key))
+                    .then(|| non_empty(prompt.ask(q, secret)))
+                    .flatten()
+            })
+        };
+    let endpoint = pick(
+        &old,
+        "endpoint",
+        &args.endpoint,
+        "OTLP endpoint URL (empty to skip)",
+        false,
+    );
+    let public_key = pick(
+        &old,
+        "public_key",
+        &args.public_key,
+        "Public key (empty to skip)",
+        false,
+    );
+    let secret_key = pick(
+        &old,
+        "secret_key",
+        &args.secret_key,
+        "Secret key (empty to skip)",
+        true,
+    );
+
+    let mut out = Map::new();
+    let text = |new: Option<String>, key: &str| {
+        Value::String(new.unwrap_or_else(|| str_of(&old, key).to_string()))
+    };
+    out.insert("endpoint".into(), text(endpoint, "endpoint"));
+    out.insert("public_key".into(), text(public_key, "public_key"));
+    out.insert("secret_key".into(), text(secret_key, "secret_key"));
+
+    let mut headers = match old.get("headers") {
+        Some(Value::Object(m)) => m.clone(),
+        _ => Map::new(),
+    };
+    for (k, v) in &args.headers {
+        headers.insert(k.clone(), Value::String(v.clone()));
     }
+    out.insert("headers".into(), Value::Object(headers));
+
+    let identity = non_empty(args.identity.clone())
+        .filter(|i| i == "email" || i == "anonymous")
+        .unwrap_or_else(|| match str_of(&old, "identity") {
+            "" => "email".to_string(),
+            other => other.to_string(),
+        });
+    out.insert("identity".into(), Value::String(identity));
+    out.insert("identity_salt".into(), text(None, "identity_salt"));
+    out.insert(
+        "allow_override".into(),
+        old.get("allow_override")
+            .filter(|v| v.is_boolean())
+            .cloned()
+            .unwrap_or(Value::Bool(true)),
+    );
+    for (k, v) in old {
+        out.entry(k).or_insert(v);
+    }
+    out
 }
 
 fn write_config(path: &Path, cfg: &Map<String, Value>) -> io::Result<()> {
@@ -430,7 +474,7 @@ fn write_config(path: &Path, cfg: &Map<String, Value>) -> io::Result<()> {
 
 fn config_summary(cfg: &Map<String, Value>) -> String {
     let mut out = String::new();
-    match cfg.get("endpoint").and_then(Value::as_str) {
+    match Some(str_of(cfg, "endpoint")).filter(|e| !e.is_empty()) {
         Some(e) if config::valid_endpoint(e) => {
             out += &format!("  endpoint: {}\n", config::origin(e).unwrap_or_default())
         }
@@ -449,9 +493,20 @@ fn config_summary(cfg: &Map<String, Value>) -> String {
     } else {
         out += &format!("  headers: {} (values not shown)\n", names.join(", "));
     }
-    let identity = cfg
-        .get("identity")
-        .and_then(Value::as_str)
+    let set = |k: &str| {
+        if str_of(cfg, k).is_empty() {
+            "missing"
+        } else {
+            "set"
+        }
+    };
+    out += &format!(
+        "  keys: public {}, secret {}\n",
+        set("public_key"),
+        set("secret_key")
+    );
+    let identity = Some(str_of(cfg, "identity"))
+        .filter(|i| !i.is_empty())
         .unwrap_or("email (default)");
     out += &format!("  identity: {identity}\n");
     out
@@ -476,9 +531,7 @@ pub fn install(
     }
     let mut settings = load_settings(home)?;
     let cfg_path = config::user_config_path(env, home);
-    let mut cfg = load_config(&cfg_path)?;
-
-    apply_args(&mut cfg, args, prompt);
+    let cfg = apply_args(load_config(&cfg_path)?, args, prompt);
 
     let replaced = remove_wake_groups(&mut settings.root, exe, false);
     let hooks = settings
@@ -499,10 +552,7 @@ pub fn install(
     write_config(&cfg_path, &cfg)?;
     write_settings(&settings)?;
 
-    let mut out = format!(
-        "wake installed for Claude Code.\n\nConfig: {}\n",
-        cfg_path.display()
-    );
+    let mut out = String::from("wake installed for Claude Code.\n\nConfig:\n");
     out += &config_summary(&cfg);
     out += &format!(
         "\nHooks: {} {} SessionStart, Stop and SessionEnd → {}\n",
@@ -511,6 +561,11 @@ pub fn install(
         exe.display()
     );
     out += "\nRun `wake check` to send a test event.\n";
+    out += &format!(
+        "\nConfig file: {}\nEdit {} to change endpoint, keys or identity.\n",
+        cfg_path.display(),
+        cfg_path.display()
+    );
     Ok(out)
 }
 

@@ -458,13 +458,18 @@ digits and `._:@+_-`; no spaces, no `/` except in `wake.repo`, length-capped). `
 
   ```json
   { "endpoint": "https://<langfuse host>/api/public/otel/v1/traces",
-    "headers": {"Authorization": "Basic <base64 of public_key:secret_key>"},
+    "public_key": "pk-lf-...", "secret_key": "sk-lf-...", "headers": {},
     "identity": "email", "identity_salt": "<org secret>", "allow_override": true }
   ```
 
+  When both keys resolve and `headers` has no `Authorization` (case-insensitive), wake derives
+  `Authorization: Basic base64(public_key:secret_key)`. This is generic HTTP Basic auth, so nothing in the binary is
+  Langfuse-specific; `headers` stays for other backends, and an explicit `Authorization` header wins. `wake install`
+  writes the full file with empty values; empty strings count as absent.
+
   JSON rather than TOML, to reuse `serde_json` and avoid an extra crate. This is the builder's call.
-- Machine overrides apply when `allow_override` is true: `WAKE_OTLP_ENDPOINT`, `WAKE_OTLP_HEADERS` (OTel `k=v,k=v`
-  format), `WAKE_IDENTITY`.
+- Machine overrides apply when `allow_override` is true: `WAKE_OTLP_ENDPOINT`, `WAKE_PUBLIC_KEY`,
+  `WAKE_SECRET_KEY`, `WAKE_OTLP_HEADERS` (OTel `k=v,k=v` format), `WAKE_IDENTITY`.
   - The generic `OTEL_EXPORTER_OTLP_*` variables are **deliberately ignored**. Other tools on the machine use them,
     and following them would silently redirect wake.
   - `allow_override=false` is a policy, not a security guarantee: the developer owns the machine.

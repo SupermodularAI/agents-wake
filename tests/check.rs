@@ -122,3 +122,34 @@ fn check_without_endpoint_or_when_disabled_does_not_send() {
     assert!(out.contains("disabled: yes"), "{out}");
     assert!(t.calls.borrow().is_empty());
 }
+
+#[test]
+fn check_reports_basic_auth_from_keys_without_leaking() {
+    let t = FakeTransport::new(Ok(()));
+    let (_, out) = check(
+        &[
+            ("WAKE_OTLP_ENDPOINT", "https://o.example.com"),
+            ("WAKE_PUBLIC_KEY", "pk-lf-1"),
+            ("WAKE_SECRET_KEY", "sk-lf-SECRET"),
+        ],
+        &t,
+    );
+    assert!(
+        out.contains("auth: basic from keys (public_key from env, secret_key from env)"),
+        "{out}"
+    );
+    assert!(out.contains("headers: 0 set"), "{out}");
+    for s in ["sk-lf-SECRET", "cGstbGYtMTpzay1sZi1TRUNSRVQ", "Basic"] {
+        assert!(!out.contains(s), "leaked {s}: {out}");
+    }
+    let (_, out) = check(&[("WAKE_OTLP_ENDPOINT", "https://o.example.com")], &t);
+    assert!(out.contains("auth: none"), "{out}");
+    let (_, out) = check(
+        &[
+            ("WAKE_OTLP_ENDPOINT", "https://o.example.com"),
+            ("WAKE_OTLP_HEADERS", "Authorization=Bearer x"),
+        ],
+        &t,
+    );
+    assert!(out.contains("auth: header"), "{out}");
+}

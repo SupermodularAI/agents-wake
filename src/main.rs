@@ -7,7 +7,7 @@ use wake::harness::claude_code::{run_hook, Deps};
 use wake::send::UreqTransport;
 
 const USAGE: &str = "usage: wake <emit <hook> | check | install | uninstall | --version>";
-const INSTALL_USAGE: &str = "usage: wake install [--harness claude-code] [--endpoint URL] [--header K=V]... [--identity email|anonymous]\n       wake uninstall [--harness claude-code] [--purge]";
+const INSTALL_USAGE: &str = "usage: wake install [--harness claude-code] [--endpoint URL] [--public-key K] [--secret-key K] [--header K=V]... [--identity email|anonymous]\n       wake uninstall [--harness claude-code] [--purge]";
 
 /// `wake emit <hook>`: read the payload, then handle it. Never prints, never fails.
 fn emit(hook: &str) {
@@ -62,6 +62,8 @@ fn parse_flags(args: &[String], uninstall: bool) -> Result<Flags, String> {
     let mut f = Flags {
         install: wake::install::InstallArgs {
             endpoint: None,
+            public_key: None,
+            secret_key: None,
             headers: vec![],
             identity: None,
             harness: "claude-code".into(),
@@ -79,6 +81,8 @@ fn parse_flags(args: &[String], uninstall: bool) -> Result<Flags, String> {
             ("--harness", _) => f.install.harness = value()?,
             ("--purge", true) => f.purge = true,
             ("--endpoint", false) => f.install.endpoint = Some(value()?),
+            ("--public-key", false) => f.install.public_key = Some(value()?),
+            ("--secret-key", false) => f.install.secret_key = Some(value()?),
             ("--header", false) => {
                 let v = value()?;
                 match v.split_once('=') {

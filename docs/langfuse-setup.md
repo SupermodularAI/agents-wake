@@ -7,17 +7,10 @@ Wake sends OTLP spans straight to Langfuse. This takes about five minutes.
 In Langfuse, create a new project used only for wake (for example `wake-telemetry`). Do not reuse a
 project that holds anything else: the keys you create below can read everything in it.
 
-## 2. Make the keys and the header
+## 2. Create the keys
 
 In the project's settings, create an API key pair: a public key (`pk-lf-...`) and a secret key
-(`sk-lf-...`). Langfuse authenticates OTLP with HTTP Basic auth, so the header value is
-`Basic ` followed by `base64(public_key:secret_key)`:
-
-```sh
-printf 'pk-lf-...:sk-lf-...' | base64
-```
-
-The header is `Authorization: Basic <that output>`.
+(`sk-lf-...`). You paste both into wake as they are; wake builds the Basic auth header itself.
 
 ## 3. Find the endpoint
 
@@ -34,10 +27,12 @@ Use your Langfuse Cloud region host or your self-hosted host. Wake sends OTLP ov
 ```sh
 wake install \
   --endpoint "https://<langfuse host>/api/public/otel/v1/traces" \
-  --header "Authorization=Basic <base64>"
+  --public-key "pk-lf-..." --secret-key "sk-lf-..."
 ```
 
-**An organisation (APM):** put the same values in the package's `bin/telemetry.json`, copied from
+Or run `wake install` at a terminal and answer the prompts, or edit `~/.config/wake/config.json`.
+
+**An organisation (APM):** put the same `endpoint`, `public_key` and `secret_key` in the package's `bin/telemetry.json`, copied from
 `telemetry.example.json`. See [package/README.md](../package/README.md).
 
 ## 5. Check
@@ -46,7 +41,7 @@ wake install \
 wake check
 ```
 
-It prints the endpoint host and the number of headers set, then sends a test span. Open the project's
+It prints the endpoint host and how the auth was set up (never the keys), then sends a test span. Open the project's
 Traces page: a `wake.command check` span should appear within a few seconds.
 
 ## The three conditions

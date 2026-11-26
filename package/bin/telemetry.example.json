@@ -1,7 +1,9 @@
 {
   "endpoint": "https://<langfuse host>/api/public/otel/v1/traces",
-  "headers": { "Authorization": "Basic <base64 of public_key:secret_key>" },
+  "public_key": "pk-lf-...",
+  "secret_key": "sk-lf-...",
+  "headers": {},
   "identity": "email",
-  "identity_salt": "<org secret, only used when identity is anonymous>",
+  "identity_salt": "",
   "allow_override": true
 }

@@ -43,7 +43,7 @@ does not exist for anyone else.
 - APM copies only the directory a hook command points at, so `telemetry.json` has to live in `bin/`, next to the
   binary. The binary reads it from its own directory.
 - Developers configure their own machine with environment variables only (`WAKE_OTLP_ENDPOINT`,
-  `WAKE_OTLP_HEADERS`, `WAKE_IDENTITY`, `WAKE_DISABLED`). Editing the installed `telemetry.json` is unsupported:
+  `WAKE_PUBLIC_KEY`, `WAKE_SECRET_KEY`, `WAKE_OTLP_HEADERS`, `WAKE_IDENTITY`, `WAKE_DISABLED`). Editing the installed `telemetry.json` is unsupported:
   the next APM update overwrites it. Set `"allow_override": false` to make the file win over those variables.
 - Rotating the Langfuse keys means issuing new keys and releasing a new package version.
 
