@@ -90,13 +90,18 @@ fn sessions_dir(dir: &Path) -> PathBuf {
     dir.join("sessions")
 }
 
-fn ensure_sessions_dir(dir: &Path) -> std::io::Result<PathBuf> {
+/// `create_dir_all` with mode 0700 for every directory it creates.
+pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
-    let s = sessions_dir(dir);
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
-        .create(&s)?;
+        .create(dir)
+}
+
+fn ensure_sessions_dir(dir: &Path) -> std::io::Result<PathBuf> {
+    let s = sessions_dir(dir);
+    create_private_dir(&s)?;
     Ok(s)
 }
 

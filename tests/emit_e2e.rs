@@ -762,3 +762,17 @@ fn cli_emit_silent_exit_zero() {
     assert!(state::load(&h.state_dir(), "s-cli").is_some());
     assert!(h.state_dir().join("outbox.ndjson").exists());
 }
+
+#[test]
+fn state_dir_and_outbox_are_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let h = H::new();
+    let t = FakeTransport::default();
+    t.fail.set(true);
+    let tr = h.transcript("others_command", "s-cmd");
+    h.run(&t, "session-start", "s-cmd", &tr, Some("startup"));
+    let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&h.state_dir()), 0o700);
+    assert_eq!(mode(&h.state_dir().join("sessions")), 0o700);
+    assert_eq!(mode(&h.state_dir().join("outbox.ndjson")), 0o600);
+}

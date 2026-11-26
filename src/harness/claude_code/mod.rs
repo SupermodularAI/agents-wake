@@ -260,7 +260,7 @@ impl Run<'_> {
 /// `None` on any error, in which case the outbox is used unlocked.
 fn lock_outbox(dir: &Path) -> Option<File> {
     use std::os::unix::fs::OpenOptionsExt;
-    fs::create_dir_all(dir).ok()?;
+    state::create_private_dir(dir).ok()?;
     let f = File::options()
         .write(true)
         .create(true)

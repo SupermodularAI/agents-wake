@@ -289,3 +289,14 @@ fn flush_stops_at_deadline_and_keeps_progress() {
     let bodies: Vec<Value> = read_lines(&o).iter().map(|l| l["body"].clone()).collect();
     assert_eq!(bodies, (150..200).map(p).collect::<Vec<_>>());
 }
+
+#[test]
+fn outbox_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = tempfile::tempdir().unwrap();
+    let o = outbox(d.path());
+    enqueue(&o, &p(1), NOW);
+    let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&o.path), 0o600);
+    assert_eq!(mode(o.path.parent().unwrap()), 0o700);
+}

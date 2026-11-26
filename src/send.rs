@@ -110,8 +110,9 @@ impl Outbox {
     }
 
     fn write_atomic(&self, entries: &[Entry]) -> std::io::Result<()> {
+        use std::os::unix::fs::OpenOptionsExt;
         if let Some(dir) = self.path.parent() {
-            fs::create_dir_all(dir)?;
+            crate::state::create_private_dir(dir)?;
         }
         let mut tmp = self.path.clone().into_os_string();
         tmp.push(".tmp");
@@ -122,7 +123,14 @@ impl Outbox {
             serde_json::to_writer(&mut out, &line)?;
             out.push(b'\n');
         }
-        let res = fs::File::create(&tmp)
+        // A leftover tmp from a killed run may have looser permissions; start from a new file.
+        let _ = fs::remove_file(&tmp);
+        let res = fs::File::options()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
             .and_then(|mut f| f.write_all(&out))
             .and_then(|_| fs::rename(&tmp, &self.path));
         if res.is_err() {
