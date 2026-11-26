@@ -23,14 +23,44 @@ fn ts(secs: u64) -> String {
     )
 }
 
+/// A file writer that counts the bytes written, so the transcript is streamed to disk.
+///
+/// Building it in memory would break the RSS budget on Linux: `Command::spawn` uses vfork, and
+/// `exec` folds the parent's peak RSS into the child's `ru_maxrss`, so a 20 MB buffer here would be
+/// measured as wake's memory.
+struct Counting {
+    w: std::io::BufWriter<fs::File>,
+    len: u64,
+}
+
+impl Counting {
+    fn len(&self) -> usize {
+        self.len as usize
+    }
+}
+
+impl Write for Counting {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.w.write(buf)?;
+        self.len += n as u64;
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.w.flush()
+    }
+}
+
 /// Writes the transcript and returns (file length, offset of the last turn, entry count).
 fn generate(path: &Path) -> (u64, u64, usize) {
     let pad = "x".repeat(330);
-    let mut out = Vec::with_capacity(21 << 20);
+    let mut out = Counting {
+        w: std::io::BufWriter::new(fs::File::create(path).unwrap()),
+        len: 0,
+    };
     let mut secs = 0u64;
     let mut entries = 0usize;
     let mut last_turn_offset = 0u64;
-    let mut line = |out: &mut Vec<u8>, kind: &str, extra: String, secs: &mut u64| {
+    let mut line = |out: &mut Counting, kind: &str, extra: String, secs: &mut u64| {
         *secs += 1;
         entries += 1;
         writeln!(
@@ -87,8 +117,8 @@ fn generate(path: &Path) -> (u64, u64, usize) {
             );
         }
     }
-    fs::write(path, &out).unwrap();
-    (out.len() as u64, last_turn_offset, entries)
+    out.flush().unwrap();
+    (out.len, last_turn_offset, entries)
 }
 
 struct Usage {
