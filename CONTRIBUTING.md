@@ -2,36 +2,28 @@
 
 ## Requirements
 
-Only the Go toolchain (1.25 or newer). `make validate` pulls its own lint
-tooling on first run — nothing else needs to be installed globally.
+Only the Rust toolchain (1.89 or newer, with `rustfmt` and `clippy`).
 
 ```sh
 git clone https://github.com/SupermodularAI/agents-wake.git
 cd agents-wake
-make build
+cargo build --release
 ```
-
-`make help` lists every target.
 
 ## Before opening a pull request
 
 ```sh
-make validate
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
 ```
 
-This runs the same gate CI runs: `fmt-check` → `vet` → `lint` → `test`. A
-green local run means the lint/vet/test portion of CI will pass. Also run:
-
-```sh
-make test-race
-```
-
-The release gate requires a race-clean suite.
+This is the same gate CI runs.
 
 ## Pull requests
 
 - Base branch is `main`.
-- CI (lint, vet, tests, and a cross-platform build check) and one approving
+- CI (fmt, clippy, tests on Linux and macOS, and a binary size check) and one approving
   review are required before merge.
 - Keep commits focused; squash-merge is used to land PRs, so intermediate
   commit history on your branch doesn't need to be pristine.
