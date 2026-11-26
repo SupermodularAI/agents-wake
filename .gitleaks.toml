@@ -31,3 +31,15 @@ regexes = [
   '''127\.0\.0\.1''',
   '''localhost''',
 ]
+
+# `tests/check.rs` asserts that `wake check` never prints the secret key or the Basic auth value
+# built from it, so the test has to name both: the fake key `sk-lf-SECRET` and its
+# base64 `pk-lf-1:sk-lf-SECRET`. Scoped by content like the rule above: a line is skipped only
+# when it carries that exact fake key, never by path.
+[[allowlists]]
+description = "Fake Langfuse key fixture in the no-leak test"
+targetRules = ["generic-api-key"]
+regexTarget = "line"
+regexes = [
+  '''sk-lf-SECRET''',
+]
