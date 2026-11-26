@@ -1,7 +1,9 @@
 //! Incremental reader for Claude Code JSONL transcripts.
 //!
-//! Only allowlisted fields are deserialised, so prompt text, tool inputs and
-//! outputs are never held in an `Entry`.
+//! Only allowlisted fields are deserialised. Message text, prompts included,
+//! is read transiently while its line is parsed (to recognise slash commands,
+//! task notifications and interruptions); it is never retained in an `Entry`
+//! nor sent. Tool inputs and outputs are never retained either.
 
 use crate::event::Tokens;
 use serde::Deserialize;

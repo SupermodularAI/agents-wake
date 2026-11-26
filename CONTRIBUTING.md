@@ -37,7 +37,7 @@ This is the same gate CI runs.
 
 ## Code layout
 
-- `src/main.rs`: argument dispatch for `emit`, `check`, `install` and `uninstall`; no logic.
+- `src/main.rs`: argument dispatch for `emit`, `check`, `install`, `uninstall` and `--version`; no logic.
 - `src/lib.rs`: module declarations. Everything testable lives in the library.
 - `src/event.rs`: the fixed event struct (`Invocation`, `Context`) and the string allowlist validators.
 - `src/config.rs`: config resolution (env, then `telemetry.json` next to the binary, then `~/.config/wake/config.json`).
@@ -47,9 +47,10 @@ This is the same gate CI runs.
 - `src/otlp.rs`: invocations to an OTLP JSON trace request.
 - `src/send.rs`: HTTP transport, the outbox and delivery.
 - `src/state.rs`: per-session state, locking, garbage collection and state paths.
-- `src/harness/mod.rs`: the hook enum and the contract a harness implements.
+- `src/harness/mod.rs`: the contract a harness provides to derivation (`PrimitiveLookup`, `PrimitiveInfo`).
 - `src/harness/claude_code/`: the Claude Code adapter (`transcript.rs` incremental JSONL reader,
-  `inventory.rs` installed primitives, `derive.rs` transcript to invocations, `mod.rs` hook orchestration).
+  `inventory.rs` installed primitives, `derive.rs` transcript to invocations, `mod.rs` the hook enum and
+  hook orchestration).
 - `src/install.rs`: `wake install` / `uninstall` (the `settings.json` merge).
 - `src/check.rs`: `wake check`.
 - `tests/*.rs`: integration tests, with synthetic hand-written transcripts in `tests/fixtures/`. Never commit

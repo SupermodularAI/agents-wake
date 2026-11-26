@@ -49,7 +49,8 @@ release, verifies its SHA-256 against `checksums.txt`, and puts it in `~/.local/
 `WAKE_INSTALL_DIR` to put it elsewhere. It never uses sudo.
 
 `wake install` asks for the endpoint, headers and identity mode (or takes `--endpoint URL`,
-`--header K=V` and `--identity email|anonymous`), writes `~/.config/wake/config.json` with mode 0600,
+`--header K=V` and `--identity email|anonymous`), writes `~/.config/wake/config.json` (or
+`$XDG_CONFIG_HOME/wake/config.json` when that is set) with mode 0600,
 and adds its three hooks (`SessionStart`, `Stop`, `SessionEnd`) to `~/.claude/settings.json`. It
 refuses to touch a `settings.json` that is not plain JSON. Re-run it to change the config.
 
@@ -84,19 +85,27 @@ sends one test event. It exits 0 if the event was delivered. A Langfuse setup wa
 | `WAKE_DISABLED` | `1` or `true`: send nothing |
 
 Resolution order: these variables, then `telemetry.json` next to the binary, then
-`~/.config/wake/config.json`. A config file with `"allow_override": false` ignores the first three
-variables. `WAKE_DISABLED` is always honoured.
+`~/.config/wake/config.json` (`$XDG_CONFIG_HOME/wake/config.json` when `XDG_CONFIG_HOME` is set). A
+config file with `"allow_override": false` ignores the first three variables. `WAKE_DISABLED` is always
+honoured.
+
+Anonymous mode needs an `identity_salt`, an organisation secret set in the config file (there is no
+variable for it): `{"identity": "anonymous", "identity_salt": "<org secret>"}`. `wake.user.hash` is
+HMAC-SHA256 of your email with that salt. Without a salt, anonymous mode sends no user at all rather than
+an unsalted hash. `wake install` keeps an `identity_salt` you add to its config file by hand.
 
 If a send fails, the event is queued in `$XDG_STATE_HOME/wake` (default `~/.local/state/wake`) and retried by
 the next `wake emit`. The queue holds at most 1,000 events or 7 days.
 
 ### Turning it off
 
-`WAKE_DISABLED=1` works at three levels:
+`WAKE_DISABLED=1` works at four levels:
 
 - **One command:** `WAKE_DISABLED=1 claude`
 - **Every session:** `export WAKE_DISABLED=1` in your shell profile
 - **One user, any shell:** in the `env` block of `~/.claude/settings.json`: `{"env": {"WAKE_DISABLED": "1"}}`
+- **One repository** (client work, for example): the same `env` block in that repository's
+  `.claude/settings.local.json`, which Claude Code passes to the hooks of sessions started there
 
 ## Uninstall
 
