@@ -267,3 +267,34 @@ fn slash_merge_survives_across_derive_calls() {
     assert_eq!(d.closed.len(), 1);
     assert_eq!(d.closed[0].tokens.input, Some(100));
 }
+
+#[test]
+fn r15_command_moves_turn_start() {
+    let es = entries("skills_cmd_moves_turn");
+    let mut st = SessionState::default();
+    let d = run("s-r15-cmd", &es, &mut st, true);
+    let i = by_name(&d, "brainstorming");
+    assert_eq!(i.outcome, Some(Outcome::Ok));
+}
+
+#[test]
+fn r15_other_command_ends_slash_merge_window() {
+    let es = entries("skills_slash_then_cmd");
+    let mut st = SessionState::default();
+    let d = run("s-r15-merge", &es, &mut st, true);
+    let skills: Vec<_> = d.closed.iter().filter(|i| i.kind == Kind::Skill).collect();
+    assert_eq!(skills.len(), 2);
+    assert_eq!(skills[0].invoker, Some(Invoker::User));
+    assert_eq!(skills[1].span_id, span_id("toolu_q_skill"));
+}
+
+#[test]
+fn r15_own_start_tool_use_not_counted() {
+    let es = entries("skills_slash");
+    let mut st = SessionState::default();
+    let d = run("s-slash", &es, &mut st, true);
+    let i = &d.closed[0];
+    assert_eq!(i.tool_calls, Some(0));
+    assert_eq!(i.tool_errors, Some(0));
+    assert!(i.tools.is_empty());
+}
