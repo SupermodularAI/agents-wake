@@ -150,6 +150,8 @@ struct Settings {
     root: Map<String, Value>,
     exists: bool,
     trailing_newline: bool,
+    /// The original file held only ASCII, so non-ASCII characters were written as `\uXXXX` escapes.
+    ascii_escaped: bool,
 }
 
 /// Loads and validates `settings.json` without changing anything. A missing file is an empty object.
@@ -164,6 +166,7 @@ fn load_settings(home: &Path) -> Result<Settings, InstallError> {
                 root: Map::new(),
                 exists: false,
                 trailing_newline: true,
+                ascii_escaped: false,
             })
         }
         Err(e) => return Err(e.into()),
@@ -188,6 +191,7 @@ fn load_settings(home: &Path) -> Result<Settings, InstallError> {
         root,
         exists: true,
         trailing_newline: bytes.ends_with(b"\n"),
+        ascii_escaped: bytes.is_ascii(),
     })
 }
 
@@ -216,12 +220,77 @@ fn remove_wake_groups(root: &mut Map<String, Value>, exe: &Path, drop_emptied: b
     removed
 }
 
-/// Serialises in Claude Code's format: 2-space indent, non-ASCII unescaped.
-fn to_pretty(value: &Value, trailing_newline: bool) -> Vec<u8> {
+/// Pretty formatter that escapes every non-ASCII character as lowercase `\uXXXX` (UTF-16 surrogate pairs).
+struct AsciiFormatter(serde_json::ser::PrettyFormatter<'static>);
+
+impl serde_json::ser::Formatter for AsciiFormatter {
+    fn begin_array<W: ?Sized + io::Write>(&mut self, w: &mut W) -> io::Result<()> {
+        self.0.begin_array(w)
+    }
+    fn end_array<W: ?Sized + io::Write>(&mut self, w: &mut W) -> io::Result<()> {
+        self.0.end_array(w)
+    }
+    fn begin_array_value<W: ?Sized + io::Write>(
+        &mut self,
+        w: &mut W,
+        first: bool,
+    ) -> io::Result<()> {
+        self.0.begin_array_value(w, first)
+    }
+    fn end_array_value<W: ?Sized + io::Write>(&mut self, w: &mut W) -> io::Result<()> {
+        self.0.end_array_value(w)
+    }
+    fn begin_object<W: ?Sized + io::Write>(&mut self, w: &mut W) -> io::Result<()> {
+        self.0.begin_object(w)
+    }
+    fn end_object<W: ?Sized + io::Write>(&mut self, w: &mut W) -> io::Result<()> {
+        self.0.end_object(w)
+    }
+    fn begin_object_key<W: ?Sized + io::Write>(
+        &mut self,
+        w: &mut W,
+        first: bool,
+    ) -> io::Result<()> {
+        self.0.begin_object_key(w, first)
+    }
+    fn begin_object_value<W: ?Sized + io::Write>(&mut self, w: &mut W) -> io::Result<()> {
+        self.0.begin_object_value(w)
+    }
+    fn end_object_value<W: ?Sized + io::Write>(&mut self, w: &mut W) -> io::Result<()> {
+        self.0.end_object_value(w)
+    }
+    fn write_string_fragment<W: ?Sized + io::Write>(
+        &mut self,
+        w: &mut W,
+        fragment: &str,
+    ) -> io::Result<()> {
+        let mut start = 0;
+        for (i, c) in fragment.char_indices() {
+            if c.is_ascii() {
+                continue;
+            }
+            w.write_all(&fragment.as_bytes()[start..i])?;
+            let mut buf = [0u16; 2];
+            for unit in c.encode_utf16(&mut buf) {
+                write!(w, "\\u{unit:04x}")?;
+            }
+            start = i + c.len_utf8();
+        }
+        w.write_all(&fragment.as_bytes()[start..])
+    }
+}
+
+/// Serialises in Claude Code's format: 2-space indent; non-ASCII raw unless `ascii` asks for escapes.
+fn to_pretty(value: &Value, trailing_newline: bool, ascii: bool) -> Vec<u8> {
     let mut out = Vec::new();
     let fmt = serde_json::ser::PrettyFormatter::with_indent(b"  ");
-    let mut ser = serde_json::Serializer::with_formatter(&mut out, fmt);
-    serde::Serialize::serialize(value, &mut ser).expect("a Value always serialises");
+    if ascii {
+        let mut ser = serde_json::Serializer::with_formatter(&mut out, AsciiFormatter(fmt));
+        serde::Serialize::serialize(value, &mut ser).expect("a Value always serialises");
+    } else {
+        let mut ser = serde_json::Serializer::with_formatter(&mut out, fmt);
+        serde::Serialize::serialize(value, &mut ser).expect("a Value always serialises");
+    }
     if trailing_newline {
         out.push(b'\n');
     }
@@ -259,7 +328,11 @@ fn write_settings(s: &Settings) -> io::Result<()> {
         Ok(m) => m.permissions().mode() & 0o7777,
         Err(_) => 0o644,
     };
-    let bytes = to_pretty(&Value::Object(s.root.clone()), s.trailing_newline);
+    let bytes = to_pretty(
+        &Value::Object(s.root.clone()),
+        s.trailing_newline,
+        s.ascii_escaped,
+    );
     write_atomic(&s.path, &bytes, mode)
 }
 
@@ -343,7 +416,11 @@ fn write_config(path: &Path, cfg: &Map<String, Value>) -> io::Result<()> {
             .create(dir)?;
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
     }
-    write_atomic(path, &to_pretty(&Value::Object(cfg.clone()), true), 0o600)
+    write_atomic(
+        path,
+        &to_pretty(&Value::Object(cfg.clone()), true, false),
+        0o600,
+    )
 }
 
 fn config_summary(cfg: &Map<String, Value>) -> String {
@@ -519,7 +596,7 @@ mod tests {
     #[test]
     fn pretty_prints_empties_like_json_stringify() {
         let v: Value = serde_json::from_str(r#"{"a":[],"b":{},"c":[1],"d":"é"}"#).unwrap();
-        let s = String::from_utf8(to_pretty(&v, false)).unwrap();
+        let s = String::from_utf8(to_pretty(&v, false, false)).unwrap();
         assert_eq!(
             s,
             "{\n  \"a\": [],\n  \"b\": {},\n  \"c\": [\n    1\n  ],\n  \"d\": \"é\"\n}"

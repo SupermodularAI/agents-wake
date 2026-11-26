@@ -581,3 +581,22 @@ fn uninstall_refuses_unparsable_settings() {
         text
     );
 }
+
+#[test]
+fn uninstall_restores_bytes_ascii_escaped() {
+    let text = "{\n  \"note\": \"a \\u2014 b \\ud83d\\ude80 \\u001b\",\n  \"hooks\": {\n    \"PreToolUse\": []\n  },\n  \"theme\": \"dark\"\n}\n";
+    assert!(text.is_ascii());
+    let h = home();
+    write_settings(&h.home, text);
+    install(&no_env(), &h.home, &h.exe, &args(), &mut Silent).unwrap();
+    let installed = std::fs::read(settings_path(&h.home)).unwrap();
+    assert!(installed.is_ascii());
+    assert!(String::from_utf8(installed)
+        .unwrap()
+        .contains("\\u2014 b \\ud83d\\ude80 \\u001b"));
+    uninstall(&no_env(), &h.home, &h.exe, false).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(settings_path(&h.home)).unwrap(),
+        text
+    );
+}
