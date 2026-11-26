@@ -6,7 +6,7 @@ use wake::config::ProcessEnv;
 use wake::harness::claude_code::{run_hook, Deps};
 use wake::send::UreqTransport;
 
-const USAGE: &str = "usage: wake <emit <hook> | check | install | uninstall>";
+const USAGE: &str = "usage: wake <emit <hook> | check | install | uninstall | --version>";
 const INSTALL_USAGE: &str = "usage: wake install [--harness claude-code] [--endpoint URL] [--header K=V]... [--identity email|anonymous]\n       wake uninstall [--harness claude-code] [--purge]";
 
 /// `wake emit <hook>`: read the payload, then handle it. Never prints, never fails.
@@ -165,6 +165,10 @@ fn main() -> ExitCode {
         Some("check") => ExitCode::from(check()),
         Some("install") => ExitCode::from(install_cmd(&args[2..], false)),
         Some("uninstall") => ExitCode::from(install_cmd(&args[2..], true)),
+        Some("--version" | "-V") => {
+            println!("wake {}", env!("CARGO_PKG_VERSION"));
+            ExitCode::SUCCESS
+        }
         _ => {
             eprintln!("{USAGE}");
             ExitCode::from(2)

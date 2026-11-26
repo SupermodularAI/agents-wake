@@ -100,3 +100,17 @@ fn install_then_uninstall_via_cli() {
     );
     assert!(!dir.path().join(".config/wake").exists());
 }
+
+#[test]
+fn version_prints_crate_version() {
+    for flag in ["--version", "-V"] {
+        let out = run(&[flag], "");
+        assert_eq!(out.status.code(), Some(0), "{flag}");
+        assert_eq!(
+            String::from_utf8(out.stdout).unwrap(),
+            format!("wake {}\n", env!("CARGO_PKG_VERSION")),
+            "{flag}"
+        );
+        assert!(out.stderr.is_empty(), "{flag}");
+    }
+}
