@@ -349,22 +349,34 @@ fn subagent_recursion() {
     let sub = &sub[0];
     let sub_id = hex(&span_id("agent:abc:toolu_sa_agent"));
     assert_eq!(sub["spanId"], sub_id);
-    // R16: tokens and tool calls come from the subagent's own transcript.
-    assert_eq!(
-        attr(sub, "gen_ai.usage.input_tokens").as_deref(),
-        Some("20")
-    );
-    assert_eq!(
-        attr(sub, "gen_ai.usage.output_tokens").as_deref(),
-        Some("2")
-    );
+    // R16: tool calls come from the subagent's own transcript.
     assert_eq!(attr(sub, "wake.window.tool_calls").as_deref(), Some("2"));
+    // R29: the model of the transcript's last assistant entry with usage, so it can be priced.
+    assert_eq!(
+        attr(sub, "gen_ai.request.model").as_deref(),
+        Some("claude-haiku-5-5")
+    );
 
     let skill = spans
         .iter()
         .find(|s| s["name"] == "wake.skill brainstorming")
         .expect("subagent's skill");
     assert_eq!(skill["parentSpanId"], sub_id);
+    // R29: the transcript holds 20 input / 2 output tokens (two requests). The nested skill owns
+    // req_sub2; the subagent span keeps only the rest, so the two are disjoint and sum to the total.
+    let tok = |s: &Value, k: &str| -> u64 { attr(s, k).map_or(0, |v| v.parse().unwrap()) };
+    for (key, total) in [
+        ("gen_ai.usage.input_tokens", 20),
+        ("gen_ai.usage.output_tokens", 2),
+    ] {
+        assert!(tok(skill, key) > 0, "{key}: skill has tokens");
+        assert!(tok(sub, key) > 0, "{key}: subagent keeps its own");
+        assert_eq!(tok(sub, key) + tok(skill, key), total, "{key}");
+    }
+    assert_eq!(
+        attr(sub, "gen_ai.usage.input_tokens").as_deref(),
+        Some("10")
+    );
     let mcp = of_kind(&spans, "mcp_tool");
     assert_eq!(mcp.len(), 1);
     assert_eq!(mcp[0]["parentSpanId"], skill["spanId"]);
@@ -395,6 +407,10 @@ fn async_subagent_across_stops() {
         Some("1")
     );
     assert_eq!(attr(&sub[0], "wake.outcome").as_deref(), Some("ok"));
+    assert_eq!(
+        attr(&sub[0], "gen_ai.request.model").as_deref(),
+        Some("claude-haiku-5-5")
+    );
 }
 
 #[test]

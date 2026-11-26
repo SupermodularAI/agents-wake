@@ -311,30 +311,58 @@ fn inventory_invocation(span_key: &str, inventory: Vec<String>, now_ns: u64) -> 
     }
 }
 
-/// Assistant usage deduplicated by request id, and the number of tool_use blocks.
-fn transcript_usage(entries: &[Entry]) -> (Tokens, u64) {
-    let mut tokens = Tokens::default();
+/// What a subagent's own transcript says about the subagent span.
+struct TranscriptUsage {
+    /// Assistant usage deduplicated by request id.
+    tokens: Tokens,
+    /// Number of tool_use blocks.
+    tool_calls: u64,
+    /// Model of the last assistant entry with usage.
+    model: Option<String>,
+}
+
+fn transcript_usage(entries: &[Entry]) -> TranscriptUsage {
+    let mut u = TranscriptUsage {
+        tokens: Tokens::default(),
+        tool_calls: 0,
+        model: None,
+    };
     let mut seen = HashSet::new();
-    let mut tool_calls = 0u64;
     for e in entries.iter().filter(|e| e.role == Role::Assistant) {
-        tool_calls += e
+        u.tool_calls += e
             .blocks
             .iter()
             .filter(|b| matches!(b, Block::ToolUse { .. }))
             .count() as u64;
+        if e.usage.is_some() && e.model.is_some() {
+            u.model = e.model.clone();
+        }
         let fresh = match &e.request_id {
             Some(r) => seen.insert(r.as_str()),
             None => true,
         };
-        if let (true, Some(u)) = (fresh, &e.usage) {
-            tokens.add(u);
+        if let (true, Some(usage)) = (fresh, &e.usage) {
+            u.tokens.add(usage);
         }
     }
-    (tokens, tool_calls)
+    u
 }
 
-/// Derive each finished subagent's own transcript (R17) and take its tokens and tool calls from it
-/// (R16). `depth` is the depth of the transcripts derived here; the main transcript is depth 0.
+/// Field-wise `a - b`, saturating at zero; a field unset in `a` stays unset.
+fn minus(a: &Tokens, b: &Tokens) -> Tokens {
+    let f = |x: Option<u64>, y: Option<u64>| x.map(|x| x.saturating_sub(y.unwrap_or(0)));
+    Tokens {
+        input: f(a.input, b.input),
+        output: f(a.output, b.output),
+        cache_read: f(a.cache_read, b.cache_read),
+        cache_creation: f(a.cache_creation, b.cache_creation),
+    }
+}
+
+/// Derive each finished subagent's own transcript (R17) and take its tool calls, model and tokens
+/// from it (R16, R29). The subagent span's tokens are the transcript total minus what the skills
+/// derived from that transcript already carry (both request-id deduplicated, so disjoint).
+/// `depth` is the depth of the transcripts derived here; the main transcript is depth 0.
 fn follow_subagents(
     transcript: &Path,
     session_id: &str,
@@ -349,24 +377,31 @@ fn follow_subagents(
         let Ok((entries, _)) = read_from(&path, 0) else {
             continue;
         };
-        // An empty transcript says nothing: keep what derive produced.
-        if !entries.is_empty() {
-            let (tokens, tool_calls) = transcript_usage(&entries);
-            let id = span_id(&r.span_key);
-            if let Some(inv) = out
-                .iter_mut()
-                .find(|i| i.kind == Kind::Subagent && i.span_id == id)
-            {
-                inv.tokens = tokens;
-                inv.tool_calls = Some(tool_calls);
-            }
-        }
+        let usage = (!entries.is_empty()).then(|| transcript_usage(&entries));
+        let id = span_id(&r.span_key);
         let mut st = SessionState {
             root_parent_key: Some(r.span_key),
             ..SessionState::default()
         };
         let d = derive(session_id, &entries, &mut st, lookup, now_ns, true);
         drop(entries);
+        // An empty transcript says nothing: keep what derive produced.
+        if let Some(u) = usage {
+            let mut in_skills = Tokens::default();
+            for i in d.closed.iter().filter(|i| i.kind == Kind::Skill) {
+                in_skills.add(&i.tokens);
+            }
+            if let Some(inv) = out
+                .iter_mut()
+                .find(|i| i.kind == Kind::Subagent && i.span_id == id)
+            {
+                inv.tokens = minus(&u.tokens, &in_skills);
+                inv.tool_calls = Some(u.tool_calls);
+                if u.model.is_some() {
+                    inv.model = u.model;
+                }
+            }
+        }
         out.extend(d.closed);
         if depth < MAX_SUBAGENT_DEPTH {
             follow_subagents(
@@ -416,6 +451,27 @@ mod tests {
         assert!(identity_stale(&email_cached, "/w", IdentityMode::Anonymous));
         assert!(identity_stale(&hash_cached, "/w", IdentityMode::Email));
         assert!(!identity_stale(&hash_cached, "/w", IdentityMode::Anonymous));
+    }
+
+    #[test]
+    fn minus_saturates_and_keeps_unset_fields() {
+        let a = Tokens {
+            input: Some(10),
+            output: Some(1),
+            cache_read: None,
+            cache_creation: Some(5),
+        };
+        let b = Tokens {
+            input: Some(4),
+            output: Some(3),
+            cache_read: Some(7),
+            cache_creation: None,
+        };
+        let d = minus(&a, &b);
+        assert_eq!(d.input, Some(6));
+        assert_eq!(d.output, Some(0));
+        assert_eq!(d.cache_read, None);
+        assert_eq!(d.cache_creation, Some(5));
     }
 
     #[test]
