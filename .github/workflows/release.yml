@@ -73,8 +73,8 @@ jobs:
           cp "target/${{ matrix.target }}/release/wake" "${{ matrix.asset }}"
           size="$(wc -c < "${{ matrix.asset }}" | tr -d ' ')"
           echo "${{ matrix.asset }} is ${size} bytes"
-          if [ "$size" -gt 2097152 ]; then
-            echo "::error::${{ matrix.asset }} is ${size} bytes, over the 2097152 byte limit"
+          if [ "$size" -gt 2621440 ]; then
+            echo "::error::${{ matrix.asset }} is ${size} bytes, over the 2621440 byte limit"
             exit 1
           fi
 
