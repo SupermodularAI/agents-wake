@@ -4,7 +4,7 @@ use crate::config::Env;
 use crate::event::{is_token, Tokens};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fs::{self, File, TryLockError};
+use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -112,11 +112,21 @@ pub fn lock_session(dir: &Path, session_id: &str) -> Option<SessionGuard> {
         return None;
     }
     let s = ensure_sessions_dir(dir).ok()?;
-    let file = open_private(&s.join(format!("{session_id}.lock")), false).ok()?;
-    match file.try_lock() {
-        Ok(()) => Some(SessionGuard { _file: file }),
-        Err(TryLockError::WouldBlock) | Err(TryLockError::Error(_)) => None,
+    lock_path(&s.join(format!("{session_id}.lock")), &|| {})
+}
+
+/// Locks `path`, then checks the path still names the locked file (GC may have unlinked it).
+/// `between` runs after the open and before the lock (a test seam).
+fn lock_path(path: &Path, between: &dyn Fn()) -> Option<SessionGuard> {
+    use std::os::unix::fs::MetadataExt;
+    let file = open_private(path, false).ok()?;
+    between();
+    file.try_lock().ok()?;
+    let (on_disk, held) = (fs::metadata(path).ok()?, file.metadata().ok()?);
+    if on_disk.ino() != held.ino() || on_disk.dev() != held.dev() {
+        return None;
     }
+    Some(SessionGuard { _file: file })
 }
 
 /// The saved state, or `None` when missing, unparsable or the id is bad.
@@ -141,7 +151,6 @@ pub fn save(dir: &Path, session_id: &str, s: &SessionState) -> std::io::Result<(
     let result = (|| {
         let mut f = open_private(&tmp, true)?;
         f.write_all(&serde_json::to_vec(s)?)?;
-        f.sync_all()?;
         fs::rename(&tmp, sd.join(format!("{session_id}.json")))
     })();
     if result.is_err() {
@@ -216,12 +225,31 @@ pub fn gc(dir: &Path, now: SystemTime) {
                 continue;
             }
             let _ = fs::remove_file(&path);
-        } else if name.ends_with(".lock") {
+        } else if let Some(id) = name.strip_suffix(".lock") {
+            // a live session's lock never refreshes its mtime: keep it while the state is recent
+            if age(&path.with_file_name(format!("{id}.json")), now).is_some_and(|a| a <= GC_AFTER) {
+                continue;
+            }
             if let Ok(f) = File::open(&path) {
                 if f.try_lock().is_ok() {
                     let _ = fs::remove_file(&path);
                 }
             }
+        } else if name.ends_with(".tmp") {
+            let _ = fs::remove_file(&path);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lock_refused_when_path_unlinked_before_lock() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("x.lock");
+        assert!(lock_path(&p, &|| fs::remove_file(&p).unwrap()).is_none());
+        assert!(lock_path(&p, &|| {}).is_some());
     }
 }

@@ -152,3 +152,19 @@ fn bad_session_id_rejected() {
     assert!(!d.path().join("x.lock").exists());
     assert!(!d.path().join("x.json").exists());
 }
+
+#[test]
+fn gc_keeps_old_lock_with_fresh_json_and_prunes_tmp() {
+    let d = tempfile::tempdir().unwrap();
+    save(d.path(), "live", &SessionState::default()).unwrap();
+    drop(lock_session(d.path(), "live"));
+    let s = d.path().join("sessions");
+    age(&s.join("live.lock"), 15 * DAY);
+    fs::write(s.join("a.json.1.tmp"), "x").unwrap();
+    fs::write(s.join("b.json.2.tmp"), "x").unwrap();
+    age(&s.join("a.json.1.tmp"), 15 * DAY);
+    gc(d.path(), SystemTime::now());
+    assert!(s.join("live.lock").exists());
+    assert!(!s.join("a.json.1.tmp").exists());
+    assert!(s.join("b.json.2.tmp").exists());
+}
