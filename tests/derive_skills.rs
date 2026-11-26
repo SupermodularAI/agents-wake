@@ -298,3 +298,15 @@ fn r15_own_start_tool_use_not_counted() {
     assert_eq!(i.tool_errors, Some(0));
     assert!(i.tools.is_empty());
 }
+
+#[test]
+fn r17_root_parent_for_command_started_skill() {
+    let es = entries("skills_slash");
+    let mut st = SessionState {
+        root_parent_key: Some("agent:x:toolu_y".to_string()),
+        ..SessionState::default()
+    };
+    let d = run("s-slash", &es, &mut st, true);
+    assert_eq!(d.closed[0].parent_span_id, Some(span_id("agent:x:toolu_y")));
+    assert_eq!(d.closed[0].invoker, Some(Invoker::User));
+}

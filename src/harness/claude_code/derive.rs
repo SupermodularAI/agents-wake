@@ -97,7 +97,8 @@ pub fn derive(
                     if lookup.skill(cmd).is_some() {
                         start_from_command(session_id, cmd, e.ts_ns, state, lookup, &mut out);
                     } else {
-                        out.closed.push(command(session_id, cmd, e.ts_ns));
+                        let parent = state.root_parent_key.clone();
+                        out.closed.push(command(session_id, cmd, e.ts_ns, parent));
                     }
                 }
                 apply_results(e, state);
@@ -232,6 +233,7 @@ fn start_from_command(
         ts_ns,
     );
     o.from_command = true;
+    o.parent_key = state.root_parent_key.clone();
     state.open.push(o);
 }
 
@@ -277,7 +279,7 @@ fn start_from_tool_uses(
             Invoker::Model
         };
         let mut o = new_skill(id.clone(), skill, invoker, e.ts_ns);
-        o.parent_key = parent_key;
+        o.parent_key = parent_key.or_else(|| state.root_parent_key.clone());
         o.start_tool_use_id = Some(id.clone());
         state.open.push(o);
     }
@@ -437,10 +439,10 @@ fn with_metadata(mut i: Invocation, lookup: &dyn PrimitiveLookup) -> Invocation 
 }
 
 /// A slash command that is not a skill: one closed, instantaneous event.
-fn command(session_id: &str, name: &str, ts_ns: u64) -> Invocation {
+fn command(session_id: &str, name: &str, ts_ns: u64, parent_key: Option<String>) -> Invocation {
     let mut i = bare(
         &format!("cmd:{session_id}:{ts_ns}"),
-        None,
+        parent_key.as_deref(),
         Kind::Command,
         name.to_string(),
     );
@@ -456,12 +458,13 @@ fn parse_mcp(name: &str) -> Option<(&str, &str)> {
     (!server.is_empty() && !tool.is_empty()).then_some((server, tool))
 }
 
-/// Span key of the open skill this entry is attributed to.
+/// Span key of the open skill this entry is attributed to, else the root parent (R17).
 fn attributed_parent(e: &Entry, state: &SessionState) -> Option<String> {
     e.attribution_skill
         .as_deref()
         .and_then(|name| find_open_skill(state, name))
         .map(|i| state.open[i].span_key.clone())
+        .or_else(|| state.root_parent_key.clone())
 }
 
 /// Note `Agent` and MCP tool_uses so their results can be matched by tool_use id.
@@ -569,6 +572,15 @@ fn subagent_invocation(
     i
 }
 
+/// `agent:<agent_id>:<tool_use_id>`: a continued subagent keeps its agent id, so the launching
+/// tool_use id keeps each run's span distinct. Falls back to `agent:<agent_id>`.
+fn agent_span_key(agent_id: &str, tool_use_id: Option<&str>) -> String {
+    match tool_use_id {
+        Some(id) => format!("agent:{agent_id}:{id}"),
+        None => format!("agent:{agent_id}"),
+    }
+}
+
 /// An `Agent` tool_result: a foreground agent closes now, a background one starts waiting.
 fn apply_agent_result(
     e: &Entry,
@@ -587,16 +599,21 @@ fn apply_agent_result(
         .and_then(|id| scratch.agent_uses.remove(id));
     let (start_ns, subagent_type, parent_key) = match used {
         Some(u) => (u.ts_ns, u.subagent_type, u.parent_key),
-        None => (e.ts_ns, None, None),
+        None => (e.ts_ns, None, state.root_parent_key.clone()),
     };
     let name = subagent_type
         .or_else(|| a.agent_type.clone())
         .unwrap_or_else(|| "unknown".to_string());
-    let span_key = format!("agent:{}", a.agent_id);
+    let tool_use_id = tool_use_id.filter(|id| !id.is_empty());
+    let span_key = agent_span_key(&a.agent_id, tool_use_id.as_deref());
     if a.is_async {
+        // Without a tool_use id no notification could ever match it.
+        let Some(tool_use_id) = tool_use_id else {
+            return;
+        };
         state.pending_agents.push(PendingAgent {
             agent_id: a.agent_id.clone(),
-            tool_use_id: tool_use_id.unwrap_or_default(),
+            tool_use_id,
             span_key,
             parent_key,
             name,
@@ -640,7 +657,7 @@ fn close_notified(
     let Some(i) = state
         .pending_agents
         .iter()
-        .position(|p| p.tool_use_id == n.tool_use_id)
+        .position(|p| !n.tool_use_id.is_empty() && p.tool_use_id == n.tool_use_id)
     else {
         return;
     };

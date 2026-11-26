@@ -57,7 +57,7 @@ fn subagent_event_and_parent() {
     assert_eq!(subs.len(), 1);
     let s = subs[0];
     assert_eq!(s.name, "Explore");
-    assert_eq!(s.span_id, span_id("agent:abc"));
+    assert_eq!(s.span_id, span_id("agent:abc:toolu_sa_agent"));
     assert_eq!(s.parent_span_id, Some(span_id("toolu_sa_skill")));
     assert_eq!(s.tool_calls, Some(7));
     assert_eq!(s.outcome, Some(Outcome::Ok));
@@ -71,7 +71,7 @@ fn subagent_event_and_parent() {
     assert_eq!(s.context_tokens, Some(42));
     assert_eq!(d.subagents.len(), 1);
     assert_eq!(d.subagents[0].agent_id, "abc");
-    assert_eq!(d.subagents[0].span_key, "agent:abc");
+    assert_eq!(d.subagents[0].span_key, "agent:abc:toolu_sa_agent");
     assert_eq!(d.subagents[0].parent_key.as_deref(), Some("toolu_sa_skill"));
     assert!(st.pending_agents.is_empty());
     // The skill is still open and not closed by the subagent.
@@ -123,7 +123,7 @@ fn async_subagent_waits_for_notification() {
     assert_eq!(s.name, "Explore");
     assert_eq!(s.outcome, Some(Outcome::Ok));
     assert_eq!(s.parent_span_id, Some(span_id("toolu_as_skill")));
-    assert_eq!(s.span_id, span_id("agent:def"));
+    assert_eq!(s.span_id, span_id("agent:def:toolu_as_agent"));
     assert_eq!(s.start_ns, t1[3].ts_ns);
     assert_eq!(s.end_ns, t2[1].ts_ns);
     assert_eq!(s.tool_calls, None);
@@ -249,4 +249,85 @@ fn subagent_transcript_path() {
         subagent_transcript(Path::new("/p/sess-1.jsonl"), "sess-1", "abc"),
         PathBuf::from("/p/sess-1/subagents/agent-abc.jsonl")
     );
+}
+
+#[test]
+fn async_result_without_tool_use_id_is_not_kept() {
+    let mut t1 = entries("others_async_t1");
+    t1[4].blocks.clear();
+    let mut st = SessionState::default();
+    run("sess-async", &t1, &mut st, false);
+    assert!(st.pending_agents.is_empty());
+}
+
+#[test]
+fn notification_with_empty_tool_use_id_matches_nothing() {
+    let t1 = entries("others_async_t1");
+    let mut t2 = entries("others_async_t2");
+    let mut st = SessionState::default();
+    run("sess-async", &t1, &mut st, false);
+    st.pending_agents[0].tool_use_id = String::new();
+    t2[1].task_notification.as_mut().unwrap().tool_use_id = String::new();
+    let d = run("sess-async", &t2, &mut st, false);
+    assert!(of_kind(&d, Kind::Subagent).is_empty());
+    assert_eq!(st.pending_agents.len(), 1);
+}
+
+#[test]
+fn root_parent_key_parents_top_level_invocations() {
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/claude_code/sess-1/subagents/agent-abc.jsonl");
+    let es = read_from(&p, 0).unwrap().0;
+    let root = "agent:abc:toolu_sa_agent";
+    let mut st = SessionState {
+        root_parent_key: Some(root.to_string()),
+        ..SessionState::default()
+    };
+    let d = run("sess-1", &es, &mut st, true);
+    let skill = of_kind(&d, Kind::Skill);
+    assert_eq!(skill.len(), 1);
+    assert_eq!(skill[0].parent_span_id, Some(span_id(root)));
+    assert_eq!(skill[0].invoker, Some(Invoker::Model));
+    // The MCP call is inside the skill, so the skill stays its parent.
+    let mcp = of_kind(&d, Kind::McpTool);
+    assert_eq!(mcp[0].parent_span_id, Some(span_id("toolu_sub_skill")));
+
+    // With no enclosing skill, MCP aggregates and commands fall back to the root.
+    let mut es2 = entries("others_mcp");
+    es2.extend(entries("others_command"));
+    let mut st = SessionState {
+        root_parent_key: Some(root.to_string()),
+        ..SessionState::default()
+    };
+    let d = run("sess-1", &es2, &mut st, true);
+    assert_eq!(
+        of_kind(&d, Kind::McpTool)[0].parent_span_id,
+        Some(span_id(root))
+    );
+    assert_eq!(
+        of_kind(&d, Kind::Command)[0].parent_span_id,
+        Some(span_id(root))
+    );
+}
+
+#[test]
+fn many_entities_in_one_slice_have_distinct_span_ids() {
+    let es = entries("others_multi");
+    let mut st = SessionState::default();
+    let d = run("s-multi-ent", &es, &mut st, true);
+    assert_eq!(of_kind(&d, Kind::Subagent).len(), 2);
+    assert_eq!(of_kind(&d, Kind::Command).len(), 2);
+    let mcp = of_kind(&d, Kind::McpTool);
+    assert_eq!(mcp.len(), 2);
+    assert_ne!(mcp[0].parent_span_id, mcp[1].parent_span_id);
+    assert_eq!(of_kind(&d, Kind::Skill).len(), 1);
+    assert_eq!(d.closed.len(), 7);
+    let mut ids: Vec<_> = d.closed.iter().map(|i| i.span_id).collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), d.closed.len());
+    // Same agentId twice (a continued subagent) still gives two subagent refs with distinct keys.
+    assert_eq!(d.subagents.len(), 2);
+    assert_ne!(d.subagents[0].span_key, d.subagents[1].span_key);
+    assert_eq!(d.subagents[0].agent_id, d.subagents[1].agent_id);
 }

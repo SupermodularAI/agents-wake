@@ -55,4 +55,7 @@ pub struct SessionState {
     pub repo: Option<String>,
     /// Newest entry timestamp seen.
     pub last_ns: u64,
+    /// Parent for invocations with no enclosing skill (R17): a subagent transcript's own subagent span key.
+    #[serde(default)]
+    pub root_parent_key: Option<String>,
 }
