@@ -39,3 +39,64 @@ fn unknown_subcommand_exits_2() {
     let out = run(&["frobnicate"], "");
     assert_eq!(out.status.code(), Some(2));
 }
+
+/// Runs wake with HOME pointed at a temp dir and no XDG overrides, so nothing real is touched.
+fn run_in_home(args: &[&str], home: &std::path::Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_wake"))
+        .args(args)
+        .env("HOME", home)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_STATE_HOME")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn install_bad_args_exit_2_and_touch_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    for args in [
+        &["install", "--harness", "codex"][..],
+        &["install", "--bogus"],
+        &["install", "--endpoint"],
+        &["install", "--header", "novalue"],
+        &["install", "--identity", "someone"],
+        &["uninstall", "--harness", "codex"],
+        &["uninstall", "--nope"],
+    ] {
+        let out = run_in_home(args, dir.path());
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(!out.stderr.is_empty(), "{args:?}");
+    }
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn install_then_uninstall_via_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = run_in_home(
+        &[
+            "install",
+            "--endpoint",
+            "https://lf.example.com/x",
+            "--header",
+            "Authorization=Basic c2VjcmV0",
+            "--identity",
+            "anonymous",
+        ],
+        dir.path(),
+    );
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(!stdout.contains("c2VjcmV0"), "{stdout}");
+    let settings = std::fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap();
+    assert!(settings.contains("emit session-start"), "{settings}");
+
+    let out = run_in_home(&["uninstall", "--purge"], dir.path());
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(".claude/settings.json")).unwrap(),
+        "{}\n"
+    );
+    assert!(!dir.path().join(".config/wake").exists());
+}

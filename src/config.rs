@@ -77,6 +77,14 @@ pub fn file_path_user(home: &Path) -> PathBuf {
     home.join(".config").join("wake").join("config.json")
 }
 
+/// The user config file actually read: `$XDG_CONFIG_HOME/wake/config.json` when set, else `file_path_user`.
+pub fn user_config_path(env: &dyn Env, home: &Path) -> PathBuf {
+    match env.var("XDG_CONFIG_HOME").filter(|x| !x.is_empty()) {
+        Some(x) => PathBuf::from(x).join("wake").join("config.json"),
+        None => file_path_user(home),
+    }
+}
+
 fn load(path: &Path) -> Option<FileConfig> {
     let bytes = std::fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
@@ -126,7 +134,7 @@ pub(crate) fn origin(url: &str) -> Option<String> {
     Some(format!("{scheme}://{authority}"))
 }
 
-fn valid_endpoint(url: &str) -> bool {
+pub(crate) fn valid_endpoint(url: &str) -> bool {
     if url.starts_with("https://") {
         return true;
     }
@@ -156,11 +164,7 @@ fn valid_endpoint(url: &str) -> bool {
 
 pub fn resolve(env: &dyn Env, exe_dir: &Path, home: &Path) -> Config {
     let exe = load(&exe_dir.join("telemetry.json"));
-    let user_path = match env.var("XDG_CONFIG_HOME").filter(|x| !x.is_empty()) {
-        Some(x) => PathBuf::from(x).join("wake").join("config.json"),
-        None => file_path_user(home),
-    };
-    let user = load(&user_path);
+    let user = load(&user_config_path(env, home));
     // File layers in priority order.
     let files: Vec<(Source, FileConfig)> = [(Source::ExeDir, exe), (Source::UserConfig, user)]
         .into_iter()
