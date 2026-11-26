@@ -153,3 +153,12 @@ fn agent_results_parsed() {
     assert!(e[2].agent_result.is_none());
     assert!(!format!("{:?}", e).contains("SECRET-PROMPT"));
 }
+
+#[test]
+fn command_name_after_command_message() {
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/claude_code/skills_slash_command_message.jsonl");
+    let (entries, _) = read_from(&p, 0).unwrap();
+    assert_eq!(entries[0].command_name.as_deref(), Some("brainstorming"));
+    assert_eq!(entries[1].command_name, None);
+}

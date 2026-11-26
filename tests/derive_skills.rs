@@ -310,3 +310,14 @@ fn r17_root_parent_for_command_started_skill() {
     assert_eq!(d.closed[0].parent_span_id, Some(span_id("agent:x:toolu_y")));
     assert_eq!(d.closed[0].invoker, Some(Invoker::User));
 }
+
+#[test]
+fn slash_skill_in_command_message_shape_is_one_user_invocation() {
+    let es = entries("skills_slash_command_message");
+    let mut st = SessionState::default();
+    let d = run("s-slashcm", &es, &mut st, true);
+    assert_eq!(d.closed.len(), 1);
+    let i = &d.closed[0];
+    assert_eq!(i.name, "brainstorming");
+    assert_eq!(i.invoker, Some(Invoker::User));
+}

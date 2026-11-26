@@ -201,9 +201,11 @@ fn tag<'a>(s: &'a str, name: &str) -> Option<&'a str> {
 }
 
 fn parse_command_name(text: &str) -> Option<String> {
-    let rest = text.trim_start().strip_prefix("<command-name>")?;
-    let end = rest.find("</command-name>")?;
-    let name = rest[..end].trim();
+    let t = text.trim_start();
+    if !(t.starts_with("<command-name>") || t.starts_with("<command-message>")) {
+        return None;
+    }
+    let name = tag(t, "command-name")?;
     let name = name.strip_prefix('/').unwrap_or(name);
     Some(name.to_string())
 }
