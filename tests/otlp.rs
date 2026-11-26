@@ -214,3 +214,13 @@ fn encode_never_contains_forbidden_keys() {
         assert!(!text.contains(bad), "contains {bad}");
     }
 }
+
+#[test]
+fn id_known_answers() {
+    // Pinned from `printf 'wake-trace\0s1' | shasum -a 256` (first 16 bytes) and
+    // `printf 'wake-span\0k1' | shasum -a 256` (first 8 bytes): changing the derivation would
+    // re-key every span already in a backend.
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    assert_eq!(hex(&trace_id("s1")), "dd76f1fcdb8bdd8cc57fccbc4a718289");
+    assert_eq!(hex(&span_id("k1")), "ddd5aa5ec2ea342d");
+}
