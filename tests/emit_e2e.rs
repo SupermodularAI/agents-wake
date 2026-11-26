@@ -36,8 +36,10 @@ impl FakeTransport {
     fn spans_since(&self, from: usize) -> Vec<Value> {
         self.calls.borrow()[from..]
             .iter()
-            .flat_map(|b| {
-                b["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            // A flush may merge several payloads into one POST (R28).
+            .flat_map(|b| b["resourceSpans"].as_array().cloned().unwrap_or_default())
+            .flat_map(|rs| {
+                rs["scopeSpans"][0]["spans"]
                     .as_array()
                     .cloned()
                     .unwrap_or_default()

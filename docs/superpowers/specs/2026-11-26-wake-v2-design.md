@@ -481,6 +481,9 @@ digits and `._:@+_-`; no spaces, no `/` except in `wake.repo`, length-capped). `
 - Delivery:
   - POST with a 2 s timeout.
   - On failure, append to `outbox.ndjson`. The next `emit` retries the outbox first.
+  - A flush sends up to 50 queued payloads per POST, merged into one ExportTraceServiceRequest, starts no POST
+    after 5 s, and rewrites the outbox after each batch that succeeds (or is rejected for good), so a kill
+    mid-flush resends at most one batch. The first transient failure ends the flush.
   - The outbox is capped at 1,000 events or 7 days. Beyond that, the oldest events are dropped.
   - No retries inside a single process, no background daemon.
 - **Duplicates (my call):** the binary tries to send each event once, using the session lock, forward-only offsets,

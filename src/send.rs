@@ -7,10 +7,14 @@ use serde_json::Value;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const MAX_AGE_SECS: u64 = 7 * 86_400;
 const MAX_ENTRIES: usize = 1000;
+/// Most queued payloads merged into one POST (R28).
+const BATCH: usize = 50;
+/// No POST starts once a flush has run this long (R28).
+const FLUSH_DEADLINE: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SendError {
@@ -92,16 +96,17 @@ impl Outbox {
 
     /// Prune, then rewrite atomically (or remove the file when nothing is left).
     fn write(&self, mut entries: Vec<Entry>, now_secs: u64) {
-        let cutoff = now_secs.saturating_sub(MAX_AGE_SECS);
-        entries.retain(|e| e.t >= cutoff);
-        if entries.len() > MAX_ENTRIES {
-            entries.drain(..entries.len() - MAX_ENTRIES);
-        }
+        prune(&mut entries, now_secs);
+        self.store(&entries);
+    }
+
+    /// Rewrite atomically, or remove the file when nothing is left.
+    fn store(&self, entries: &[Entry]) {
         if entries.is_empty() {
             let _ = fs::remove_file(&self.path);
             return;
         }
-        let _ = self.write_atomic(&entries);
+        let _ = self.write_atomic(entries);
     }
 
     fn write_atomic(&self, entries: &[Entry]) -> std::io::Result<()> {
@@ -127,6 +132,45 @@ impl Outbox {
     }
 }
 
+/// Drop entries older than 7 days, then all but the newest 1,000.
+fn prune(entries: &mut Vec<Entry>, now_secs: u64) {
+    let cutoff = now_secs.saturating_sub(MAX_AGE_SECS);
+    entries.retain(|e| e.t >= cutoff);
+    if entries.len() > MAX_ENTRIES {
+        entries.drain(..entries.len() - MAX_ENTRIES);
+    }
+}
+
+/// The `resourceSpans` array of an ExportTraceServiceRequest body, if it is one.
+fn resource_spans(body: &Value) -> Option<&Vec<Value>> {
+    body.get("resourceSpans")?.as_array()
+}
+
+/// How many leading entries go in the next POST: up to [`BATCH`] OTLP payloads, or a single
+/// entry that is not one.
+fn batch_len(entries: &[Entry]) -> usize {
+    entries
+        .iter()
+        .take(BATCH)
+        .take_while(|e| resource_spans(&e.body).is_some())
+        .count()
+        .max(1)
+        .min(entries.len())
+}
+
+/// One entry is sent as queued; several are merged into one ExportTraceServiceRequest.
+fn batch_body(batch: &[Entry]) -> serde_json::Result<Vec<u8>> {
+    if let [one] = batch {
+        return serde_json::to_vec(&one.body);
+    }
+    let spans: Vec<&Value> = batch
+        .iter()
+        .filter_map(|e| resource_spans(&e.body))
+        .flatten()
+        .collect();
+    serde_json::to_vec(&serde_json::json!({ "resourceSpans": spans }))
+}
+
 /// Append `payload` to the outbox (pruned and rewritten atomically). Errors are ignored.
 pub fn enqueue(outbox: &Outbox, payload: &Value, now_secs: u64) {
     let mut entries = outbox.read();
@@ -137,36 +181,38 @@ pub fn enqueue(outbox: &Outbox, payload: &Value, now_secs: u64) {
     outbox.write(entries, now_secs);
 }
 
-/// Send queued entries oldest-first. Stops at the first transient failure, drops permanent 4xx
-/// rejections, then prunes and rewrites (or removes) the outbox. An empty outbox makes no call.
+/// Send queued entries oldest-first, up to [`BATCH`] per POST (R28). No POST starts after
+/// [`FLUSH_DEADLINE`]. A batch that succeeds or is rejected for good (4xx other than 408/429) is
+/// removed and the outbox rewritten before the next POST, so a kill mid-flush resends at most one
+/// batch. The first transient failure ends the flush. An empty outbox makes no call.
 pub fn flush(t: &dyn Transport, cfg: &Config, outbox: &Outbox, now_secs: u64) {
     let Some(url) = cfg.endpoint.as_deref() else {
         return;
     };
-    let queued = outbox.read();
+    let mut queued = outbox.read();
     if queued.is_empty() {
         return;
     }
-    let mut remaining = Vec::new();
-    let mut blocked = false;
-    for entry in queued {
-        if blocked {
-            remaining.push(entry);
-            continue;
-        }
-        let Ok(b) = serde_json::to_vec(&entry.body) else {
-            continue;
-        };
-        match t.post(url, &cfg.headers, &b) {
-            Ok(()) => {}
-            Err(e) if e.is_permanent() => {}
-            Err(_) => {
-                blocked = true;
-                remaining.push(entry);
+    let before = queued.len();
+    prune(&mut queued, now_secs);
+    let mut dirty = queued.len() != before;
+    let start = Instant::now();
+    while !queued.is_empty() && start.elapsed() < FLUSH_DEADLINE {
+        let n = batch_len(&queued);
+        if let Ok(body) = batch_body(&queued[..n]) {
+            match t.post(url, &cfg.headers, &body) {
+                Ok(()) => {}
+                Err(e) if e.is_permanent() => {}
+                Err(_) => break,
             }
         }
+        queued.drain(..n);
+        outbox.store(&queued);
+        dirty = false;
     }
-    outbox.write(remaining, now_secs);
+    if dirty {
+        outbox.store(&queued);
+    }
 }
 
 /// Queue `payload` behind anything already queued, then flush. Failures stay queued.
