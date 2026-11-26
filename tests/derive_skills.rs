@@ -228,3 +228,42 @@ fn state_roundtrips_through_json() {
     let d = run("s-multi", &es[6..], &mut back, true);
     assert_eq!(d.closed[0].tokens.input, Some(750));
 }
+
+#[test]
+fn slash_attributed_before_tool_use_is_one_invocation() {
+    let es = entries("skills_slash_late");
+    let mut st = SessionState::default();
+    let d = run("s-slash-late", &es, &mut st, true);
+    assert_eq!(d.closed.len(), 1);
+    let i = &d.closed[0];
+    assert_eq!(i.invoker, Some(Invoker::User));
+    assert_eq!(
+        i.span_id,
+        span_id(&format!("cmd:s-slash-late:{}", es[0].ts_ns))
+    );
+    assert_eq!(i.tokens.input, Some(100));
+    assert_eq!(i.end_ns, es[6].ts_ns);
+}
+
+#[test]
+fn slash_then_tool_use_after_new_prompt_is_two() {
+    let es = entries("skills_slash_reprompt");
+    let mut st = SessionState::default();
+    let d = run("s-slash-reprompt", &es, &mut st, true);
+    assert_eq!(d.closed.len(), 2);
+    assert_eq!(d.closed[0].invoker, Some(Invoker::User));
+    assert_eq!(d.closed[0].tokens.input, Some(10));
+    assert_eq!(d.closed[1].invoker, Some(Invoker::Model));
+    assert_eq!(d.closed[1].span_id, span_id("toolu_p_skill"));
+    assert_eq!(d.closed[1].tokens.input, Some(20));
+}
+
+#[test]
+fn slash_merge_survives_across_derive_calls() {
+    let es = entries("skills_slash_late");
+    let mut st = SessionState::default();
+    run("s-slash-late", &es[..4], &mut st, false);
+    let d = run("s-slash-late", &es[4..], &mut st, true);
+    assert_eq!(d.closed.len(), 1);
+    assert_eq!(d.closed[0].tokens.input, Some(100));
+}

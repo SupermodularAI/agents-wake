@@ -61,6 +61,9 @@ pub fn derive(
                     mark_interrupted(state, turn_start);
                 } else if is_plain_prompt(e) {
                     turn_start = e.ts_ns;
+                    for o in &mut state.open {
+                        o.prompt_since_start = true;
+                    }
                 }
             }
             Role::Assistant => {
@@ -185,10 +188,11 @@ fn start_from_tool_uses(
         if name != "Skill" {
             continue;
         }
-        // Merge: a slash command already opened this skill and nothing was attributed yet.
+        // Merge (R12): a slash command opened this skill in the same turn and no Skill tool_use
+        // has claimed it yet; attributed entries before or after the tool_use both merge.
         if let Some(i) = find_open_skill(state, skill) {
             let o = &mut state.open[i];
-            if o.from_command && !o.attributed {
+            if o.from_command && o.start_tool_use_id.is_none() && !o.prompt_since_start {
                 o.start_tool_use_id = Some(id.clone());
                 continue;
             }
@@ -213,6 +217,8 @@ fn start_from_tool_uses(
     }
 }
 
+/// Runs after the entry's starts (R13): if this entry restarts its own attributed skill, its usage
+/// goes to the new invocation.
 fn apply_belonging(e: &Entry, state: &mut SessionState) {
     let Some(i) = e
         .attribution_skill
@@ -276,6 +282,8 @@ fn apply_results(e: &Entry, state: &mut SessionState) {
     }
 }
 
+/// R14: `last_ns` starts at `start_ns`, so a skill started but not yet attributed in this turn is
+/// marked interrupted too.
 fn mark_interrupted(state: &mut SessionState, turn_start: u64) {
     for o in &mut state.open {
         if o.kind == SKILL

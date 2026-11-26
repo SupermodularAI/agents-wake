@@ -27,6 +27,9 @@ pub struct OpenInvocation {
     pub outcome: Option<String>,
     pub from_command: bool,
     pub attributed: bool,
+    /// A plain user prompt arrived while this invocation was open (ends the slash-command merge window).
+    #[serde(default)]
+    pub prompt_since_start: bool,
 }
 
 /// A background subagent waiting for its `<task-notification>`. Used from Task 10.
