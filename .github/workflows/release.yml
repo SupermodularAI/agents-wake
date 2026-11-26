@@ -10,8 +10,30 @@ permissions:
   contents: read
 
 jobs:
+  # A tag that does not match the crate version would publish binaries whose
+  # `wake --version` disagrees with the release name.
+  version:
+    name: tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: compare the tag with the crate version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          crate="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          if [ "${TAG#v}" != "$crate" ]; then
+            echo "::error::tag ${TAG} does not match Cargo.toml version ${crate}"
+            exit 1
+          fi
+          echo "tag ${TAG} matches Cargo.toml version ${crate}"
+
   build:
     name: build (${{ matrix.asset }})
+    needs: version
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: true
