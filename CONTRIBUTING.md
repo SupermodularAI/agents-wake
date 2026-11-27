@@ -25,8 +25,10 @@ This is the same gate CI runs.
 ## Pull requests
 
 - Base branch is `main`.
-- CI (fmt, clippy, tests on Linux and macOS, and a binary size check) and one approving
-  review are required before merge.
+- CI and one approving review are required before merge. CI runs fmt, clippy, the tests on Linux
+  and macOS, the perf budget and a check that the release binary is at most 2.5 MB. The OSS gates
+  also scan the history for secrets (gitleaks), run `cargo audit` and check that the PR title is a
+  Conventional Commit.
 - Keep commits focused; squash-merge is used to land PRs, so intermediate
   commit history on your branch doesn't need to be pristine.
 - Commit messages and PR titles follow [Conventional Commits](https://www.conventionalcommits.org/)
