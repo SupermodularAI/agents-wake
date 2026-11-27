@@ -52,22 +52,18 @@ jobs:
       - name: scan history for secrets
         run: /tmp/gitleaks git . --log-opts="--all" --redact --verbose
 
-  # govulncheck rather than a generic scanner: it reports only vulnerabilities
-  # that are actually reachable from this module's call graph, so a CVE in an
-  # unused corner of a dependency does not block a pull request that cannot
-  # trigger it.
+  # cargo-audit checks Cargo.lock against the RustSec advisory database.
   vulnerabilities:
-    name: govulncheck
+    name: cargo audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-        with:
-          go-version: stable
-          cache: true
 
-      - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+      - name: install cargo-audit
+        run: cargo install --locked cargo-audit
+
+      - name: cargo audit
+        run: cargo audit
 
   # Checks what can actually become the subject on main, which is not the
   # branch's commits: PRs are squash-merged, and CONTRIBUTING.md says branch

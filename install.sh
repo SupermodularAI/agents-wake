@@ -1,62 +1,69 @@
 #!/bin/sh
-
+# Installs the latest wake release binary for this machine.
+#   curl -fsSL https://raw.githubusercontent.com/SupermodularAI/agents-wake/main/install.sh | sh
+# Set WAKE_INSTALL_DIR to change the target (default: $HOME/.local/bin). Never uses sudo.
 set -eu
 
-repo="SupermodularAI/agents-wake"
-install_dir="${WAKE_INSTALL_DIR:-$HOME/.local/bin}"
+base="https://github.com/SupermodularAI/agents-wake/releases/latest/download"
 
-fail() {
-  printf '%s\n' "wake install: $*" >&2
+die() {
+  echo "wake install: $1" >&2
   exit 1
 }
 
-command -v curl >/dev/null 2>&1 || fail "curl is required"
-command -v tar >/dev/null 2>&1 || fail "tar is required"
-
 case "$(uname -s)" in
-  Darwin) os="darwin" ;;
-  Linux) os="linux" ;;
-  *) fail "unsupported operating system: $(uname -s)" ;;
+  Darwin) os=darwin ;;
+  Linux) os=linux ;;
+  *) die "unsupported OS: $(uname -s)" ;;
 esac
-
 case "$(uname -m)" in
-  x86_64 | amd64) arch="amd64" ;;
-  arm64 | aarch64) arch="arm64" ;;
-  *) fail "unsupported architecture: $(uname -m)" ;;
+  arm64 | aarch64) arch=arm64 ;;
+  x86_64 | amd64) arch=x64 ;;
+  *) die "unsupported architecture: $(uname -m)" ;;
 esac
+asset="wake-$os-$arch"
 
-latest_url=$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/$repo/releases/latest") || fail "could not resolve the latest release"
-version=${latest_url##*/}
-case "$version" in
-  v*) ;;
-  *) fail "could not determine the latest release version" ;;
-esac
-
-archive="wake_${version#v}_${os}_${arch}.tar.gz"
-download="https://github.com/$repo/releases/download/$version"
-tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/wake.XXXXXX") || fail "could not create a temporary directory"
-trap 'rm -rf "$tmp_dir"' 0 1 2 3 15
-
-curl -fsSL -o "$tmp_dir/$archive" "$download/$archive" || fail "could not download $archive"
-curl -fsSL -o "$tmp_dir/checksums.txt" "$download/checksums.txt" || fail "could not download checksums"
-
-checksum=$(grep " $archive\$" "$tmp_dir/checksums.txt" || true)
-[ -n "$checksum" ] || fail "checksum for $archive is missing"
-
-if command -v shasum >/dev/null 2>&1; then
-  printf '%s\n' "$checksum" | (cd "$tmp_dir" && shasum -a 256 --check -) || fail "checksum verification failed"
-elif command -v sha256sum >/dev/null 2>&1; then
-  printf '%s\n' "$checksum" | (cd "$tmp_dir" && sha256sum --check -) || fail "checksum verification failed"
+if command -v sha256sum > /dev/null 2>&1; then
+  sha256() { sha256sum "$1" | cut -d ' ' -f 1; }
+elif command -v shasum > /dev/null 2>&1; then
+  sha256() { shasum -a 256 "$1" | cut -d ' ' -f 1; }
 else
-  fail "shasum or sha256sum is required to verify the download"
+  die "need sha256sum or shasum to verify the download"
 fi
 
-tar -xzf "$tmp_dir/$archive" -C "$tmp_dir" wake || fail "could not unpack $archive"
-mkdir -p "$install_dir" || fail "could not create $install_dir"
-install -m 0755 "$tmp_dir/wake" "$install_dir/wake" || fail "could not install wake"
+if [ -n "${WAKE_INSTALL_DIR:-}" ]; then
+  dir="$WAKE_INSTALL_DIR"
+elif [ -n "${HOME:-}" ]; then
+  dir="$HOME/.local/bin"
+else
+  die "HOME is not set; set WAKE_INSTALL_DIR"
+fi
 
-printf '%s\n' "wake $version installed to $install_dir/wake"
+tmp=$(mktemp -d) || die "cannot create a temporary directory"
+trap 'rm -rf "$tmp"' EXIT
+trap 'exit 1' INT TERM
+
+curl -fsSL -o "$tmp/$asset" "$base/$asset" || die "download of $asset failed"
+curl -fsSL -o "$tmp/checksums.txt" "$base/checksums.txt" || die "download of checksums.txt failed"
+
+want=$(awk -v a="$asset" '$2 == a || $2 == "*" a { print $1; exit }' "$tmp/checksums.txt")
+[ -n "$want" ] || die "no checksum listed for $asset"
+got=$(sha256 "$tmp/$asset")
+[ "$want" = "$got" ] || die "checksum mismatch for $asset; nothing installed"
+
+mkdir -p "$dir" || die "cannot create $dir"
+chmod 0755 "$tmp/$asset"
+# Same directory as the target, so the final mv is an atomic rename.
+cp "$tmp/$asset" "$dir/.wake.$$" || die "cannot write to $dir"
+chmod 0755 "$dir/.wake.$$"
+mv -f "$dir/.wake.$$" "$dir/wake" || {
+  rm -f "$dir/.wake.$$"
+  die "cannot install to $dir/wake"
+}
+
+echo "Installed wake to $dir/wake"
 case ":$PATH:" in
-  *":$install_dir:"*) ;;
-  *) printf '%s\n' "add $install_dir to PATH to run wake without its full path" ;;
+  *":$dir:"*) ;;
+  *) echo "Add it to your PATH: export PATH=\"$dir:\$PATH\"" ;;
 esac
+echo "Next: wake install"

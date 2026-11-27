@@ -1,0 +1,3 @@
+{"version": 2, "plugins": {
+ "superpowers@anthropic-plugin-directory": [{"scope": "user", "installPath": "plugins/superpowers", "version": "7.0.2-22f0b463e7a5"}],
+ "other@some-market": [{"scope": "user", "installPath": "plugins/other", "version": "1.0.0"}]}}

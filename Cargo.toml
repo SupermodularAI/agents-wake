@@ -1,0 +1,32 @@
+[package]
+name = "wake"
+version = "1.0.0-dev"
+edition = "2021"
+rust-version = "1.89"
+description = "Hook-driven skill telemetry collector for AI coding agents"
+license = "MIT"
+
+[lib]
+name = "wake"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wake"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+ureq = { version = "2", default-features = false, features = ["tls"] }
+hmac = "0.12"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
+libc = "0.2"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

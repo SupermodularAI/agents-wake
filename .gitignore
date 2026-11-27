@@ -2,10 +2,8 @@
 # Not part of the public repo.
 docs/internal/
 
-# Go
-/dist/
-*.test
-*.out
+# Rust
+/target/
 
 # Agent harness config. Skills are tracked in .agent/skills/ and surfaced
 # through the .claude/skills symlink, which stays local.
@@ -19,3 +17,4 @@ CLAUDE.md
 .DS_Store
 .env
 .env.*
+!tests/fixtures/**/.claude/

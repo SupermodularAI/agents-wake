@@ -4,258 +4,142 @@
 [![Release](https://img.shields.io/github/v/release/SupermodularAI/agents-wake?display_name=tag&sort=semver)](https://github.com/SupermodularAI/agents-wake/releases)
 [![License](https://img.shields.io/github/license/SupermodularAI/agents-wake?cacheSeconds=3600)](LICENSE)
 
-Wake is a local CLI for understanding which agent primitives a developer uses,
-which ones fail, and which ones are never used. It currently reads Claude Code
-and opencode — autodetected, with no per-harness switch — and collects only from
-projects the developer explicitly enables. A harness this machine does not have
-is reported as *not observed*, never as zero.
+Wake is a small binary that Claude Code hooks call to report which skills, subagents, MCP tools and
+commands a developer uses. It sends one OTLP span per use to an endpoint you choose, Langfuse
+included, so a team can see reach, cost, latency and errors per primitive.
 
-![wake report](docs/wake_report.gif)
+It runs inside the hooks. There is no daemon, and it never prints or fails: `wake emit` always exits 0.
+
+## What it sends
+
+Only the fields below, and only values that pass a strict token check (letters, digits and `._:@+_-`).
+A value that fails the check is dropped, not truncated.
+
+| Attribute | Meaning |
+| --- | --- |
+| `wake.harness`, `wake.harness.version` | `claude-code` and its version |
+| `wake.primitive.kind`, `wake.primitive.name` | skill, subagent, mcp_tool or command, and its name |
+| `wake.primitive.version`, `wake.plugin`, `wake.marketplace` | from the plugin that provides it; absent if local |
+| `wake.primitive.context_tokens` | estimated size of the skill or agent file |
+| `wake.invoker`, `wake.outcome` | user, model or nested; ok, error or interrupted |
+| `wake.window.duration_ms`, `.tool_calls`, `.tool_errors`, `.tools` | what happened while the primitive was active |
+| `wake.mcp.*` | per-server call, error and duration totals for MCP tools |
+| `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `.output_tokens`, `.cache_read_input_tokens`, `.cache_creation_input_tokens` | from the transcript's usage; absent when unknown. `input_tokens` is the total input, cached tokens included (OTel semconv; Langfuse subtracts the cache fields). Langfuse prices them |
+| `langfuse.observation.type` | `generation` on spans that carry a model or tokens |
+| `langfuse.observation.level` | `ERROR` when the outcome is error, `WARNING` when interrupted; absent otherwise |
+| `langfuse.version` | the primitive's version, so Langfuse can group by it; absent if local |
+| `langfuse.trace.name` | the repository, same value as `wake.repo` |
+| `gen_ai.operation.name`, `gen_ai.agent.name`, `gen_ai.tool.name` | OTel GenAI names: `invoke_agent` and the agent for subagents, `execute_tool` and the tool for MCP tools |
+| `session.id`, `wake.session.id` | the Claude Code session |
+| `user.id`, and `wake.user.email` or `wake.user.hash` | your email, or a salted HMAC with `identity: anonymous` |
+| `wake.repo` | `host/group/name` of the `origin` remote. Never a local path |
+| `wake.inventory` | on `SessionStart`: the installed skills, agents and plugins as `kind:name@version` |
+
+**It never sends** prompt or response text, tool inputs or outputs, Bash commands, file contents, file
+paths or local repository paths. It does not read the generic `OTEL_EXPORTER_OTLP_*` variables, on
+purpose: other tools use them, and following them would silently redirect wake.
 
 ## Install
 
-Official binaries are available for macOS and Linux on amd64 and arm64:
+### Open-source path (one machine)
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/SupermodularAI/agents-wake/main/install.sh | sh
+wake install
 ```
 
-The installer downloads the latest release, verifies its SHA-256 checksum, and
-installs `wake` in `~/.local/bin` without `sudo`. It prints a PATH reminder when
-needed. Releases also include an SBOM and GitHub build provenance.
+`install.sh` downloads the binary for your platform (macOS or Linux, arm64 or x86_64) from the latest
+release, verifies its SHA-256 against `checksums.txt`, and puts it in `~/.local/bin`. Set
+`WAKE_INSTALL_DIR` to put it elsewhere. It never uses sudo.
 
-To verify the installed binary's provenance with the GitHub CLI:
+`wake install` writes the complete config to `~/.config/wake/config.json` (or
+`$XDG_CONFIG_HOME/wake/config.json` when that is set) with mode 0600, and adds its three hooks
+(`SessionStart`, `Stop`, `SessionEnd`) to `~/.claude/settings.json`. At a terminal it asks for the endpoint,
+public key and secret key; otherwise pass `--endpoint URL`, `--public-key K` and `--secret-key K`, or fill them in
+by hand afterwards (see Configuration). It never overwrites a value you already set, and it refuses to touch a
+`settings.json` that is not plain JSON. Re-run it any time.
+
+### Organisation path (APM)
+
+An organisation copies [`package/`](package/README.md) into its own private repository, adds its
+`telemetry.json` and the release binaries, and developers run:
 
 ```sh
-gh attestation verify ~/.local/bin/wake --repo SupermodularAI/agents-wake
+apm install <package>@<marketplace> --target claude -g
 ```
 
-To build from source, use Go 1.25 or newer:
+Developers on this path configure their machine with the environment variables below only.
+
+## Check it works
 
 ```sh
-git clone https://github.com/SupermodularAI/agents-wake.git
-cd agents-wake
-make install
+wake check
 ```
 
-`make install` builds and installs to `~/.local/bin` — the same place and
-`WAKE_INSTALL_DIR` override the shell installer above uses — and tells you if
-that directory isn't on your `PATH`. `make build` alone only builds
-`dist/wake`; it isn't on `PATH`, so running `wake` from outside the repo
-without `make install` (or `go install ./cmd/wake`, which puts it in
-`$(go env GOPATH)/bin` instead) fails with a plain "command not found".
+Prints where the endpoint, auth and identity came from (never keys, header values or the path), then
+sends one test event. It exits 0 if the event was delivered. A Langfuse setup walk-through is in
+[docs/langfuse-setup.md](docs/langfuse-setup.md).
 
-## Use
+## Configuration
 
-From the root of a project you want Wake to observe:
-
-```sh
-wake init
-wake report
-```
-
-`wake report` prints usage for the primitives you've used, one row per
-primitive, with a PROJECT column naming the project each invocation is
-attributed to — the readable label from your local project map, never the
-path. An invocation is attributed to the project its own working directory
-resolved to, and a linked worktree is attributed to the repository it belongs
-to. So an agent driving work from one project into another checkout has that
-work counted under the driver. That is rare, and the rate is measured rather
-than asserted: on a real Claude Code corpus on 2026-09-08, of the 69 sessions
-that did resolvable file-changing work, 1 (1.4 %) did all of it in another
-project and 11 (15.9 %) touched more than one. The column is a partial answer,
-not a wrong one. The unused list has no such column: a repository is a
-property of an invocation, and an unused primitive has none. Add `--unused`
-to see primitives that are available but never invoked, or both flags
-together for the full picture. A bare `--unused` swaps the OVERVIEW too —
-invocation counts and outcomes describe activity, so the overview above an
-unused list is instead a count of unused primitives by kind. In a terminal
-the tables are lime-bordered and colored; piped or redirected — a script,
-another program, an agent reading the output — it's plain ASCII text instead,
-so nothing downstream ever has to parse around a color code.
-
-`wake init` explains what it will change before doing so. It consents the
-current project and installs Wake-owned Claude Code session hooks, and
-collection starts from that moment. Existing hooks are preserved.
-
-One consent covers every harness Wake reads: the project you consent is the
-project it collects from, in Claude Code and in opencode alike, and nothing else
-has to be enabled. The hooks are Claude Code's own because that is the harness
-that offers them; opencode is read whenever a scan runs, which those same hooks
-also trigger on a machine that runs both.
-
-On a terminal, `init`, `ingest`, `remove`, `uninstall`, `report` and `serve`
-all show a lime spinner while their real work runs — importing history,
-rebuilding the event store, refreshing the primitive inventory, removing the
-integration — and confirm with a lime checkmark. Piped or redirected, every
-one of them is the same plain, deterministic text instead.
-
-Existing history is not imported by default, and nothing imports it later on
-its own: the session hooks collect only what happens after `wake init`. When
-you want the history, ask for it — `wake init --full` imports this project's
-existing agent history in the same call, and `wake ingest` does it afterwards
-for a project that is already consented.
-
-If you'd rather consent a whole tree once than run `wake init` in every
-project, `wake init -g ~/Developer` consents everything under a directory;
-`wake init -g` on its own means your home directory. Each repository under the
-boundary is registered under **its own** identity the first time a scan sees a
-session in it — including repositories you create later — so `report` and
-`serve` keep their per-project breakdown rather than folding the tree into one.
-Each one starts collecting from the moment it is registered, the same
-forward-only default a plain `wake init` gives, and `wake init -g --full`
-imports the existing history under the boundary in the same call. `wake doctor`
-says whether a boundary is set, and counts the consented repositories it
-encloses — including any you consented with a plain `wake init` before the
-boundary existed, so the number is what is under the boundary rather than what
-the boundary found.
-
-Git worktrees are their own projects to Wake: run `wake init` inside a worktree
-the way you would in any checkout. It gets its own identity, and it records which
-repository it belongs to, so `wake report` and the dashboard count its activity
-under that repository instead of showing it as a separate one. If the parent
-checkout has not been consented, the worktree simply stands on its own; nothing is
-attributed to a project you never consented.
-
-Open the local dashboard when you want a browser view:
-
-```sh
-wake serve
-```
-
-Wake listens only on [127.0.0.1:8080](http://127.0.0.1:8080). The hooks keep
-collection current; use these commands when needed:
-
-```sh
-wake init --full         # Consent and import existing history now
-wake init -g ~/Developer # Consent every project under a directory
-wake ingest              # Re-scan consented history
-wake ingest --rebuild    # Rebuild the derived event store
-wake doctor              # Inspect collection and hook health
-wake update              # Install the newest release, verifying its checksum
-wake update --check      # Report whether a newer release exists; download nothing
-wake remove              # Remove the Claude Code integration; keep local data
-wake remove --purge      # ...and delete collected data; asks first; ~/.config/wake is kept
-wake uninstall           # Remove everything, including ~/.config/wake and the binary; asks first
-```
-
-| Command | Purpose |
+| Variable | Effect |
 | --- | --- |
-| `wake report` | Print local activity in the terminal: the primitives you've used. |
-| `wake report --unused` | ...swap in the primitives available but never invoked. |
-| `wake report --usage --unused` | ...both sections. |
-| `wake serve` | Open the local dashboard. |
-| `wake init` | Enable collection for the current project. |
-| `wake init --full` | Enable collection and import existing history now. |
-| `wake init --global [path]` | Consent every project under a directory (your home directory when no path is given), registering each repository under its own identity as sessions run in it, and linked worktrees of those repositories wherever on disk they live. Records the boundary; consents no root of its own. |
-| `wake init --global --full` | ...and import the existing agent history under that boundary in the same call. |
-| `wake ingest` | Import activity for consented projects. |
-| `wake doctor` | Show collection and hook health. |
-| `wake remove` | Remove Wake-owned Claude Code hooks. `--purge` also deletes collected data; `~/.config/wake` is kept either way, so a later `wake init` keeps the same repository identity. `--purge` prints the paths it will delete and asks before deleting; run unattended it refuses and deletes nothing unless `--yes` is passed. Plain `wake remove` is not gated. |
-| `wake uninstall` | Irreversible. Removes the integration, all collected data, `~/.config/wake` (configuration and the identity salt) and the binary itself — plus the symlink you invoked it through, if the `wake` on your PATH is a link. It prints every path before deleting anything, and removes nothing at all if it cannot take its hook entry out of `settings.json` first. It asks for confirmation after printing them, and when standard input is not a terminal it refuses with a non-zero exit rather than deleting, unless `--yes` was given. To keep your configuration and identity salt, use `wake remove --purge` instead. |
-| `wake update` | Download the newest release, verify its SHA-256 against the published `checksums.txt`, and replace this binary in place. Refuses and changes nothing if the checksum does not match. |
-| `wake update --check` | Report whether a newer release exists and stop there — it downloads nothing. On a build with no release tag it says so rather than guessing. |
-| `wake remote` | Configure and control delivery to a remote endpoint — see [Remote Delivery](#remote-delivery) below. |
+| `WAKE_OTLP_ENDPOINT` | OTLP/HTTP traces URL. Must be `https://`, or `http://` for localhost |
+| `WAKE_PUBLIC_KEY`, `WAKE_SECRET_KEY` | Key pair; wake sends `Authorization: Basic base64(public_key:secret_key)` |
+| `WAKE_OTLP_HEADERS` | Other headers as `k=v,k2=v2` (values may be percent-encoded) |
+| `WAKE_IDENTITY` | `email` (default) or `anonymous` |
+| `WAKE_DISABLED` | `1` or `true`: send nothing |
 
-## Privacy And Enterprise Use
+`wake install` writes this file, and you only fill in the endpoint and the two keys:
 
-Wake is designed for enterprise environments where agent transcripts may
-contain source code, credentials, or customer data. It is not a compliance
-certification; organizations should still apply their own security and policy
-review. Its default design keeps the sensitive path local:
-
-- Collection requires explicit, per-project consent. A fresh install collects
-  nothing, and consent starts collection from the moment it is given: importing
-  a project's existing history is a separate, explicit request.
-- Wake reads each harness's own storage to derive measurements — Claude Code's
-  transcripts and opencode's local database, the latter read-only and never
-  written to — but it never persists prompts, tool arguments, tool output,
-  code, repository paths, or repository labels in its event records.
-- Records are structurally limited to identifiers, hashes, timestamps, enums,
-  and counters. Invalid or path-shaped values are dropped rather than stored.
-- Repository identity is a salted, per-machine HMAC. The readable project map
-  stays local with restrictive permissions; its labels are what `wake report`
-  and the dashboard show in their PROJECT column. When you turn remote delivery
-  on, a payload carries that hash and the repository's readable label; the
-  repository path never leaves the machine.
-- Every binary ships the remote-delivery capability and it is off until you run
-  `wake remote set [url]` and `wake remote on`. Until you do, no endpoint is
-  configured, nothing is sent, and `wake remote status` and `wake doctor` both
-  say so. The dashboard is bound to loopback only.
-- `wake update` and `wake update --check` are the only commands that reach the
-  network without being asked to deliver, and only when you run them: nothing
-  checks for updates in the background, and both shell out to `curl` rather than
-  linking a network client.
-- `wake doctor` reports safe counters, never transcript content or repository
-  paths, so its output is suitable for sharing in support requests.
-
-This means security teams can inspect a small local data boundary: the source
-transcript stays with its harness, Wake stores only derived metadata, and no
-network destination is configured by default.
-
-## Remote Delivery
-
-Wake can deliver its derived records to an OTLP/HTTP JSON-compatible
-collector, such as [Langfuse](https://cloud.langfuse.com). The capability
-ships in every build and stays off until you configure it:
-
-```sh
-wake remote set                                                        # at a terminal: prompts for the URL and both keys
-wake remote set https://cloud.langfuse.com/api/public/otel/v1/traces   # scripted: credential on stdin as public:secret
-wake remote on
-wake remote flush
-wake remote status
+```json
+{
+  "endpoint": "https://<langfuse host>/api/public/otel/v1/traces",
+  "public_key": "pk-lf-...",
+  "secret_key": "sk-lf-...",
+  "headers": {},
+  "identity": "email",
+  "identity_salt": "",
+  "allow_override": true
+}
 ```
 
-The endpoint must be an `https://` URL, unless its host is a loopback address
-(`localhost`, `127.0.0.0/8`, `::1`) — a self-hosted collector on your own machine
-may be plain `http://`. Anything else is refused, because the credential travels
-in the `Authorization` header and `http://` to another host puts it on the
-network in the clear. Loopback is judged from the host as written; no name is
-resolved.
+Wake builds the Basic auth header from the two keys. `headers` is for other backends, and an `Authorization`
+header set there wins over the keys. Empty strings count as unset.
 
-| Command | Purpose |
-| --- | --- |
-| `wake remote set [url]` | Configure the delivery endpoint. At a terminal it prompts for the URL if you did not pass one, shows the destination's bare host and asks you to confirm it, then asks for the public key (shown) and the secret key (not shown). Piped or in CI it is unchanged: the URL is an argument and the joined `public:secret` credential is read whole from standard input, never as an argument. Neither path ever echoes the secret key or the joined credential, and neither ever prints the full URL. The URL must be `https://`, or `http://` to a loopback host. |
-| `wake remote on` | Start delivering records to the configured endpoint. |
-| `wake remote off` | Stop delivering; the endpoint is kept, so nothing needs re-entering to resume. |
-| `wake remote flush` | Deliver everything pending now. Add `--dry-run` to print the exact payload the next flush would send, without sending it. |
-| `wake remote status` | Report the endpoint's bare host, whether a credential and delivery are configured, the last flush time, and what's pending. This is the one command allowed to name the endpoint; `doctor` and everything else report presence only. |
+Resolution order, per setting: these variables, then `telemetry.json` next to the binary, then
+`~/.config/wake/config.json` (`$XDG_CONFIG_HOME/wake/config.json` when `XDG_CONFIG_HOME` is set). A
+config file with `"allow_override": false` ignores every variable except `WAKE_DISABLED`, which is always
+honoured.
 
-What travels is one span per record: a trace per session, each invocation
-parented onto its session, named after the repository so the receiver can group
-by it. Spans carry structure, timing, model, tokens and outcome — never prompt
-or completion text. Built-in tool calls are counted locally but not sent as
-spans of their own. Nothing OTLP-shaped is persisted: the payload is computed
-from the local event store at flush time, held for one POST, then discarded,
-and every id is derived from `event_id`, so a retried flush deduplicates at the
-receiver rather than double-counting.
+Anonymous mode needs an `identity_salt`, an organisation secret set in the config file (there is no
+variable for it): `{"identity": "anonymous", "identity_salt": "<org secret>"}`. `wake.user.hash` is
+HMAC-SHA256 of your email with that salt. Without a salt, anonymous mode sends no user at all rather than
+an unsalted hash. `wake install` keeps an `identity_salt` you put in its config file.
 
-A `wake ingest` scan triggers a detached flush automatically once delivery is
-on, throttled by `remote.min_interval` (15 minutes by default, provisional) —
-run `wake remote flush` directly whenever you want one immediately.
-`WAKE_REMOTE_AUTHORIZATION` overrides the stored credential when set, useful
-for CI or anyone who prefers no secret on disk at all.
+If a send fails, the event is queued in `$XDG_STATE_HOME/wake` (default `~/.local/state/wake`) and retried by
+the next `wake emit`. The queue holds at most 1,000 events or 7 days.
 
-## Local State
+### Turning it off
 
-Wake stores configuration under `~/.config/wake` and derived state under
-`~/.local/state/wake`. Set `WAKE_DIR` to move the state directory. Removing the
-derived event store is safe: `wake ingest --rebuild` recreates it from consented
-history.
+`WAKE_DISABLED=1` works at four levels:
 
-The collection boundary `wake init --global` records lives in the project table
-under the state directory, beside the repository identities, and never in
-`config.toml` — there is no configuration key for it, so it cannot be widened by
-editing a settings file.
+- **One command:** `WAKE_DISABLED=1 claude`
+- **Every session:** `export WAKE_DISABLED=1` in your shell profile
+- **One user, any shell:** in the `env` block of `~/.claude/settings.json`: `{"env": {"WAKE_DISABLED": "1"}}`
+- **One repository** (client work, for example): the same `env` block in that repository's
+  `.claude/settings.local.json`, which Claude Code passes to the hooks of sessions started there
 
-## Development
+## Uninstall
 
 ```sh
-make validate
-make test-race
+wake uninstall            # removes wake's hooks from ~/.claude/settings.json
+wake uninstall --purge    # also removes ~/.config/wake and the state directory
 ```
 
-## License
+The binary stays where it is; delete it yourself. Hooks installed by APM are not touched by
+`wake uninstall`; remove them with `apm uninstall -g <package>`.
 
-[MIT](LICENSE)
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY.md). MIT licensed.
